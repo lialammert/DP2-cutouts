@@ -1,0 +1,26 @@
+# .gitignore
+# Anna Preto
+# AstroDeep Project
+# Le dépôt ne contient que du code : aucune donnée, aucun jeton.
+
+# données et produits
+data/
+*.parquet
+*.fits
+*.fits.gz
+*.npz
+*.pkl
+copaings_runs/
+
+# jetons et secrets
+.rsp_token
+*token*
+.env
+
+# python
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/

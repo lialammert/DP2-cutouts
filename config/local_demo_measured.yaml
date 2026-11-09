@@ -1,0 +1,73 @@
+# local_demo_measured.yaml
+# Anna Preto
+# AstroDeep Project
+# Variante de local_demo.yaml avec la convention d'angle Euclid mesurée sur les paires (theta = PA + 90), pour
+# chiffrer l'effet de la convention de copaings sur S_b et sur le jeu fini.
+
+name: local_demo_measured
+data_root: ~/data/res/demo_measured
+sky_box: [53.00, 53.30, -27.95, -27.70]   # [ra_min, ra_max, dec_min, dec_max] en degrés
+
+rubin:
+  tap_url: https://data.lsst.cloud/api/tap
+  token_file: ~/.rsp_token
+  table: dp2.Object
+  tracts: [5063]
+  margin_deg: 0.01   # marge de lecture TAP ; la boîte exacte est appliquée ensuite
+
+euclid:
+  hats_url: hf://datasets/hugging-science/mmu_euclid_q1/euclid
+  margin_deg: 0.01   # marge de lecture autour de la boîte ; copaings recoupe exactement ensuite
+  # Convention d'angle des ellipses Euclid : « copaings » (theta = -PA, celle du code de copaings, qui reproduit la
+  # référence) ou « measured » (theta = PA + 90, celle que donnent les paires appariées). Voir euclid_hf.py.
+  pa_convention: measured
+
+# Pixels : une seule région carrée dans un seul patch, découpée par SODA dans les six bandes.
+pixels:
+  tract: 5063
+  patch: 34
+  size_px: 1000      # côté de la région, en pixels de 0,2 seconde d'arc
+  center: null       # null = centre du patch
+
+copaings:
+  friendly_path: ~/src/friendly
+  linking_length: 3.0
+  mag_cut: 35
+  euclid_region: auto
+  eot_dense_max: 0
+  n_eot_tasks: 4
+  n_sb_tasks: 4
+
+# Seuils des coupures et du masquage (les grandeurs continues sont toujours enregistrées à côté).
+cuts:
+  margin_px: 29            # coupure 3 : marge entière des quatre côtés, dans le patch
+  stamp_px: 59             # vignette 2 x 29 + 1
+  diag_px: 117             # vignette de diagnostic de la coupure 8, 2 x 58 + 1
+  bad_planes: [SATURATED, COSMIC_RAY, INTERPOLATED, DETECTION_EDGE]   # coupure 5 : pixels abîmés
+  k_ellipse: 3.0           # coupure 5 : rayon réduit minimal d'un pixel abîmé, en unités de l'ellipse
+  snr_min: 5.0             # coupure 6
+  aperture_radii: [29, 58] # coupure 8 : ouvertures circulaires, en pixels
+  delta_e_max: 0.02        # coupure 8 et décision au masquage
+  shape_band: i
+  sky_tries: 5000          # essais de fenêtre de ciel vide par vignette
+  seed: 12345
+
+# Masquage des compagnes : voir local_demo.yaml.
+masking:
+  method: footprint
+  grow_px: 2
+  shared_k: 2.0
+
+# Empaquetage : coupures appliquées au jeu final et plans comptés dans le masque booléen de MMU.
+package:
+  apply: [cut1, cut2, in_region, cut3, cut4, cut5, cut6, cut7, cut8, mask]
+  mmu_mask_planes: [NO_DATA, SATURATED, COSMIC_RAY, INTERPOLATED, DETECTION_EDGE]
+  max_rows_per_file: 500
+
+# Valeurs du notebook copaings_demo.ipynb (butler, même boîte), pour contrôle.
+reference:
+  n_raw: {LSST: 14045, Euclid: 23932}
+  n_after_cut: {LSST: 14044, Euclid: 23464}
+  fof_groups_Euclid: 10451
+  eot_groups_Euclid: 12531
+  sb_merge_Euclid: {n_one_to_one_zero: 10936, n_no_overlap_minus1: 1279, n_computed: 1829}

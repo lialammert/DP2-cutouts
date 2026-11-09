@@ -1,0 +1,29 @@
+# pyproject.toml
+# Anna Preto
+# AstroDeep Project
+# Paquet Python de la chaîne de fabrication du jeu de vignettes Rubin DP2 x Euclid Q1.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rubin-euclid-stamps"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy", "pandas<3", "pyarrow", "scipy", "astropy", "healpy", "pyyaml",
+    "requests", "pyvo", "lsdb", "huggingface_hub",
+    "copaings @ git+https://github.com/LSSTDESC/copaings",
+    "FoFCatalogMatching",
+]
+
+[project.optional-dependencies]
+notebook = ["jupyterlab", "matplotlib"]
+test = ["pytest"]
+
+[project.scripts]
+res = "res.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
