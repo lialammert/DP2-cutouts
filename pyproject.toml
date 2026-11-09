@@ -12,14 +12,14 @@ name = "dp2-cutouts"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy", "pandas<3", "pyarrow", "scipy", "astropy", "healpy", "pyyaml",
+    "numpy", "pandas<3", "pyarrow", "scipy", "astropy", "healpy", "galsim", "pyyaml",
     "requests", "pyvo", "lsdb", "huggingface_hub",
     "copaings @ git+https://github.com/LSSTDESC/copaings",
     "FoFCatalogMatching",
 ]
 
 [project.optional-dependencies]
-notebook = ["jupyterlab", "matplotlib"]
+notebook = ["jupyterlab", "ipykernel", "matplotlib"]
 test = ["pytest"]
 
 [project.scripts]

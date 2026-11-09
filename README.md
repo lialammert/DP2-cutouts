@@ -11,20 +11,28 @@ Code that builds a dataset of isolated-galaxy stamps: Rubin DP2 pixels (six band
 0.2 arcsec), Euclid Q1 catalogue (isolation, classification, redshift). The specification is
 [dataset-recipe-short.md](dataset-recipe-short.md). The repository never contains data.
 
-## Installation (Linux or WSL)
+## Installation (macOS, Linux or WSL)
+
+Python 3.10 or later. From the repository root:
 
 ```bash
 python3 -m venv ~/venvs/dp2-cutouts
-git clone https://github.com/LSSTDESC/copaings ~/src/copaings
-git clone https://github.com/LSSTDESC/friendly ~/src/friendly
-~/venvs/dp2-cutouts/bin/pip install -e ~/src/copaings
-~/venvs/dp2-cutouts/bin/pip install -e ".[notebook,test]"
+source ~/venvs/dp2-cutouts/bin/activate
+pip install -e ".[notebook,test]"
+pip install --no-deps "friendly @ git+https://github.com/LSSTDESC/friendly"
+python -m ipykernel install --user --name dp2-cutouts --display-name "Python (dp2-cutouts)"
+pytest tests
 ```
 
-`friendly` is not installed with pip (its `pyproject` pins numpy < 2): it is loaded through `FRIENDLY_PATH`,
-given in the configuration (`copaings.friendly_path`). `healpy` does not install on native Windows.
+- `copaings` is installed from GitHub as a dependency.
+- `friendly` is installed with `--no-deps` because its `pyproject` pins numpy < 2, which the rest does not need.
+  Alternatively, clone it and point `FRIENDLY_PATH` (or `copaings.friendly_path` in the configuration) to it.
+- On macOS, if `python3 --version` is older than 3.10, install a recent Python (python.org or Homebrew).
+- `healpy` does not install on native Windows: use WSL.
+- In Jupyter, choose the "Python (dp2-cutouts)" kernel.
 
 Rubin platform token in `~/.rsp_token`, permissions 600, with the `read:tap` and `read:image` scopes.
+The notebooks read the products of the pipeline: run `dp2-cutouts config/local_demo.yaml all` first.
 
 ## Running
 
