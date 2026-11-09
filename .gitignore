@@ -1,9 +1,9 @@
 # .gitignore
 # Anna Preto
 # AstroDeep Project
-# Le dépôt ne contient que du code : aucune donnée, aucun jeton.
+# The repository holds code only: no data, no token.
 
-# données et produits
+# data and products
 data/
 *.parquet
 *.fits
@@ -12,7 +12,7 @@ data/
 *.pkl
 copaings_runs/
 
-# jetons et secrets
+# tokens and secrets
 .rsp_token
 *token*
 .env

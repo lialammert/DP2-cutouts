@@ -1,7 +1,7 @@
 # config.py
 # Anna Preto
 # AstroDeep Project
-# Lecture d'un fichier de configuration YAML et disposition des dossiers de données d'un cas.
+# Reads a YAML configuration file and lays out the data folders of a case.
 
 import os
 from dataclasses import dataclass
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-# Sous-dossiers de data_root, un par étape de la chaîne.
+# Subfolders of data_root, one per pipeline step.
 EUCLID_DIR = "00_euclid"
 RUBIN_DIR = "10_rubin"
 COPAINGS_DIR = "20_copaings"
@@ -42,7 +42,7 @@ class Config:
         return Path(os.path.expanduser(self.raw["data_root"]))
 
     def data(self, *parts, makedirs=True):
-        # Chemin sous data_root ; crée le dossier parent au besoin.
+        # Path under data_root; creates the parent folder if needed.
         p = self.data_root.joinpath(*parts)
         if makedirs:
             p.parent.mkdir(parents=True, exist_ok=True)

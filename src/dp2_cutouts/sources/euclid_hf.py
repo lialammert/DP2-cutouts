@@ -1,9 +1,9 @@
 # euclid_hf.py
 # Anna Preto
 # AstroDeep Project
-# Lecture du catalogue Euclid Q1 (MER) depuis le dépôt HuggingFace de MultimodalUniverse, format HATS, dans une
-# boîte du ciel et sans la colonne image. Écriture des tuiles FITS au format attendu par copaings
-# (euclid_q1_mer_final_<healpix>.fits, nside 64, NESTED, noms de colonnes du catalogue MER).
+# Reads the Euclid Q1 catalogue (MER) from the MultimodalUniverse HuggingFace repository, HATS format, within a
+# sky box and without the image column. Writes FITS tiles in the format expected by copaings
+# (euclid_q1_mer_final_<healpix>.fits, nside 64, NESTED, MER catalogue column names).
 
 import os
 
@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from astropy.table import Table
 
-# Colonne MMU -> nom MER lu par copaings (catalogs.build_euclid).
+# MMU column -> MER name read by copaings (catalogs.build_euclid).
 COPAINGS_COLUMNS = {
     "mer_catalogue_right_ascension": "RIGHT_ASCENSION",
     "mer_catalogue_declination": "DECLINATION",
@@ -28,15 +28,14 @@ COPAINGS_COLUMNS = {
     "object_id": "OBJECT_ID",
 }
 
-# Colonnes de la coupure 1 (ni ponctuel ni artefact), gardées en grandeurs continues à côté des drapeaux.
+# Cut 1 columns (neither point-like nor spurious), kept as continuous quantities next to the flags.
 CUT1_COLUMNS = [
     "mer_catalogue_point_like_flag", "mer_catalogue_point_like_prob",
     "mer_catalogue_spurious_flag", "mer_catalogue_spurious_prob",
     "mer_catalogue_det_quality_flag", "mer_catalogue_extended_prob", "mer_catalogue_vis_det",
 ]
 
-# Redshift photométrique : densité de probabilité, médiane, intervalles et drapeau de qualité (enregistrés, jamais
-# coupés).
+# Photometric redshift: probability density, median, intervals and quality flag (recorded, never cut on).
 PHZ_COLUMNS = [
     "phz_photo_z_phz_pdf", "phz_photo_z_phz_median",
     "phz_photo_z_phz_70_int", "phz_photo_z_phz_90_int", "phz_photo_z_phz_95_int",
@@ -45,17 +44,17 @@ PHZ_COLUMNS = [
 
 COPAINGS_NSIDE = 64
 
-# Convention d'angle des ellipses Euclid. copaings calcule theta = 270 - (PA + 90) = -PA dans le repère des pixels
-# Rubin, alors que les paires appariées donnent theta = PA + 90 (écart médian 1,5 degré sur 385 paires allongées,
-# contre 46 degrés pour -PA). « measured » écrit PA' = 90 - PA dans les tuiles, pour que la formule de copaings rende
-# theta = PA + 90 sans modifier copaings.
+# Angle convention of the Euclid ellipses. copaings computes theta = 270 - (PA + 90) = -PA in the Rubin pixel
+# frame, whereas matched pairs give theta = PA + 90 (median offset 1.5 degrees over 385 elongated pairs, against
+# 46 degrees for -PA). "measured" writes PA' = 90 - PA in the tiles, so that the copaings formula returns
+# theta = PA + 90 without modifying copaings.
 PA_CONVENTIONS = ("copaings", "measured")
 
 
 def tiles_dir(cfg):
     conv = cfg["euclid"].get("pa_convention", "copaings")
     if conv not in PA_CONVENTIONS:
-        raise ValueError(f"pa_convention doit valoir {PA_CONVENTIONS}")
+        raise ValueError(f"pa_convention must be one of {PA_CONVENTIONS}")
     return cfg.data("00_euclid", f"copaings_tiles_{conv}", "x").parent
 
 
@@ -66,12 +65,12 @@ def fetch_box(cfg):
     columns = list(dict.fromkeys(["ra", "dec"] + list(COPAINGS_COLUMNS) + CUT1_COLUMNS + PHZ_COLUMNS))
     cat = lsdb.open_catalog(ec["hats_url"], columns=columns)
     df = cat.box_search(ra=(ra0 - m, ra1 + m), dec=(dec0 - m, dec1 + m)).compute()
-    # lsdb rend un NestedFrame ; on revient à un DataFrame pandas ordinaire.
+    # lsdb returns a NestedFrame; convert back to a plain pandas DataFrame.
     return numpy_backed(pd.DataFrame(df).reset_index(drop=True))
 
 
 def numpy_backed(df):
-    # Colonnes pyarrow -> types numpy : flottants avec NaN, entiers nullables, listes en tableaux numpy.
+    # pyarrow columns -> numpy types: floats with NaN, nullable integers, lists as numpy arrays.
     out = pd.DataFrame(index=df.index)
     for c in df.columns:
         s = df[c]
@@ -98,14 +97,14 @@ def read_box(cfg):
 
 
 def write_copaings_tiles(df, out_dir, pa_convention="copaings"):
-    # Une tuile FITS par pixel HEALPix nside 64 NESTED, comme les fichiers MER que copaings lit.
+    # One FITS tile per HEALPix pixel at nside 64 NESTED, like the MER files that copaings reads.
     os.makedirs(out_dir, exist_ok=True)
     pix = hp.ang2pix(COPAINGS_NSIDE, df["mer_catalogue_right_ascension"].values,
                      df["mer_catalogue_declination"].values, nest=True, lonlat=True)
     written = []
     for p in np.unique(pix):
         sub = df[pix == p]
-        # Colonnes pyarrow avec valeurs manquantes : flottants avec NaN pour FITS, identifiant en entier 64 bits.
+        # pyarrow columns with missing values: floats with NaN for FITS, identifier as a 64-bit integer.
         cols = {new: sub[old].to_numpy(dtype=float, na_value=np.nan)
                 for old, new in COPAINGS_COLUMNS.items() if old != "object_id"}
         cols["OBJECT_ID"] = sub["object_id"].astype("int64").to_numpy()
@@ -127,5 +126,5 @@ def run(cfg, refetch=True):
         df = read_box(cfg)
     conv = cfg["euclid"].get("pa_convention", "copaings")
     tiles = write_copaings_tiles(df, tiles_dir(cfg), conv)
-    print(f"Euclid : {len(df):,} objets -> {out} ; tuiles copaings ({conv}) {tiles}")
+    print(f"Euclid: {len(df):,} objects -> {out}; copaings tiles ({conv}) {tiles}")
     return df

@@ -1,10 +1,10 @@
 # catalog_table.py
 # Anna Preto
 # AstroDeep Project
-# Table du catalogue, une ligne par objet Rubin de copaings (galaxies au sens de Rubin, magnitude <= mag_cut), sans
-# aucune ligne retirée : chaque coupure catalogue écrit sa grandeur continue et sa condition. Joint la contrepartie
-# Euclid des groupes un à un, les colonnes de la coupure 1 et du redshift, la tache dans les six bandes, l'ellipse
-# unique et le facteur de résolution.
+# Catalogue table, one row per copaings Rubin object (galaxies in the Rubin sense, magnitude <= mag_cut), with no
+# row removed: each catalogue cut writes its continuous quantity and its condition. Joins the Euclid counterpart of
+# one-to-one groups, the cut 1 and redshift columns, the PSF in all six bands, the single ellipse and the
+# resolution factor.
 
 import pickle
 
@@ -16,7 +16,7 @@ from ..common.ellipse import LSST_PIXEL_SCALE, moments_to_ellipse
 from ..sources import euclid_hf
 from ..sources.rubin_tap import BANDS
 
-PARTITION_ORDER = 5  # partitions HEALPix NESTED d'ordre 5 (nside 32), comme les dossiers Norder de HATS
+PARTITION_ORDER = 5  # HEALPix NESTED partitions of order 5 (nside 32), like the HATS Norder folders
 
 
 def copaings_dir(cfg):
@@ -24,7 +24,7 @@ def copaings_dir(cfg):
 
 
 def one_to_one(groups):
-    # Groupes un à un après le test de recouvrement : rang Rubin -> rang Euclid dans les tables de copaings.
+    # One-to-one groups after the overlap test: Rubin row -> Euclid row in the copaings tables.
     pairs = [(g[1][0], g[0][0]) for g in groups if len(g[0]) == 1 and len(g[1]) == 1]
     return dict(pairs)
 
@@ -34,13 +34,13 @@ def euclid_counterparts(cfg, cdir, lsst):
     pair = one_to_one(groups)
     e_cop = pd.read_parquet(cdir / "catalogs" / "euclid.parquet")
     e_box = euclid_hf.read_box(cfg)
-    # copaings ne garde pas l'identifiant Euclid : on le retrouve par la position exacte (mêmes flottants).
+    # copaings does not keep the Euclid identifier: it is recovered from the exact position (same floats).
     key = ["mer_catalogue_right_ascension", "mer_catalogue_declination"]
     e_box = e_box.drop_duplicates(subset=key)
     e_cop = e_cop.reset_index().rename(columns={"index": "euclid_row"})
     e = e_cop.merge(e_box, left_on=["ra", "dec"], right_on=key, how="left", suffixes=("", "_mmu"))
     if e["object_id"].isna().any():
-        raise RuntimeError("objets Euclid de copaings sans identifiant MMU")
+        raise RuntimeError("copaings Euclid objects without an MMU identifier")
     e = e.set_index("euclid_row")
 
     out = pd.DataFrame(index=lsst.index)
@@ -77,7 +77,7 @@ def euclid_counterparts(cfg, cdir, lsst):
 
 
 def psf_columns(raw):
-    # Taille (sigma, seconde d'arc) et ellipticité (distorsion) de la tache, par bande, depuis les moments TAP.
+    # PSF size (sigma, arcsec) and ellipticity (distortion), per band, from the TAP moments.
     out = pd.DataFrame(index=raw.index)
     for b in BANDS:
         ixx, iyy, ixy = raw[f"{b}_ixxPSF"], raw[f"{b}_iyyPSF"], raw[f"{b}_ixyPSF"]
@@ -106,7 +106,7 @@ def build(cfg):
     t["i_ixx"], t["i_iyy"], t["i_ixy"] = lsst["Ixx_pixel_i"], lsst["Iyy_pixel_i"], lsst["Ixy_pixel_i"]
     t["e1_moments"], t["e2_moments"] = lsst["e1"], lsst["e2"]
 
-    # Ellipse unique (demi-lumière, pixels du tract) et facteur de résolution galaxie / tache en bande i.
+    # Single ellipse (half light, tract pixels) and galaxy / PSF resolution factor in the i band.
     a, b_, th = moments_to_ellipse(t["i_ixx"], t["i_iyy"], t["i_ixy"])
     t["ellipse_a"], t["ellipse_b"], t["ellipse_theta"] = a, b_, th
     r = raw.loc[t["object_id"].values]
@@ -116,23 +116,23 @@ def build(cfg):
     t_psf = r["i_ixxPSF"].values + r["i_iyyPSF"].values
     t["resolution_i"] = 1.0 - t_psf / (t["i_ixx"].values + t["i_iyy"].values)
 
-    # Blending entropy de copaings, gardée en valeur.
+    # copaings blending entropy, kept as a value.
     t["sb_euclid"] = lsst["blending_entropy_Euclid"]
     t["purity_euclid"] = lsst["purity_Euclid"]
 
     t = pd.concat([t, euclid_counterparts(cfg, cdir, lsst)], axis=1)
 
-    # Coupure 1 : la contrepartie Euclid n'est ni ponctuelle ni un artefact (valeur manquante = drapeau non levé).
-    # Sans contrepartie unique, la coupure n'est pas évaluable et ne retire rien : c'est la coupure 2 qui l'écarte.
+    # Cut 1: the Euclid counterpart is neither point-like nor spurious (missing value = flag not set).
+    # Without a unique counterpart the cut cannot be evaluated and removes nothing: cut 2 rejects the object.
     point = t["euclid_point_like_flag"].fillna(0).astype(int) == 1
     spurious = t["euclid_spurious_flag"].fillna(0).astype(int) == 1
     t["cut1_pass"] = ~(t["has_euclid_counterpart"] & (point | spurious))
-    # Coupure 2 : appariés un à un après le test de recouvrement. S_b = 0 ne suffit pas : sur la boîte de démo,
-    # 418 objets ont S_b = 0 dans des groupes qui ne sont pas un à un (galaxies découpées 1 Euclid / 2 Rubin,
-    # mélanges 2 Euclid / 1 Rubin...). On exige les deux, et on garde les deux grandeurs.
+    # Cut 2: matched one-to-one after the overlap test. S_b = 0 is not enough: on the demo box, 418 objects have
+    # S_b = 0 in groups that are not one-to-one (galaxies split 1 Euclid / 2 Rubin, blends 2 Euclid / 1 Rubin...).
+    # Both are required, and both quantities are kept.
     t["cut2_value"] = t["sb_euclid"]
     t["cut2_pass"] = (t["sb_euclid"] == 0) & t["has_euclid_counterpart"]
-    # Coupure 6 : rapport signal sur bruit en bande i.
+    # Cut 6: signal-to-noise ratio in the i band.
     with np.errstate(divide="ignore", invalid="ignore"):
         t["cut6_value"] = t["i_cModelFlux"] / t["i_cModelFluxErr"]
     t["cut6_pass"] = t["cut6_value"] > float(cfg["cuts"]["snr_min"])
@@ -144,7 +144,7 @@ def run(cfg):
     out = cfg.data("30_processed", "catalog.parquet")
     t.to_parquet(out, index=False)
     n = len(t)
-    print(f"catalogue : {n:,} objets ; contrepartie Euclid un à un {t['has_euclid_counterpart'].sum():,} ; "
-          f"coupure 1 {t['cut1_pass'].sum():,} ; coupure 2 {t['cut2_pass'].sum():,} ; "
-          f"1 et 2 {(t['cut1_pass'] & t['cut2_pass']).sum():,} ; coupure 6 {t['cut6_pass'].sum():,} -> {out}")
+    print(f"catalogue: {n:,} objects; one-to-one Euclid counterpart {t['has_euclid_counterpart'].sum():,}; "
+          f"cut 1 {t['cut1_pass'].sum():,}; cut 2 {t['cut2_pass'].sum():,}; "
+          f"1 and 2 {(t['cut1_pass'] & t['cut2_pass']).sum():,}; cut 6 {t['cut6_pass'].sum():,} -> {out}")
     return t

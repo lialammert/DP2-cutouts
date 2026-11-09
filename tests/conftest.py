@@ -1,8 +1,8 @@
 # conftest.py
 # Anna Preto
 # AstroDeep Project
-# friendly n'est pas installé avec pip (son pyproject impose numpy < 2) : copaings.deps l'ajoute au chemin
-# d'import à partir de FRIENDLY_PATH, avant tout test.
+# friendly is not installed with pip (its pyproject pins numpy < 2): copaings.deps adds it to the import path
+# from FRIENDLY_PATH, before any test.
 
 import os
 

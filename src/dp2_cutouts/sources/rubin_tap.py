@@ -1,9 +1,9 @@
 # rubin_tap.py
 # Anna Preto
 # AstroDeep Project
-# Lecture du catalogue Object de Rubin DP2 par le service TAP de la plateforme Rubin, dans une boîte du ciel.
-# Remplace la lecture par le butler de l'étape prep de copaings : la table TAP est déjà réduite aux objets
-# primaires (pas de doublon entre patches, pas de parent), vérifié sur la boîte de démo.
+# Reads the Rubin DP2 Object catalogue through the TAP service of the Rubin Science Platform, within a sky box.
+# Replaces the butler read of the copaings prep step: the TAP table is already restricted to primary objects
+# (no duplicates between patches, no parents), checked on the demo box.
 
 import os
 
@@ -13,8 +13,8 @@ import requests
 
 BANDS = "ugrizy"
 
-# Colonnes lues par copaings (DEFAULT_LSST_COLUMNS), moins i_centroid_x/y et i_fwhm qui n'existent pas en DP2 :
-# copaings recalcule x, y depuis ra/dec (common_frame_xy).
+# Columns read by copaings (DEFAULT_LSST_COLUMNS), minus i_centroid_x/y and i_fwhm which do not exist in DP2:
+# copaings recomputes x, y from ra/dec (common_frame_xy).
 COPAINGS_COLUMNS = [
     "coord_ra", "coord_dec",
     "i_ixx", "i_iyy", "i_ixy", "i_ixxPSF", "i_iyyPSF",
@@ -24,8 +24,8 @@ COPAINGS_COLUMNS = [
     "u_cModelFlux", "z_cModelFlux", "y_cModelFlux",
 ]
 
-# Colonnes supplémentaires à garder pour la suite : identifiants, position dans le découpage du ciel,
-# moments de la PSF dans les six bandes (taille et ellipticité de la tache par couleur).
+# Extra columns kept for later steps: identifiers, position in the sky tiling, PSF moments in all six bands
+# (PSF size and ellipticity per band).
 EXTRA_COLUMNS = (
     ["objectId", "parentObjectId", "tract", "patch", "detect_isIsolated"]
     + [f"{b}_{m}PSF" for b in BANDS for m in ("ixx", "iyy", "ixy")]
@@ -33,7 +33,7 @@ EXTRA_COLUMNS = (
 
 
 def tap_service(url, token_file):
-    # Le jeton est lu depuis le fichier et passé en en-tête ; il n'est jamais affiché ni journalisé.
+    # The token is read from the file and passed as a header; it is never printed or logged.
     with open(os.path.expanduser(token_file)) as f:
         token = f.read().strip()
     session = requests.Session()
@@ -52,12 +52,12 @@ def box_query(table, columns, sky_box, tracts=None):
 
 
 def fetch_objects(cfg):
-    # Toutes les lignes de la boîte, sans aucune coupure : le catalogue d'avant coupure sert à la repondération.
+    # Every row in the box, without any cut: the pre-cut catalogue is used for reweighting.
     rc = cfg["rubin"]
     tap = tap_service(rc["tap_url"], rc["token_file"])
     columns = list(dict.fromkeys(COPAINGS_COLUMNS + EXTRA_COLUMNS))
-    # Les côtés d'un POLYGON ADQL sont des arcs de grand cercle, pas des lignes de déclinaison constante :
-    # on lit avec une marge, et la boîte exacte en ra/dec est appliquée ensuite (in_box de copaings).
+    # The edges of an ADQL POLYGON are great-circle arcs, not lines of constant declination: we read with a
+    # margin, and the exact ra/dec box is applied afterwards (copaings in_box).
     m = float(rc.get("margin_deg", 0.0))
     ra0, ra1, dec0, dec1 = cfg.sky_box
     box = [ra0 - m, ra1 + m, dec0 - m, dec1 + m]
@@ -70,7 +70,7 @@ def fetch_objects(cfg):
     finally:
         job.delete()
     if df["objectId"].duplicated().any():
-        raise RuntimeError("objectId en double dans la réponse TAP")
+        raise RuntimeError("duplicate objectId in the TAP response")
     return df
 
 
@@ -78,5 +78,5 @@ def run(cfg):
     df = fetch_objects(cfg)
     out = cfg.data("10_rubin", "catalog", "object_box.parquet")
     df.to_parquet(out, index=False)
-    print(f"Rubin : {len(df):,} objets, {df.shape[1]} colonnes -> {out}")
+    print(f"Rubin: {len(df):,} objects, {df.shape[1]} columns -> {out}")
     return df

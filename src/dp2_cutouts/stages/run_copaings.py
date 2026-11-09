@@ -1,9 +1,9 @@
 # run_copaings.py
 # Anna Preto
 # AstroDeep Project
-# Exécution de copaings contre Euclid seul, à partir du catalogue Rubin lu par TAP et des tuiles Euclid écrites
-# depuis HuggingFace. Seule l'étape prep est réécrite (pas de butler, pas de catalogue HST) ; les étapes
-# fof, eot, eot_merge, magfit, sb et sb_merge sont celles de copaings, appelées sans modification.
+# Runs copaings against Euclid only, from the Rubin catalogue read through TAP and the Euclid tiles written from
+# HuggingFace. Only the prep step is rewritten (no butler, no HST catalogue); the fof, eot, eot_merge, magfit,
+# sb and sb_merge steps are those of copaings, called unmodified.
 
 import json
 import os
@@ -15,7 +15,7 @@ from ..sources import euclid_hf
 
 
 def _import_copaings(cfg):
-    # friendly s'importe par FRIENDLY_PATH : son pyproject impose numpy < 2, on ne l'installe donc pas avec pip.
+    # friendly is imported through FRIENDLY_PATH: its pyproject pins numpy < 2, so it is not installed with pip.
     os.environ.setdefault("FRIENDLY_PATH", os.path.expanduser(cfg["copaings"]["friendly_path"]))
     from copaings import catalogs, stages
     from copaings.config import Case
@@ -43,7 +43,7 @@ def make_case(cfg):
 
 
 def prep(cfg, case):
-    # Même enchaînement que copaings.catalogs.assemble, sans HST.
+    # Same sequence as copaings.catalogs.assemble, without HST.
     catalogs, _, _ = _import_copaings(cfg)
     raw = pd.read_parquet(cfg.data("10_rubin", "catalog", "object_box.parquet"))
     raw["tract_id"] = raw["tract"]
@@ -54,13 +54,13 @@ def prep(cfg, case):
         return df[keep].reset_index(drop=True)
 
     lsst = in_box(catalogs.build_lsst(case, raw))
-    # objectId n'est pas dans la table de colonnes de copaings : on le rattache par position de ligne.
+    # objectId is not in the copaings column table: it is re-attached by row position.
     kept = raw[raw["i_extendedness"] == 1].reset_index(drop=True)
     ra0, ra1, d0, d1 = case.sky_box
     kept = kept[(kept["coord_ra"] >= ra0) & (kept["coord_ra"] <= ra1)
                 & (kept["coord_dec"] >= d0) & (kept["coord_dec"] <= d1)].reset_index(drop=True)
     if len(kept) != len(lsst) or not (kept["coord_ra"].values == lsst["ra"].values).all():
-        raise RuntimeError("impossible de rattacher objectId au catalogue copaings")
+        raise RuntimeError("cannot re-attach objectId to the copaings catalogue")
     lsst["objectId"] = kept["objectId"].values
     lsst["patch"] = kept["patch"].values
 
@@ -85,7 +85,7 @@ def prep(cfg, case):
 
     lsst.to_parquet(case.path("catalogs", "lsst.parquet"))
     euclid.to_parquet(case.path("catalogs", "euclid.parquet"))
-    # copaings lit toujours hst.parquet ; une table vide suffit puisque seul Euclid est traité.
+    # copaings always reads hst.parquet; an empty table is enough since only Euclid is processed.
     pd.DataFrame({"ra": [], "dec": [], "F814_MAG": [], "mag_i": []}).to_parquet(case.path("catalogs", "hst.parquet"))
     catalogs.save_meta(case.path("catalogs", "meta.json"), meta)
     return meta
@@ -109,14 +109,14 @@ def run(cfg):
     _, stages, _ = _import_copaings(cfg)
     case = make_case(cfg)
     meta = prep(cfg, case)
-    print("prep :", json.dumps(meta))
+    print("prep:", json.dumps(meta))
 
     stages.fof(case, "Euclid")
     with ProcessPoolExecutor(max_workers=case.n_eot_tasks) as ex:
         list(ex.map(_eot_task, [(cfg, i) for i in range(case.n_eot_tasks)]))
     stages.eot_merge(case, "Euclid", case.n_eot_tasks)
 
-    # magfit boucle sur la constante TELESCOPES (Euclid et HST) et non sur case.telescopes.
+    # magfit loops over the TELESCOPES constant (Euclid and HST), not over case.telescopes.
     stages.TELESCOPES = ("Euclid",)
     stages.magfit(case)
 
@@ -142,9 +142,9 @@ def compare_reference(cfg, case):
     rows.append(("eot groups Euclid", ref["eot_groups_Euclid"], eot))
     for k, v in ref["sb_merge_Euclid"].items():
         rows.append((k, v, sbs[k]))
-    print(f"\n{'grandeur':<26}{'référence':>12}{'obtenu':>12}")
+    print(f"\n{'quantity':<26}{'reference':>12}{'obtained':>12}")
     for name, r, o in rows:
-        print(f"{name:<26}{r:>12}{o:>12}{'' if r == o else '   <-- écart'}")
+        print(f"{name:<26}{r:>12}{o:>12}{'' if r == o else '   <-- mismatch'}")
 
 
 def stages_load_groups(cfg, case):

@@ -1,14 +1,14 @@
 # stamps.py
 # Anna Preto
 # AstroDeep Project
-# Découpe des vignettes dans les six images d'une région, coupures sur pixels (3, 4, 5, 7, 8), masquage des
-# compagnes avec remplissage par du ciel vide, et décision au masquage. Chaque coupure enregistre sa grandeur
-# continue à côté de sa condition ; aucune cible n'est retirée ici.
+# Cuts the stamps from the six images of a region, applies the pixel cuts (3, 4, 5, 7, 8), masks companions and
+# fills them with empty sky, and takes the masking decision. Each cut records its continuous quantity next to its
+# condition; no target is removed here.
 #
-# Deux gestes à ne pas rater :
-# - la solution astrométrique rend (x, y) = (colonne, ligne), alors qu'un tableau s'indexe [ligne, colonne] ;
-# - astropy rend des positions en indices 0 (le premier pixel FITS vaut 1) : on n'ajoute ni ne retire rien.
-# Le centre entier d'une vignette est floor(x + 0,5), la position fractionnaire est gardée pour les mesures.
+# Two things not to get wrong:
+# - the WCS returns (x, y) = (column, row), whereas an array is indexed [row, column];
+# - astropy returns 0-based positions (the first FITS pixel is 1): nothing is added or subtracted.
+# The integer centre of a stamp is floor(x + 0.5); the fractional position is kept for measurements.
 
 import json
 
@@ -25,7 +25,7 @@ from ..common.shapes import adaptive_moments, circular_weight, delta_e
 from ..sources.rubin_soda import BANDS, tract_origin
 from .catalog_table import copaings_dir
 
-NJY_ZEROPOINT = 31.4  # magnitude AB d'un flux de 1 nJy
+NJY_ZEROPOINT = 31.4  # AB magnitude of a 1 nJy flux
 
 
 # ----------------------------------------------------------------------------- images
@@ -42,18 +42,18 @@ def load_images(cfg):
             origins.append(tract_origin(h["IMAGE"].header))
             bits.append(masks.plane_bits(h["MASK"].header))
     if len({f.shape for f in flux}) != 1 or len(set(origins)) != 1 or any(bt != bits[0] for bt in bits):
-        raise RuntimeError("les six images n'ont pas la même grille de pixels ou les mêmes plans de masque")
+        raise RuntimeError("the six images do not share the same pixel grid or the same mask planes")
     mask = np.stack(mask)
-    # Pixels détectés dans au moins une bande : une compagne peut n'être détectée que dans certaines couleurs.
+    # Pixels detected in at least one band: a companion may be detected in some bands only.
     detected = np.any((mask & masks.bitmask(bits[0], ["DETECTED"])) != 0, axis=0)
     return dict(flux=np.stack(flux), var=np.stack(var), mask=mask, detected=detected, wcs=wcs, x0=origins[0][0],
                 y0=origins[0][1], bits=bits[0], meta=meta)
 
 
-# ----------------------------------------------------------------------------- compagnes
+# ----------------------------------------------------------------------------- companions
 def companions(cfg, img, cat):
-    # Tous les objets connus dans la région, sans aucune coupure : Rubin (y compris ponctuels et sans
-    # i_extendedness) et Euclid (y compris étoiles), chacun avec son ellipse dans les pixels de la région.
+    # Every known object in the region, without any cut: Rubin (including point-like objects and those without
+    # i_extendedness) and Euclid (including stars), each with its ellipse in the region pixels.
     w = img["wcs"][BANDS.index("i")]
     raw = pd.read_parquet(cfg.data("10_rubin", "catalog", "object_box.parquet"))
     a, b, th = moments_to_ellipse(raw["i_ixx"], raw["i_iyy"], raw["i_ixy"])
@@ -63,14 +63,14 @@ def companions(cfg, img, cat):
     x, y = w.world_to_pixel_values(raw["coord_ra"].values, raw["coord_dec"].values)
     rubin = pd.DataFrame(dict(survey="rubin", id=raw["objectId"].astype("int64"), x=x, y=y, a=a, b=b, theta=th))
 
-    # Ellipses Euclid : même construction que le test de recouvrement de copaings (catalogs.build_euclid puis
-    # true_params), relue dans les tuiles qu'a lues copaings, donc avec la même convention d'angle.
+    # Euclid ellipses: same construction as the copaings overlap test (catalogs.build_euclid then true_params),
+    # read from the tiles that copaings read, hence with the same angle convention.
     from .run_copaings import _import_copaings, make_case
     catalogs, _, _ = _import_copaings(cfg)
     case = make_case(cfg)
     lsst_cop = pd.read_parquet(copaings_dir(cfg) / "catalogs" / "lsst.parquet")
     eu = catalogs.build_euclid(case, lsst_cop)
-    # Tache : médiane de la tache Rubin en bande i sur la région (copaings prend celle du premier membre du groupe).
+    # PSF: median Rubin i-band PSF over the region (copaings uses that of the first group member).
     fwhm = float(np.nanmedian(np.asarray(cat["psf_sigma_i"], float))) * FWHM2SIGMA
     ea, eb, eth = euclid_ellipse(eu["size_true"], eu["size_minor_true"], eu["position_angle_true"], fwhm)
     ex, ey = w.world_to_pixel_values(eu["ra"].values, eu["dec"].values)
@@ -82,7 +82,7 @@ def companions(cfg, img, cat):
 
 
 def companion_mask(shape, ox, oy, comp, pad):
-    # Méthode « ellipse » de la recette : union des ellipses de demi-lumière des compagnes, boîte d'origine (ox, oy).
+    # "ellipse" method of the recipe: union of the companions' half-light ellipses, box with origin (ox, oy).
     h, w = shape
     sel = ((comp["x"] > ox - pad) & (comp["x"] < ox + w + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + h + pad))
     m = np.zeros(shape, bool)
@@ -92,15 +92,15 @@ def companion_mask(shape, ox, oy, comp, pad):
 
 
 def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px, shared_k):
-    # Méthode « footprint » (écart à la recette, validé) : l'ellipse de demi-lumière laissait les ailes des compagnes
-    # brillantes autour de trous remplis de ciel. On s'appuie sur les empreintes de détection (plan DETECTED, dans au
-    # moins une bande, composantes connexes) :
-    # - l'empreinte qui contient la cible lui appartient : on n'y touche pas, ses ailes restent entières ;
-    # - toute autre empreinte de la boîte est une autre source : masquée en entier, élargie de grow_px pixels sans
-    #   mordre sur l'empreinte de la cible ;
-    # - une compagne dont le centre tombe dans l'empreinte de la cible (empreinte partagée) : shared_k fois son
-    #   ellipse, à l'intérieur de cette empreinte ;
-    # - une compagne non détectée (vue par Euclid seul) : son ellipse de demi-lumière.
+    # "footprint" method (validated deviation from the recipe): the half-light ellipse left the bright wings of
+    # companions around sky-filled holes. It relies on the detection footprints (DETECTED plane, in at least one
+    # band, connected components):
+    # - the footprint that contains the target belongs to it: left untouched, its wings stay whole;
+    # - every other footprint in the box is another source: masked whole, grown by grow_px pixels without
+    #   eating into the target footprint;
+    # - a companion whose centre falls inside the target footprint (shared footprint): shared_k times its
+    #   ellipse, within that footprint;
+    # - an undetected companion (seen by Euclid only): its half-light ellipse.
     h, w = shape
     det = detected[oy:oy + h, ox:ox + w]
     labels, _ = label(det, structure=np.ones((3, 3), int))
@@ -124,9 +124,9 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
     return m
 
 
-# ----------------------------------------------------------------------------- ciel vide
+# ----------------------------------------------------------------------------- empty sky
 class SkyBank:
-    # Fenêtres de ciel de la région où aucun pixel n'est détecté, abîmé ou non exposé, dans aucune bande.
+    # Sky windows of the region with no detected, damaged or unexposed pixel, in any band.
     def __init__(self, img, unusable_mask, size, stride=4):
         self.unusable = np.any((img["mask"] & unusable_mask) != 0, axis=0)
         H, W = self.unusable.shape
@@ -135,7 +135,7 @@ class SkyBank:
         self.size = size
 
     def find(self, need, rng, tries):
-        # Fenêtre dont les pixels utilisables couvrent tous les pixels à remplir ; à défaut, la moins mauvaise.
+        # Window whose usable pixels cover every pixel to fill; failing that, the least bad one.
         n = self.size
         order = rng.permutation(len(self.corners))[:tries]
         best, best_bad = None, np.inf
@@ -150,7 +150,7 @@ class SkyBank:
 
 
 def fill(img, ox, oy, size, need, window):
-    # Copie flux, variance et bits du ciel choisi sur les pixels à remplir, et lève le bit FILLED_SKY.
+    # Copies flux, variance and bits of the chosen sky onto the pixels to fill, and sets the FILLED_SKY bit.
     sl = np.s_[:, oy:oy + size, ox:ox + size]
     flux, var, mbits = img["flux"][sl].copy(), img["var"][sl].copy(), img["mask"][sl].copy()
     if need.any():
@@ -162,7 +162,7 @@ def fill(img, ox, oy, size, need, window):
     return flux, var, mbits
 
 
-# ----------------------------------------------------------------------------- une cible
+# ----------------------------------------------------------------------------- one target
 def process_target(row, img, cfg, rubin, euclid, banks, rng):
     cc = cfg["cuts"]
     half, dhalf = cc["stamp_px"] // 2, cc["diag_px"] // 2
@@ -172,7 +172,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     bad = masks.bitmask(bits, cc["bad_planes"])
     out = dict(object_id=row.object_id)
 
-    # Positions dans chaque bande ; coupure 7 : même pixel entier partout.
+    # Positions in each band; cut 7: same integer pixel everywhere.
     pos = np.array([w.world_to_pixel_values(row.ra, row.dec) for w in img["wcs"]], float)
     ib = BANDS.index(cc["shape_band"])
     x, y = pos[BANDS.index("i")]
@@ -182,12 +182,12 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     out["cut7_value"] = float(np.max(np.hypot(*(pos - pos[BANDS.index("i")]).T)))
     out["cut7_pass"] = bool(np.all(centers == centers[BANDS.index("i")]))
 
-    # Démo locale : la vignette doit tenir dans la région téléchargée (sur la plateforme, c'est le patch entier).
+    # Local demo: the stamp must fit inside the downloaded region (on the platform, it is the whole patch).
     out["in_region"] = bool(half <= ix < W - half and half <= iy < H - half)
     if not out["in_region"]:
         return out, None
 
-    # Coupure 3 : marge entière dans l'emprise du patch, repère du tract.
+    # Cut 3: integer margin inside the patch bounding box, tract frame.
     pb = img["meta"]["patch_bbox"]
     tx, ty = img["x0"] + ix, img["y0"] + iy
     margin = min(tx - pb["x_min"], pb["x_max"] - tx, ty - pb["y_min"], pb["y_max"] - ty)
@@ -196,16 +196,16 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
 
     n = cc["stamp_px"]
     ox, oy = ix - half, iy - half
-    xc, yc = x - ox, y - oy  # position fractionnaire dans la vignette (colonne, ligne)
+    xc, yc = x - ox, y - oy  # fractional position in the stamp (column, row)
     box = np.s_[:, oy:oy + n, ox:ox + n]
     mbox = img["mask"][box]
 
-    # Coupure 4 : aucun pixel non exposé dans la boîte, dans aucune bande.
+    # Cut 4: no unexposed pixel in the box, in any band.
     nod = (mbox & nodata) != 0
     out["cut4_value"] = int(nod.sum())
     out["cut4_pass"] = out["cut4_value"] == 0
 
-    # Coupure 5 : rayon réduit du pixel abîmé le plus proche, dans l'ellipse de la cible.
+    # Cut 5: reduced radius of the nearest damaged pixel, in units of the target ellipse.
     a, b, th = row.ellipse_a, row.ellipse_b, row.ellipse_theta
     if not (np.isfinite(a) and np.isfinite(b) and b > 0):
         a = b = float(np.sqrt(2 * np.log(2)) * row.psf_sigma_i / 0.2)
@@ -216,7 +216,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     out["cut5_n_bad_in_k"] = int(np.count_nonzero(badpix & (rmap <= cc["k_ellipse"])))
     out["cut5_pass"] = bool(out["cut5_value"] > cc["k_ellipse"])
 
-    # Compagnes : tout objet de la boîte hors du groupe de la cible (la cible Rubin et sa contrepartie Euclid).
+    # Companions: every object in the box outside the target group (the Rubin target and its Euclid counterpart).
     rc = rubin[rubin["id"] != row.object_id]
     ec = euclid
     if pd.notna(row.euclid_ra):
@@ -232,7 +232,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
         if mc["method"] == "footprint":
             return companion_mask_footprint(img["detected"], (size, size), bx, by, (x - bx, y - by, a, b, th),
                                             comp, pad, mc["grow_px"], mc["shared_k"])
-        raise ValueError("masking.method doit valoir « ellipse » ou « footprint »")
+        raise ValueError('masking.method must be "ellipse" or "footprint"')
 
     need = make_need(n, ox, oy)
     out["masked_fraction"] = float(need.mean())
@@ -245,18 +245,18 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     if window is not None:
         out["sky_window_x_tract"], out["sky_window_y_tract"] = img["x0"] + window[1], img["y0"] + window[0]
 
-    # Décision au masquage : écart d'ellipticité avant / après, en bande de forme.
+    # Masking decision: ellipticity offset before / after, in the shape band.
     weight = (~np.any(nod, axis=0)).astype(np.int32)
     m0 = adaptive_moments(img["flux"][box][ib], weight, (xc, yc))
     m1 = adaptive_moments(flux[ib], weight, (xc, yc))
     out.update(e1_before=m0["e1"], e2_before=m0["e2"], e1=m1["e1"], e2=m1["e2"], sigma_hsm=m1["sigma"],
                shape_ok=bool(m0["ok"] and m1["ok"]))
     out["delta_e_mask"] = delta_e(m0, m1) if out["shape_ok"] else np.nan
-    # La mesure de forme ne sélectionne jamais : une mesure ratée ne fait pas écarter la vignette.
+    # Shape measurement never selects: a failed measurement does not reject the stamp.
     out["mask_pass"] = bool(not np.isfinite(out["delta_e_mask"]) or out["delta_e_mask"] <= cc["delta_e_max"])
 
-    # Profondeur locale : variance médiane du ciel (pixels ni détectés ni non exposés), magnitude limite à 5 sigma
-    # pour une source ponctuelle de la taille de la tache.
+    # Local depth: median sky variance (pixels neither detected nor unexposed), 5-sigma limiting magnitude for a
+    # point source the size of the PSF.
     det = masks.bitmask(bits, ["DETECTED", "NO_DATA"])
     for k, band in enumerate(BANDS):
         sky = (mbox[k] & det) == 0
@@ -265,8 +265,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
         out[f"sky_var_{band}"] = v
         out[f"depth5_{band}"] = NJY_ZEROPOINT - 2.5 * np.log10(5.0 * np.sqrt(4 * np.pi * s_pix ** 2 * v))
 
-    # Coupure 8 : vignette de diagnostic deux fois plus grande, masquée de la même façon, forme mesurée dans deux
-    # ouvertures circulaires.
+    # Cut 8: diagnostic stamp twice as large, masked the same way, shape measured in two circular apertures.
     nd = cc["diag_px"]
     dox, doy = ix - dhalf, iy - dhalf
     diag = None
@@ -317,7 +316,7 @@ def run(cfg):
             arrays.append(arr)
     res = pd.DataFrame(rows)
 
-    # Table complète : toutes les lignes du catalogue, colonnes de pixels vides hors cibles.
+    # Full table: every catalogue row, pixel columns empty outside targets.
     table = cat.merge(res, on="object_id", how="left")
     table["pixel_target"] = table["object_id"].isin(res["object_id"])
     table["in_region"] = table["in_region"].astype("boolean").fillna(False).astype(bool)
@@ -332,5 +331,5 @@ def run(cfg):
 
     t = table[table["in_region"]]
     msg = {k: int(t[f"{k}_pass"].sum()) for k in ("cut3", "cut4", "cut5", "cut6", "cut7", "cut8", "mask")}
-    print(f"cibles du patch {len(targets):,} ; dans la région {len(t):,} ; passent : {msg}")
+    print(f"patch targets {len(targets):,}; in region {len(t):,}; passing: {msg}")
     return table

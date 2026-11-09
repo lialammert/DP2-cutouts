@@ -1,11 +1,11 @@
 # package.py
 # Anna Preto
 # AstroDeep Project
-# Empaquetage du jeu fini : Parquet partitionné par tuile HEALPix d'ordre 5 (dossiers healpix5=<n>), blocs bornés
-# en nombre de lignes. La colonne image suit la convention de MultimodalUniverse : une liste de structures, une par
-# bande, {band, flux, ivar, mask, scale}, avec mask booléen (True = pixel à ne pas croire). Les bits complets des
-# plans de masque Rubin (et le bit FILLED_SKY du masquage) sont gardés à part dans image_maskbits.
-# Le catalogue complet, avant toute coupure, est écrit à côté : il sert à la repondération.
+# Writes the final dataset: Parquet partitioned by order-5 HEALPix tile (healpix5=<n> folders), files capped in
+# number of rows. The image column follows the MultimodalUniverse convention: a list of structs, one per band,
+# {band, flux, ivar, mask, scale}, with a boolean mask (True = pixel not to be trusted). The full bits of the
+# Rubin mask planes (and the FILLED_SKY bit from masking) are kept separately in image_maskbits.
+# The full catalogue, before any cut, is written alongside: it is used for reweighting.
 
 import json
 import shutil
@@ -28,7 +28,7 @@ IMAGE_TYPE = pa.list_(pa.struct([
 ]))
 MASKBITS_TYPE = pa.list_(pa.list_(pa.list_(pa.int32())))
 
-# Colonnes de travail qui ne vont pas dans le jeu fini.
+# Working columns that do not go into the final dataset.
 DROP = ["sky_window_x_tract", "sky_window_y_tract"]
 
 
@@ -54,7 +54,7 @@ def image_column(st, bands, n, mmu_mask):
 
 
 def to_arrow(df):
-    # Colonnes objet (densité de redshift, intervalles) en listes de flottants ; le reste par pyarrow.
+    # Object columns (redshift density, intervals) as lists of floats; everything else through pyarrow.
     cols, names = [], []
     for c in df.columns:
         s = df[c]
@@ -64,7 +64,7 @@ def to_arrow(df):
             vals = [None if z else np.asarray(v, float).tolist() for v, z in zip(s, is_null)]
             cols.append(pa.array(vals, type=pa.list_(pa.float64())))
         elif s.dtype == object:
-            # Colonnes de pixels issues de la jointure (booléens ou nombres avec des trous hors cibles).
+            # Pixel columns from the join (booleans or numbers with gaps outside targets).
             cols.append(pa.array([None if z else v for v, z in zip(s, is_null)], from_pandas=True))
         else:
             cols.append(pa.array(s, from_pandas=True))
@@ -100,8 +100,8 @@ def run(cfg):
                       100_000)
     info = dict(bands=bands, stamp_px=n, pixel_scale=PIXEL_SCALE, plane_bits=meta["plane_bits"],
                 filled_bit=masks.FILLED_BIT, mmu_mask_planes=pc["mmu_mask_planes"], cuts_applied=pc["apply"],
-                n_catalog=len(table), n_final=len(final), partitioning="healpix5 (HEALPix NESTED, ordre 5)")
+                n_catalog=len(table), n_final=len(final), partitioning="healpix5 (HEALPix NESTED, order 5)")
     with open(root / "dataset_info.json", "w") as f:
         json.dump(info, f, indent=2)
-    print(f"jeu fini : {len(final):,} vignettes sur {len(table):,} objets du catalogue -> {root}")
+    print(f"final dataset: {len(final):,} stamps out of {len(table):,} catalogue objects -> {root}")
     return final

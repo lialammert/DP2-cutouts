@@ -1,22 +1,22 @@
 # shapes.py
 # Anna Preto
 # AstroDeep Project
-# Mesure de forme par moments adaptatifs (galsim HSM). L'ellipticité rendue est la distorsion
-# e = (Ixx - Iyy, 2 Ixy) / (Ixx + Iyy), la même définition que les colonnes e1, e2 de copaings.
-# Une mesure ratée rend NaN : la mesure de forme ne sert jamais à sélectionner.
+# Shape measurement with adaptive moments (galsim HSM). The returned ellipticity is the distortion
+# e = (Ixx - Iyy, 2 Ixy) / (Ixx + Iyy), the same definition as the e1, e2 columns of copaings.
+# A failed measurement returns NaN: shape measurement never selects.
 
 import galsim
 import numpy as np
 
 
 def adaptive_moments(image, weight=None, center=None):
-    # image : tableau [ligne, colonne] ; weight : 0 sur les pixels à ignorer ; center : (colonne, ligne) en indices 0.
+    # image: array [row, column]; weight: 0 on pixels to ignore; center: (column, row) as 0-based indices.
     img = galsim.Image(np.ascontiguousarray(image, dtype=np.float64))
     kw = {}
     if weight is not None:
         kw["weight"] = galsim.Image(np.ascontiguousarray(weight, dtype=np.int32))
     if center is not None:
-        # galsim indexe les pixels à partir de 1.
+        # galsim indexes pixels from 1.
         kw["guess_centroid"] = galsim.PositionD(center[0] + 1.0, center[1] + 1.0)
     res = galsim.hsm.FindAdaptiveMom(img, strict=False, **kw)
     if res.moments_status != 0:

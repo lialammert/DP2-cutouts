@@ -1,8 +1,8 @@
 # viz.py
 # Anna Preto
 # AstroDeep Project
-# Outils des notebooks : entonnoir des coupures, lecture des vignettes intermédiaires, affichage (nord en haut,
-# est à gauche : origin="lower", x = colonne vers l'ouest) et tracé des ellipses.
+# Notebook tools: cut funnel, reading the intermediate stamps, display (north up, east left: origin="lower",
+# x = column towards west) and ellipse drawing.
 
 import json
 
@@ -12,18 +12,18 @@ import pandas as pd
 from astropy.visualization import make_lupton_rgb
 from matplotlib.patches import Circle, Ellipse
 
-# Ordre de la recette. « in_region » n'existe qu'en démo locale (la vignette doit tenir dans la région téléchargée).
+# Recipe order. "in_region" only exists in the local demo (the stamp must fit inside the downloaded region).
 STEPS = [
-    ("cut1", "1 · Euclid : ni ponctuel ni artefact"),
-    ("cut2", "2 · S_b = 0 et un à un"),
-    ("in_region", "démo · dans la région téléchargée"),
-    ("cut3", "3 · marge de 29 px dans le patch"),
-    ("cut4", "4 · aucun pixel non exposé"),
-    ("cut5", "5 · aucun pixel abîmé dans k × ellipse"),
+    ("cut1", "1 · Euclid: neither point-like nor spurious"),
+    ("cut2", "2 · S_b = 0 and one-to-one"),
+    ("in_region", "demo · inside the downloaded region"),
+    ("cut3", "3 · 29 px margin inside the patch"),
+    ("cut4", "4 · no unexposed pixel"),
+    ("cut5", "5 · no damaged pixel within k × ellipse"),
     ("cut6", "6 · S/N(i) > 5"),
-    ("cut7", "7 · même pixel dans les six bandes"),
-    ("cut8", "8 · |Δe| entre ouvertures ≤ 0,02"),
-    ("mask", "masquage · |Δe| ≤ 0,02"),
+    ("cut7", "7 · same pixel in all six bands"),
+    ("cut8", "8 · |Δe| between apertures ≤ 0.02"),
+    ("mask", "masking · |Δe| ≤ 0.02"),
 ]
 
 
@@ -34,16 +34,16 @@ def passed(table, step):
 
 def funnel(table, steps=STEPS, start_mask=None):
     keep = np.ones(len(table), bool) if start_mask is None else start_mask.copy()
-    rows = [("catalogue Rubin (copaings)", int(keep.sum()), np.nan)]
+    rows = [("Rubin catalogue (copaings)", int(keep.sum()), np.nan)]
     for key, label in steps:
         before = keep.sum()
         keep &= passed(table, key)
         rows.append((label, int(keep.sum()), 1 - keep.sum() / before if before else np.nan))
-    return pd.DataFrame(rows, columns=["étape", "restants", "fraction retirée"])
+    return pd.DataFrame(rows, columns=["step", "remaining", "fraction removed"])
 
 
 def stage_mask(table, upto):
-    # Cibles qui ont passé toutes les étapes jusqu'à « upto » incluse.
+    # Targets that passed every step up to and including "upto".
     keep = np.ones(len(table), bool)
     for key, _ in STEPS:
         keep &= passed(table, key)
@@ -69,7 +69,7 @@ def load_stamps(cfg):
 
 
 def rgb(flux6, stretch=0.5, Q=8):
-    # Composition i, r, g (indices 3, 2, 1 dans ugrizy), flux en nJy.
+    # i, r, g composite (indices 3, 2, 1 in ugrizy), flux in nJy.
     s = 1.0 / 100.0
     return make_lupton_rgb(flux6[3] * s, flux6[2] * s, flux6[1] * s, stretch=stretch, Q=Q)
 
@@ -88,7 +88,7 @@ def show(ax, img, title=None, cmap="gray_r", vmin=None, vmax=None):
 
 
 def draw_ellipse(ax, xc, yc, a, b, theta, k=1.0, **kw):
-    # Un objet sans moments (ellipse NaN) n'est pas tracé.
+    # An object without moments (NaN ellipse) is not drawn.
     if not all(np.isfinite(v) for v in (xc, yc, a, b, theta)):
         return
     kw.setdefault("fill", False)
@@ -107,7 +107,7 @@ def overlay(ax, mask, color, alpha=0.5):
 
 
 def stamp_center(row, n=59):
-    # Position fractionnaire de la cible dans sa vignette (colonne, ligne).
+    # Fractional position of the target in its stamp (column, row).
     h = n // 2
     return h + (row.x_tract - np.floor(row.x_tract + 0.5)), h + (row.y_tract - np.floor(row.y_tract + 0.5))
 

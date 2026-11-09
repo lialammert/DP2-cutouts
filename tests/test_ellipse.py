@@ -1,13 +1,13 @@
 # test_ellipse.py
 # Anna Preto
 # AstroDeep Project
-# L'ellipse de la chaîne doit être exactement celle de copaings et friendly (test de recouvrement), sans quoi la
-# coupure 5 et le masquage n'utiliseraient pas la même ellipse que la coupure 2.
+# The pipeline ellipse must be exactly that of copaings and friendly (overlap test); otherwise cut 5 and masking
+# would not use the same ellipse as cut 2.
 
 import numpy as np
 import pytest
 
-from res.common.ellipse import elliptical_radius, euclid_ellipse, moments_to_ellipse
+from dp2_cutouts.common.ellipse import elliptical_radius, euclid_ellipse, moments_to_ellipse
 
 
 def test_moments_match_friendly():
@@ -17,7 +17,7 @@ def test_moments_match_friendly():
     ixy = rng.uniform(-0.9, 0.9, 500) * np.sqrt(ixx * iyy)
     a, b, th = moments_to_ellipse(ixx, iyy, ixy)
     fa, fb, fth = ellipses.moments2ab(ixx.copy(), iyy.copy(), ixy.copy())
-    # friendly ordonne les axes selon theta ; on compare le couple (grand axe, petit axe) et l'angle du grand axe.
+    # friendly orders the axes according to theta; compare the (major, minor) pair and the major-axis angle.
     np.testing.assert_allclose(a, np.maximum(fa, fb), rtol=1e-10)
     np.testing.assert_allclose(b, np.minimum(fa, fb), rtol=1e-10)
     fmajor = np.where(fa >= fb, fth, fth + 90.0) % 180.0
@@ -26,7 +26,7 @@ def test_moments_match_friendly():
 
 
 def test_half_light_factor():
-    # Gaussienne ronde de sigma 2 px : demi-axe sqrt(2 ln 2) sigma, le contour à mi-hauteur.
+    # Round Gaussian with sigma 2 px: semi-axis sqrt(2 ln 2) sigma, the half-maximum contour.
     a, b, _ = moments_to_ellipse(4.0, 4.0, 0.0)
     assert np.isclose(a, np.sqrt(2 * np.log(2)) * 2.0) and np.isclose(b, a)
 
@@ -50,7 +50,7 @@ def test_euclid_ellipse_matches_copaings():
 
 
 def test_elliptical_radius_orientation():
-    # Ellipse allongée le long de x : un point à (a, 0) est sur le bord, un point à (0, a) en est loin.
+    # Ellipse elongated along x: a point at (a, 0) is on the edge, a point at (0, a) is far from it.
     assert np.isclose(elliptical_radius(4.0, 0.0, 4.0, 1.0, 0.0), 1.0)
     assert elliptical_radius(0.0, 4.0, 4.0, 1.0, 0.0) > 3.9
     assert np.isclose(elliptical_radius(0.0, 4.0, 4.0, 1.0, 90.0), 1.0)

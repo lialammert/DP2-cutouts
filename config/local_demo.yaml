@@ -1,33 +1,33 @@
 # local_demo.yaml
 # Anna Preto
 # AstroDeep Project
-# Démo locale : la boîte ECDFS de copaings (tract 5063, environ 0,07 deg2, dans EDF-F).
-# Les nombres de référence sont ceux du notebook de démonstration de copaings.
+# Local demo: the copaings ECDFS box (tract 5063, about 0.07 deg2, in EDF-F).
+# The reference numbers are those of the copaings demo notebook.
 
 name: local_demo
 data_root: ~/data/res/demo
-sky_box: [53.00, 53.30, -27.95, -27.70]   # [ra_min, ra_max, dec_min, dec_max] en degrés
+sky_box: [53.00, 53.30, -27.95, -27.70]   # [ra_min, ra_max, dec_min, dec_max] in degrees
 
 rubin:
   tap_url: https://data.lsst.cloud/api/tap
   token_file: ~/.rsp_token
   table: dp2.Object
   tracts: [5063]
-  margin_deg: 0.01   # marge de lecture TAP ; la boîte exacte est appliquée ensuite
+  margin_deg: 0.01   # TAP read margin; the exact box is applied afterwards
 
 euclid:
   hats_url: hf://datasets/hugging-science/mmu_euclid_q1/euclid
-  margin_deg: 0.01   # marge de lecture autour de la boîte ; copaings recoupe exactement ensuite
-  # Convention d'angle des ellipses Euclid : « copaings » (theta = -PA, celle du code de copaings, qui reproduit la
-  # référence) ou « measured » (theta = PA + 90, celle que donnent les paires appariées). Voir euclid_hf.py.
+  margin_deg: 0.01   # read margin around the box; copaings then cuts it exactly
+  # Angle convention of the Euclid ellipses: "copaings" (theta = -PA, that of the copaings code, which reproduces
+  # the reference) or "measured" (theta = PA + 90, the one given by matched pairs). See euclid_hf.py.
   pa_convention: copaings
 
-# Pixels : une seule région carrée dans un seul patch, découpée par SODA dans les six bandes.
+# Pixels: a single square region in a single patch, cut out by SODA in all six bands.
 pixels:
   tract: 5063
   patch: 34
-  size_px: 1000      # côté de la région, en pixels de 0,2 seconde d'arc
-  center: null       # null = centre du patch
+  size_px: 1000      # side of the region, in 0.2 arcsec pixels
+  center: null       # null = patch centre
 
 copaings:
   friendly_path: ~/src/friendly
@@ -38,37 +38,37 @@ copaings:
   n_eot_tasks: 4
   n_sb_tasks: 4
 
-# Seuils des coupures et du masquage (les grandeurs continues sont toujours enregistrées à côté).
+# Cut and masking thresholds (the continuous quantities are always recorded alongside).
 cuts:
-  margin_px: 29            # coupure 3 : marge entière des quatre côtés, dans le patch
-  stamp_px: 59             # vignette 2 x 29 + 1
-  diag_px: 117             # vignette de diagnostic de la coupure 8, 2 x 58 + 1
-  bad_planes: [SATURATED, COSMIC_RAY, INTERPOLATED, DETECTION_EDGE]   # coupure 5 : pixels abîmés
-  k_ellipse: 3.0           # coupure 5 : rayon réduit minimal d'un pixel abîmé, en unités de l'ellipse
-  snr_min: 5.0             # coupure 6
-  aperture_radii: [29, 58] # coupure 8 : ouvertures circulaires, en pixels
-  delta_e_max: 0.02        # coupure 8 et décision au masquage
+  margin_px: 29            # cut 3: integer margin on all four sides, inside the patch
+  stamp_px: 59             # stamp 2 x 29 + 1
+  diag_px: 117             # cut 8 diagnostic stamp, 2 x 58 + 1
+  bad_planes: [SATURATED, COSMIC_RAY, INTERPOLATED, DETECTION_EDGE]   # cut 5: damaged pixels
+  k_ellipse: 3.0           # cut 5: minimum reduced radius of a damaged pixel, in units of the ellipse
+  snr_min: 5.0             # cut 6
+  aperture_radii: [29, 58] # cut 8: circular apertures, in pixels
+  delta_e_max: 0.02        # cut 8 and masking decision
   shape_band: i
-  sky_tries: 5000          # essais de fenêtre de ciel vide par vignette
+  sky_tries: 5000          # empty-sky window attempts per stamp
   seed: 12345
 
-# Masquage des compagnes. « ellipse » : ellipse de demi-lumière, comme dans la recette. « footprint » (écart à la
-# recette, validé le 2026-11-06) : l'ellipse de demi-lumière laissait les ailes des compagnes brillantes autour de
-# trous remplis de ciel. L'empreinte de détection de la cible est gardée entière ; les autres empreintes sont
-# masquées entières, élargies de grow_px ; une compagne dans l'empreinte de la cible est masquée sur shared_k fois
-# son ellipse. Voir stamps.companion_mask_footprint.
+# Companion masking. "ellipse": half-light ellipse, as in the recipe. "footprint" (deviation from the recipe,
+# validated on 2026-11-06): the half-light ellipse left the bright wings of companions around sky-filled holes.
+# The target's detection footprint is kept whole; the other footprints are masked whole, grown by grow_px; a
+# companion inside the target footprint is masked over shared_k times its ellipse.
+# See stamps.companion_mask_footprint.
 masking:
   method: footprint
   grow_px: 2
   shared_k: 2.0
 
-# Empaquetage : coupures appliquées au jeu final et plans comptés dans le masque booléen de MMU.
+# Packaging: cuts applied to the final dataset and planes counted in the MMU boolean mask.
 package:
   apply: [cut1, cut2, in_region, cut3, cut4, cut5, cut6, cut7, cut8, mask]
   mmu_mask_planes: [NO_DATA, SATURATED, COSMIC_RAY, INTERPOLATED, DETECTION_EDGE]
   max_rows_per_file: 500
 
-# Valeurs du notebook copaings_demo.ipynb (butler, même boîte), pour contrôle.
+# Values from the copaings_demo.ipynb notebook (butler, same box), as a check.
 reference:
   n_raw: {LSST: 14045, Euclid: 23932}
   n_after_cut: {LSST: 14044, Euclid: 23464}

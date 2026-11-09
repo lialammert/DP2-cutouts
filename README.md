@@ -2,59 +2,59 @@
 README.md
 Anna Preto
 AstroDeep Project
-Présentation du dépôt, installation et exécution de la chaîne locale.
+Repository overview, installation and running the local pipeline.
 -->
 
-# rubin-euclid-stamps
+# DP2-cutouts
 
-Code de fabrication d'un jeu de vignettes de galaxies isolées : pixels Rubin DP2 (six bandes, 59 × 59 pixels de
-0,2 seconde d'arc), catalogue Euclid Q1 (isolement, classification, redshift). La spécification est
-[recette-nouveaux-datasets-abrege.md](recette-nouveaux-datasets-abrege.md). Le dépôt ne contient jamais de données.
+Code that builds a dataset of isolated-galaxy stamps: Rubin DP2 pixels (six bands, 59 × 59 pixels of
+0.2 arcsec), Euclid Q1 catalogue (isolation, classification, redshift). The specification is
+[dataset-recipe-short.md](dataset-recipe-short.md). The repository never contains data.
 
-## Installation (Linux ou WSL)
+## Installation (Linux or WSL)
 
 ```bash
-python3 -m venv ~/venvs/res
+python3 -m venv ~/venvs/dp2-cutouts
 git clone https://github.com/LSSTDESC/copaings ~/src/copaings
 git clone https://github.com/LSSTDESC/friendly ~/src/friendly
-~/venvs/res/bin/pip install -e ~/src/copaings
-~/venvs/res/bin/pip install -e ".[notebook,test]"
+~/venvs/dp2-cutouts/bin/pip install -e ~/src/copaings
+~/venvs/dp2-cutouts/bin/pip install -e ".[notebook,test]"
 ```
 
-`friendly` n'est pas installé avec pip (son `pyproject` impose numpy < 2) : il est chargé par `FRIENDLY_PATH`,
-donné dans la configuration (`copaings.friendly_path`). `healpy` ne s'installe pas sous Windows natif.
+`friendly` is not installed with pip (its `pyproject` pins numpy < 2): it is loaded through `FRIENDLY_PATH`,
+given in the configuration (`copaings.friendly_path`). `healpy` does not install on native Windows.
 
-Jeton de la plateforme Rubin dans `~/.rsp_token`, droits 600, avec les portées `read:tap` et `read:image`.
+Rubin platform token in `~/.rsp_token`, permissions 600, with the `read:tap` and `read:image` scopes.
 
-## Exécution
+## Running
 
 ```bash
-res config/local_demo.yaml all        # toute la chaîne
-res config/local_demo.yaml stamps     # une étape
+dp2-cutouts config/local_demo.yaml all        # the whole pipeline
+dp2-cutouts config/local_demo.yaml stamps     # a single step
 pytest tests
 ```
 
-| étape | ce qu'elle fait | sortie (sous `data_root`) |
+| step | what it does | output (under `data_root`) |
 |---|---|---|
-| `rubin_catalog` | table Object de DP2 par TAP, sans coupure | `10_rubin/catalog/object_box.parquet` |
-| `euclid_catalog` | catalogue MER + redshift depuis HuggingFace (HATS), tuiles au format copaings | `00_euclid/` |
-| `copaings` | copaings contre Euclid ; `prep` réécrit sans butler, le reste inchangé | `20_copaings/<name>/lsst_sb.parquet` |
-| `rubin_images` | six découpes SIA + SODA (image, masque, variance) d'une région, emprise du patch | `10_rubin/images/` |
-| `catalog_table` | une ligne par objet, coupures 1, 2, 6, tache par bande, ellipse, redshift | `30_processed/catalog.parquet` |
-| `stamps` | coupures 3, 4, 5, 7, 8, masquage des compagnes et décision à 0,02 | `30_processed/table.parquet`, `stamps.parquet` |
-| `package` | jeu fini au format MultimodalUniverse, partitionné par HEALPix d'ordre 5 | `40_final/data/`, `40_final/catalog/` |
+| `rubin_catalog` | DP2 Object table through TAP, no cut | `10_rubin/catalog/object_box.parquet` |
+| `euclid_catalog` | MER catalogue + redshift from HuggingFace (HATS), tiles in the copaings format | `00_euclid/` |
+| `copaings` | copaings against Euclid; `prep` rewritten without the butler, the rest unchanged | `20_copaings/<name>/lsst_sb.parquet` |
+| `rubin_images` | six SIA + SODA cutouts (image, mask, variance) of a region, patch bounding box | `10_rubin/images/` |
+| `catalog_table` | one row per object, cuts 1, 2, 6, PSF per band, ellipse, redshift | `30_processed/catalog.parquet` |
+| `stamps` | cuts 3, 4, 5, 7, 8, companion masking and the 0.02 decision | `30_processed/table.parquet`, `stamps.parquet` |
+| `package` | final dataset in the MultimodalUniverse format, partitioned by order-5 HEALPix | `40_final/data/`, `40_final/catalog/` |
 
-Aucune ligne n'est retirée avant `package` : chaque coupure écrit sa grandeur continue (`cutN_value`) et sa
-condition (`cutN_pass`). Les coupures appliquées au jeu fini sont listées dans `package.apply`.
+No row is removed before `package`: each cut writes its continuous quantity (`cutN_value`) and its condition
+(`cutN_pass`). The cuts applied to the final dataset are listed in `package.apply`.
 
-## Format du jeu fini
+## Final dataset format
 
-- `image` : liste de structures, une par bande `ugrizy`, `{band, flux, ivar, mask, scale}` comme
-  MultimodalUniverse ; `mask` vaut True sur les pixels à ne pas croire (plans `package.mmu_mask_planes`).
-- `image_maskbits` : les plans de masque Rubin complets, plus le bit `FILLED_SKY` (1 << 16) des pixels remplacés
-  par du ciel vide au masquage des compagnes.
-- `40_final/catalog/` : le catalogue complet avant coupures, pour la repondération.
+- `image`: list of structs, one per band `ugrizy`, `{band, flux, ivar, mask, scale}` as in
+  MultimodalUniverse; `mask` is True on pixels not to be trusted (planes `package.mmu_mask_planes`).
+- `image_maskbits`: the full Rubin mask planes, plus the `FILLED_SKY` bit (1 << 16) for pixels replaced by
+  empty sky during companion masking.
+- `40_final/catalog/`: the full catalogue before cuts, for reweighting.
 
 ## Notebooks
 
-`notebooks/01_catalogues`, `02_coupures`, `03_masquage`. Leurs sorties montrent des pixels DP2. 
+`notebooks/01_catalogs`, `02_cuts`, `03_masking`. Their outputs show DP2 pixels: clear them before committing.

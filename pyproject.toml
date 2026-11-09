@@ -1,14 +1,14 @@
 # pyproject.toml
 # Anna Preto
 # AstroDeep Project
-# Paquet Python de la chaîne de fabrication du jeu de vignettes Rubin DP2 x Euclid Q1.
+# Python package of the pipeline that builds the Rubin DP2 x Euclid Q1 stamp dataset.
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rubin-euclid-stamps"
+name = "dp2-cutouts"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
@@ -23,7 +23,7 @@ notebook = ["jupyterlab", "matplotlib"]
 test = ["pytest"]
 
 [project.scripts]
-res = "res.cli:main"
+dp2-cutouts = "dp2_cutouts.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

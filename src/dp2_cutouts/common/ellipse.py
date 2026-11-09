@@ -1,22 +1,22 @@
 # ellipse.py
 # Anna Preto
 # AstroDeep Project
-# L'ellipse unique de la chaîne, celle du test de recouvrement de copaings : moments d'ordre deux en bande i avec le
-# facteur 2 ln 2 (demi-lumière) pour Rubin, demi-axes du catalogue MER élargis par la tache pour Euclid.
-# Elle sert à la coupure 5 (k fois l'ellipse) et au masquage des compagnes.
+# The pipeline's single ellipse, the one used by the copaings overlap test: i-band second moments with the
+# 2 ln 2 factor (half light) for Rubin, MER catalogue semi-axes broadened by the PSF for Euclid.
+# It is used by cut 5 (k times the ellipse) and by companion masking.
 #
-# Repère : celui des pixels du tract Rubin, x = colonne (vers l'ouest), y = ligne (vers le nord). Un tableau
-# s'indexe [ligne, colonne] = [y, x] ; theta est compté depuis l'axe x, en degrés.
+# Frame: Rubin tract pixels, x = column (towards west), y = row (towards north). An array is indexed
+# [row, column] = [y, x]; theta is measured from the x axis, in degrees.
 
 import numpy as np
 
 FWHM2SIGMA = 2.0 * np.sqrt(2.0 * np.log(2.0))
-LSST_PIXEL_SCALE = 0.2  # seconde d'arc par pixel
+LSST_PIXEL_SCALE = 0.2  # arcsec per pixel
 
 
 def moments_to_ellipse(ixx, iyy, ixy):
-    # Mêmes demi-axes et angle que friendly.ellipses.moments2ab, écrits par valeurs propres pour rester définis
-    # quand l'angle vaut 45 degrés (cos 2theta = 0 dans la formule de friendly).
+    # Same semi-axes and angle as friendly.ellipses.moments2ab, written with eigenvalues so that they stay defined
+    # when the angle is 45 degrees (cos 2theta = 0 in friendly's formula).
     ixx, iyy, ixy = (np.asarray(v, dtype=float) for v in (ixx, iyy, ixy))
     half_tr = 0.5 * (ixx + iyy)
     root = np.sqrt((0.5 * (ixx - iyy)) ** 2 + ixy ** 2)
@@ -28,16 +28,16 @@ def moments_to_ellipse(ixx, iyy, ixy):
 
 
 def psf_ellipse(ixx_psf, iyy_psf, pixel_scale=LSST_PIXEL_SCALE):
-    # Repli pour un objet Rubin sans moments : cercle de la tache, au même facteur 2 ln 2.
+    # Fallback for a Rubin object without moments: the PSF circle, with the same 2 ln 2 factor.
     sigma2 = 0.5 * (np.asarray(ixx_psf, float) + np.asarray(iyy_psf, float))
     r = np.sqrt(2.0 * np.log(2.0) * sigma2)
     return r, r, np.zeros_like(r)
 
 
 def euclid_ellipse(size_true, size_minor_true, position_angle_true, psf_fwhm_i, pixel_scale=LSST_PIXEL_SCALE):
-    # Recopie de copaings.eot_fast.EllipseCache.true_params (demi-axes élargis par la tache, en pixels Rubin,
-    # et theta = 270 - position_angle_true ramené dans [0, 180]) : la même ellipse que celle du test de recouvrement.
-    psf = np.sqrt(2.0) * np.asarray(psf_fwhm_i, float) / FWHM2SIGMA  # seconde d'arc
+    # Copy of copaings.eot_fast.EllipseCache.true_params (semi-axes broadened by the PSF, in Rubin pixels, and
+    # theta = 270 - position_angle_true folded into [0, 180]): the same ellipse as in the overlap test.
+    psf = np.sqrt(2.0) * np.asarray(psf_fwhm_i, float) / FWHM2SIGMA  # arcsec
     a = np.sqrt(np.asarray(size_true, float) ** 2 + psf ** 2) / pixel_scale
     b = np.sqrt(np.asarray(size_minor_true, float) ** 2 + psf ** 2) / pixel_scale
     theta = 270.0 - np.asarray(position_angle_true, float)
@@ -46,7 +46,7 @@ def euclid_ellipse(size_true, size_minor_true, position_angle_true, psf_fwhm_i, 
 
 
 def elliptical_radius(dx, dy, a, b, theta_deg):
-    # Rayon réduit : 1 sur le bord de l'ellipse, k sur le bord de k fois l'ellipse.
+    # Reduced radius: 1 on the edge of the ellipse, k on the edge of k times the ellipse.
     t = np.radians(theta_deg)
     c, s = np.cos(t), np.sin(t)
     u = dx * c + dy * s
@@ -56,6 +56,6 @@ def elliptical_radius(dx, dy, a, b, theta_deg):
 
 
 def radius_map(shape, xc, yc, a, b, theta_deg):
-    # Rayon réduit de chaque pixel d'une boîte ; xc, yc dans le repère de la boîte (colonne, ligne).
+    # Reduced radius of every pixel of a box; xc, yc in the box frame (column, row).
     rows, cols = np.indices(shape)
     return elliptical_radius(cols - xc, rows - yc, a, b, theta_deg)

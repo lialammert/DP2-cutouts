@@ -1,7 +1,7 @@
 # cli.py
 # Anna Preto
 # AstroDeep Project
-# Point d'entrée en ligne de commande : res <config.yaml> <étape>, ou « all » pour toute la chaîne dans l'ordre.
+# Command-line entry point: dp2-cutouts <config.yaml> <step>, or "all" to run the whole pipeline in order.
 
 import argparse
 
@@ -35,7 +35,7 @@ def run_step(cfg, step):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="res")
+    ap = argparse.ArgumentParser(prog="dp2-cutouts")
     ap.add_argument("config")
     ap.add_argument("step", choices=STEPS + ("all",))
     args = ap.parse_args(argv)
