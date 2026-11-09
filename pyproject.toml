@@ -10,7 +10,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dp2-cutouts"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "numpy", "pandas<3", "pyarrow", "scipy", "astropy", "healpy", "galsim", "pyyaml",
     "requests", "pyvo", "lsdb", "huggingface_hub",

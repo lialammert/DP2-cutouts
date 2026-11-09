@@ -13,7 +13,7 @@ Code that builds a dataset of isolated-galaxy stamps: Rubin DP2 pixels (six band
 
 ## Installation (macOS, Linux or WSL)
 
-Python 3.10 or later. From the repository root:
+Python 3.11 or later (required by lsdb, hats, astropy and pyarrow). From the repository root:
 
 ```bash
 python3 -m venv ~/venvs/dp2-cutouts
@@ -27,7 +27,8 @@ pytest tests
 - `copaings` is installed from GitHub as a dependency.
 - `friendly` is installed with `--no-deps` because its `pyproject` pins numpy < 2, which the rest does not need.
   Alternatively, clone it and point `FRIENDLY_PATH` (or `copaings.friendly_path` in the configuration) to it.
-- On macOS, if `python3 --version` is older than 3.10, install a recent Python (python.org or Homebrew).
+- If `python3 --version` is older than 3.11, install a recent Python (python.org or Homebrew on macOS) and
+  create the environment with it, e.g. `python3.12 -m venv ~/venvs/dp2-cutouts`.
 - `healpy` does not install on native Windows: use WSL.
 - In Jupyter, choose the "Python (dp2-cutouts)" kernel.
 
