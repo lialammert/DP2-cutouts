@@ -22,7 +22,7 @@ from ..common import masks
 from ..common.ellipse import (FWHM2SIGMA, euclid_ellipse, moments_to_ellipse, psf_ellipse,
                               radius_map)
 from ..common.shapes import adaptive_moments, circular_weight, delta_e
-from ..sources.rubin_soda import BANDS, tract_origin
+from ..sources.rubin_soda import tract_origin
 from .catalog_table import copaings_dir
 from ..config import RUBIN_DIR, TABLES_DIR
 
@@ -30,11 +30,19 @@ NJY_ZEROPOINT = 31.4  # AB magnitude of a 1 nJy flux
 
 
 # ----------------------------------------------------------------------------- images
-def load_images(cfg):
+def load_images(cfg, tract=None, patch=None):
+    if cfg["pixels"].get("source", "soda") == "butler":
+        from ..sources import rubin_butler
+        return rubin_butler.load_patch(cfg, tract, patch)
+    
+    return _load_images_soda(cfg)
+
+
+def _load_images_soda(cfg):
     img_dir = cfg.data(RUBIN_DIR, "images", "x").parent
     meta = json.load(open(img_dir / "images.json"))
     flux, var, mask, wcs, origins, bits = [], [], [], [], [], []
-    for b in BANDS:
+    for b in cfg["cfg["bands"]"]:
         with fits.open(img_dir / meta["files"][b]) as h:
             flux.append(h["IMAGE"].data.astype(np.float32))
             var.append(h["VARIANCE"].data.astype(np.float32))
@@ -45,7 +53,7 @@ def load_images(cfg):
     if len({f.shape for f in flux}) != 1 or len(set(origins)) != 1 or any(bt != bits[0] for bt in bits):
         raise RuntimeError("the six images do not share the same pixel grid or the same mask planes")
     mask = np.stack(mask)
-    # Pixels detected in at least one band: a companion may be detected in some bands only.
+    # Pixels detected in at least one band: a companion may be detected in some cfg["bands"] only.
     detected = np.any((mask & masks.bitmask(bits[0], ["DETECTED"])) != 0, axis=0)
     return dict(flux=np.stack(flux), var=np.stack(var), mask=mask, detected=detected, wcs=wcs, x0=origins[0][0],
                 y0=origins[0][1], bits=bits[0], meta=meta)
@@ -55,7 +63,7 @@ def load_images(cfg):
 def companions(cfg, img, cat):
     # Every known object in the region, without any cut: Rubin (including point-like objects and those without
     # i_extendedness) and Euclid (including stars), each with its ellipse in the region pixels.
-    w = img["wcs"][BANDS.index("i")]
+    w = img["wcs"][cfg["cfg["bands"]"].index("i")]
     raw = pd.read_parquet(cfg.data(RUBIN_DIR, "catalog", "object_box.parquet"))
     a, b, th = moments_to_ellipse(raw["i_ixx"], raw["i_iyy"], raw["i_ixy"])
     ap, bp, thp = psf_ellipse(raw["i_ixxPSF"], raw["i_iyyPSF"])
@@ -175,13 +183,13 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
 
     # Positions in each band; cut 7: same integer pixel everywhere.
     pos = np.array([w.world_to_pixel_values(row.ra, row.dec) for w in img["wcs"]], float)
-    ib = BANDS.index(cc["shape_band"])
-    x, y = pos[BANDS.index("i")]
+    ib = cfg["bands"].index(cc["shape_band"])
+    x, y = pos[cfg["bands"].index("i")]
     ix, iy = int(np.floor(x + 0.5)), int(np.floor(y + 0.5))
     centers = np.floor(pos + 0.5).astype(int)
     out["x_tract"], out["y_tract"] = img["x0"] + x, img["y0"] + y
-    out["cut7_value"] = float(np.max(np.hypot(*(pos - pos[BANDS.index("i")]).T)))
-    out["cut7_pass"] = bool(np.all(centers == centers[BANDS.index("i")]))
+    out["cut7_value"] = float(np.max(np.hypot(*(pos - pos[cfg["bands"].index("i")]).T)))
+    out["cut7_pass"] = bool(np.all(centers == centers[cfg["bands"].index("i")]))
 
     # Local demo: the stamp must fit inside the downloaded region (on the platform, it is the whole patch).
     out["in_region"] = bool(half <= ix < W - half and half <= iy < H - half)
@@ -209,7 +217,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     # Cut 5: reduced radius of the nearest damaged pixel, in units of the target ellipse.
     a, b, th = row.ellipse_a, row.ellipse_b, row.ellipse_theta
     if not (np.isfinite(a) and np.isfinite(b) and b > 0):
-        a = b = float(np.sqrt(2 * np.log(2)) * row.psf_sigma_i / 0.2)
+        a = b = float(np.sqrt(2 * np.log(2)) * row.psf_sigma_i / cfg["pixel_scale"])
         th = 0.0
     rmap = radius_map((n, n), xc, yc, a, b, th)
     badpix = np.any((mbox & bad) != 0, axis=0)
@@ -259,10 +267,10 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     # Local depth: median sky variance (pixels neither detected nor unexposed), 5-sigma limiting magnitude for a
     # point source the size of the PSF.
     det = masks.bitmask(bits, ["DETECTED", "NO_DATA"])
-    for k, band in enumerate(BANDS):
+    for k, band in enumerate(cfg["bands"]):
         sky = (mbox[k] & det) == 0
         v = float(np.median(img["var"][box][k][sky])) if sky.any() else np.nan
-        s_pix = float(getattr(row, f"psf_sigma_{band}")) / 0.2
+        s_pix = float(getattr(row, f"psf_sigma_{band}")) / cfg["pixel_scale"]
         out[f"sky_var_{band}"] = v
         out[f"depth5_{band}"] = NJY_ZEROPOINT - 2.5 * np.log10(5.0 * np.sqrt(4 * np.pi * s_pix ** 2 * v))
 
@@ -327,7 +335,7 @@ def run(cfg):
     st.attrs = {}
     st.to_parquet(cfg.data(TABLES_DIR, "stamps.parquet"), index=False)
     with open(cfg.data(TABLES_DIR, "stamps.json"), "w") as f:
-        json.dump(dict(bands=list(BANDS), stamp_px=cc["stamp_px"], diag_px=cc["diag_px"], plane_bits=img["bits"],
+        json.dump(dict(cfg["bands"]=list(cfg["bands"]), stamp_px=cc["stamp_px"], diag_px=cc["diag_px"], plane_bits=img["bits"],
                        filled_bit=masks.FILLED_BIT, tract=meta["tract"], patch=meta["patch"]), f, indent=2)
 
     t = table[table["in_region"]]
