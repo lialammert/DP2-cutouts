@@ -141,6 +141,7 @@ class SkyBank:
         rr, cc = np.meshgrid(np.arange(0, H - size + 1, stride), np.arange(0, W - size + 1, stride), indexing="ij")
         self.corners = np.column_stack([rr.ravel(), cc.ravel()])
         self.size = size
+        self.img = img
 
     def find(self, need, rng, tries):
         # Window whose usable pixels cover every pixel to fill; failing that, the least bad one.
@@ -212,6 +213,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     if "psf" in img:
         from ..sources.rubin_butler import psf_stamp
         from ..common.psf import fwhm_from_stamp
+        
         size = int(cfg["psf_px"])
         psf = np.stack([psf_stamp(img, k, img["x0"]+x, img["y0"]+y, size)
                                   for k in range(len(cfg["bands"]))])

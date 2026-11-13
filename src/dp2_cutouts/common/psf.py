@@ -1,5 +1,7 @@
 import numpy as np
 
+# KL incomplete-- only contains what's needed for phase 1 now
+
 def fwhm_from_stamp(psf, pixel_scale, oversample=4):
     """
     Compute the FWHM in arcseconds of a PSF stamp.

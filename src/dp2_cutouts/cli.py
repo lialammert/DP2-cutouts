@@ -7,7 +7,15 @@ import argparse
 
 from .config import Config
 
-STEPS = ("rubin_catalog", "euclid_catalog", "copaings", "rubin_images", "catalog_table", "stamps", "package")
+STEPS = ("rubin_catalog", 
+         "euclid_catalog",
+           "copaings", 
+           "rubin_images", 
+           "empty_sky",
+           "catalog_table", 
+           "stamps",
+           "export_debvader", 
+           "package")
 
 
 def run_step(cfg, step):
@@ -28,12 +36,18 @@ def run_step(cfg, step):
     elif step == "rubin_images":
         from .sources import rubin_soda
         rubin_soda.run(cfg)
+    elif step == "empty_sky":
+        from .stages import empty_sky
+        empty_sky.run(cfg)
     elif step == "catalog_table":
         from .stages import catalog_table
         catalog_table.run(cfg)
     elif step == "stamps":
         from .stages import stamps
         stamps.run(cfg)
+    elif step == "export_debvader":
+        from .stages import export_debvader
+        export_debvader.run(cfg)
     elif step == "package":
         from .stages import package
         package.run(cfg)
