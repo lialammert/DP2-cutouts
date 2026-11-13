@@ -141,7 +141,6 @@ class SkyBank:
         rr, cc = np.meshgrid(np.arange(0, H - size + 1, stride), np.arange(0, W - size + 1, stride), indexing="ij")
         self.corners = np.column_stack([rr.ravel(), cc.ravel()])
         self.size = size
-        self.img = img
 
     def find(self, need, rng, tries):
         # Window whose usable pixels cover every pixel to fill; failing that, the least bad one.
@@ -206,22 +205,28 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     n = cc["stamp_px"]
     ox, oy = ix - half, iy - half
     xc, yc = x - ox, y - oy  # fractional position in the stamp (column, row)
+    out["offset_x"], out["offset_y"] = float(xc - half), float(yc - half)   # within [-0.5, 0.5] px
     box = np.s_[:, oy:oy + n, ox:ox + n]
     mbox = img["mask"][box]
 
-    # Optionally fetch the PSF
+    # PSF stamp per band at the object's position (Butler path only: the SODA cutouts carry no PSF model).
+    # x, y are local array coordinates; the PSF model takes tract pixels. psf_pass is False when the coadd has
+    # no PSF for this object's cell in some band (the object cannot be forward-modelled): a cut, "psf" in
+    # export.apply.
+    psf = None
     if "psf" in img:
-        from ..sources.rubin_butler import psf_stamp
         from ..common.psf import fwhm_from_stamp
-        
+        from ..sources.rubin_butler import psf_stamp
+
         size = int(cfg["psf_px"])
-        psf = np.stack([psf_stamp(img, k, img["x0"]+x, img["y0"]+y, size)
-                                  for k in range(len(cfg["bands"]))])
-        for b in cfg["bands"]:
-            fwhm = fwhm_from_stamp(psf, cfg["pixel_scale"], oversample=4)
-            out[f"psf_fwhm_{b}"] = float(fwhm)
-    else:
-        psf = None
+        stamps_k = [psf_stamp(img, k, img["x0"] + x, img["y0"] + y, size) for k in range(len(cfg["bands"]))]
+        out["psf_pass"] = all(p is not None for p in stamps_k)
+        out["psf_value"] = int(sum(p is None for p in stamps_k))           # number of bands without a PSF
+        for k, b in enumerate(cfg["bands"]):
+            ok = stamps_k[k] is not None
+            out[f"psf_fwhm_{b}"] = float(fwhm_from_stamp(stamps_k[k], cfg["pixel_scale"])) if ok else np.nan
+        if out["psf_pass"]:
+            psf = np.stack(stamps_k)                                        # (C, P, P)
 
     # Cut 4: no unexposed pixel in the box, in any band.
     nod = (mbox & nodata) != 0
@@ -315,46 +320,63 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                   flux=flux.astype(np.float32).ravel(), 
                   ivar=ivar.ravel(), 
                   maskbits=mbits.astype(np.int32).ravel(),
-                  psf=psf.ravel() if psf is not None else None,
-                  variance = var.astype(np.float32).ravel(),
+                  variance=var.astype(np.float32).ravel(),
                   companion_mask=need.ravel())
+    if psf is not None:
+        arrays["psf"] = psf.astype(np.float32).ravel()
     if diag:
         arrays.update(diag)
     return out, arrays
 
 
+def patch_files_path(cfg, kind, tract, patch, suffix="parquet"):
+    """<working folder>/tables_and_stamps/patch_files/<kind>_<tract>_<patch>.<suffix>"""
+    return cfg.data(TABLES_DIR, "patch_files", f"{kind}_{tract}_{patch}.{suffix}")
+
+
+def patch_list(cfg, cat):
+    """The (tract, patch) pairs to process: pixels.patches if given, else every patch with catalogue objects."""
+    given = cfg["pixels"].get("patches")
+    if given:
+        return [(int(t), int(p)) for t, p in given]
+    return sorted({(int(t), int(p)) for t, p in zip(cat["tract"], cat["patch"])})
+
+
 def run(cfg):
-    cc = cfg["cuts"]
-    img = load_images(cfg)
+    """Cut the stamps patch by patch. Each patch writes three patch files; a patch whose `done` marker exists
+    is skipped, so an interrupted run resumes where it stopped. Delete the patch files to recompute a patch."""
     cat = pd.read_parquet(cfg.data(TABLES_DIR, "catalog.parquet"))
-    patches = cfg["pixels"].get("patches") or sorted(
-        {(int(t), int(p)) for t, p in zip(cat["tract"], cat["patch"])})
-    
-    for tract, patch in patches:
-        done = cfg.data(TABLES_DIR, "shards", f"stamps_{tract}_{patch}.parquet")
+    for tract, patch in patch_list(cfg, cat):
+        done = patch_files_path(cfg, "done", tract, patch, "txt")
         if done.exists():
+            print(f"patch {tract}/{patch}: already done, skipped")
             continue
-
         img = load_images(cfg, tract, patch)
-        table, stamps_df = run_patch(cfg, img, cat, tract, patch)
-        table.to_parquet(cfg.data(TABLES_DIR, "shards", f"table_{tract}_{patch}.parquet"))
-        stamps_df.to_parquet(cfg.data(TABLES_DIR, "shards", f"stamps_{tract}_{patch}.parquet"))
-        done.touch()
-
+        table, stamps_df, info = run_patch(cfg, img, cat, tract, patch)
+        table.to_parquet(patch_files_path(cfg, "table", tract, patch), index=False)
+        stamps_df.to_parquet(patch_files_path(cfg, "stamps", tract, patch), index=False)
+        with open(patch_files_path(cfg, "stamps", tract, patch, "json"), "w") as f:
+            json.dump(info, f, indent=2)
+        done.write_text("ok\n")          # written last: its presence means the three files are complete
         del img
 
 
 def run_patch(cfg, img, cat, tract, patch):
+    """Process the targets of one patch. Returns (table, stamps, info):
+    table   the catalogue rows of this patch, with the pixel-cut columns of the targets
+    stamps  one row per target that fits in the image: the pixel arrays, flattened
+    info    bands, sizes and mask-plane bits needed to read the arrays back
+    """
     cc = cfg["cuts"]
+    in_patch = (cat["tract"] == tract) & (cat["patch"] == patch)
+    # Targets: the Euclid-isolated objects (cuts 1 and 2), or every object of the patch with stamps.targets: all
+    # (for evaluation on real objects, including blends).
+    if (cfg.raw.get("stamps") or {}).get("targets", "isolated") == "all":
+        targets = cat[in_patch]
+    else:
+        targets = cat[in_patch & cat["cut1_pass"] & cat["cut2_pass"]]
 
-    if cfg["stamps"].get("targets", "isolated") == "all":
-        targets = cat[cat[(cat["tract"] == tract) & (cat["patch"] == patch)]]
-    else: 
-        targets = cat[cat["cut1_pass"] & cat["cut2_pass"] & (cat["tract"] == tract)
-                  & (cat["patch"] == patch)]
-        
     rubin, euclid = companions(cfg, img, cat)
-
     unusable = masks.bitmask(img["bits"], ["DETECTED", "NO_DATA"] + list(cc["bad_planes"]))
     banks = {n: SkyBank(img, unusable, n) for n in (cc["stamp_px"], cc["diag_px"])}
     rows, arrays = [], []
@@ -364,33 +386,50 @@ def run_patch(cfg, img, cat, tract, patch):
         rows.append(out)
         if arr is not None:
             arrays.append(arr)
-    res = pd.DataFrame(rows)
+    res = pd.DataFrame(rows) if rows else pd.DataFrame({"object_id": pd.Series([], dtype="int64")})
 
-    # Full table: every catalogue row, pixel columns empty outside targets.
-    table = cat.merge(res, on="object_id", how="left")
+    # This patch's catalogue rows; pixel columns are empty for the objects that were not targets.
+    table = cat[in_patch].merge(res, on="object_id", how="left")
     table["pixel_target"] = table["object_id"].isin(res["object_id"])
+    if "in_region" not in table:
+        table["in_region"] = False
     table["in_region"] = table["in_region"].astype("boolean").fillna(False).astype(bool)
-    table.to_parquet(cfg.data(TABLES_DIR, "table.parquet"), index=False)
 
     st = pd.DataFrame(arrays)
     st.attrs = {}
-    st.to_parquet(cfg.data(TABLES_DIR, "stamps.parquet"), index=False)
-    with open(cfg.data(TABLES_DIR, "stamps.json"), "w") as f:
-        json.dump(dict(bands=list(cfg["bands"]), stamp_px=cc["stamp_px"], diag_px=cc["diag_px"], plane_bits=img["bits"],
-                       filled_bit=masks.FILLED_BIT, tract=tract, patch=patch), f, indent=2)
+    info = dict(bands=list(cfg["bands"]), stamp_px=int(cc["stamp_px"]), diag_px=int(cc["diag_px"]),
+                psf_px=int(cfg["psf_px"]) if "psf" in img else None, plane_bits=img["bits"],
+                filled_bit=masks.FILLED_BIT, tract=int(tract), patch=int(patch), x0=int(img["x0"]),
+                y0=int(img["y0"]))
 
     t = table[table["in_region"]]
-    msg = {k: int(t[f"{k}_pass"].sum()) for k in ("cut3", "cut4", "cut5", "cut6", "cut7", "cut8", "mask")}
-    print(f"patch targets {len(targets):,}; in region {len(t):,}; passing: {msg}")
-    return table
+    msg = {k: int(t[f"{k}_pass"].sum()) for k in ("cut3", "cut4", "cut5", "cut6", "cut7", "cut8", "mask")
+           if f"{k}_pass" in t}
+    print(f"patch {tract}/{patch}: targets {len(targets):,}; in region {len(t):,}; passing: {msg}")
+    return table, st, info
 
-def split_of(tract, patch, split_cfg):
-    """
-    Determine the train / val / test split of a patch, based on its patch number only.
-    0 train, 1 validation, 2 test. 
+
+def split_of(tract, patch, split_cfg, x_tract=None, y_tract=None):
+    """Train / validation / test split of an object: 0 train, 1 validation, 2 test.
+
+    The split is a hash of the sky region, never of the object, because neighbours share PSF, depth and
+    artefacts. split_cfg:
+      train, val, test   fractions (test = the rest)
+      seed               changes the drawing
+      unit               "patch" (default): one split per patch, for the full field;
+                         "block": square blocks of block_px tract pixels (default 600 = 2 arcmin), so that a single
+                         patch still provides all three splits during development
     """
     import hashlib
-    h = hashlib.md5(f"{split_cfg['seed']}:{tract}:{patch}".encode()).hexdigest()
-    u = int(h[:8], 16) / 0xFFFFFFFF
+    unit = split_cfg.get("unit", "patch")
+    if unit == "patch":
+        key = f"{split_cfg['seed']}:{tract}:{patch}"
+    elif unit == "block":
+        if x_tract is None or y_tract is None:
+            raise ValueError("split unit 'block' needs the tract-pixel position")
+        b = int(split_cfg.get("block_px", 600))
+        key = f"{split_cfg['seed']}:{tract}:{int(x_tract) // b}:{int(y_tract) // b}"
+    else:
+        raise ValueError(f"split.unit must be 'patch' or 'block', got {unit!r}")
+    u = int(hashlib.md5(key.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
     return 0 if u < split_cfg["train"] else 1 if u < split_cfg["train"] + split_cfg["val"] else 2
-    

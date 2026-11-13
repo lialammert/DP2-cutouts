@@ -16,12 +16,20 @@ COPAINGS_DIR = "copaings_matching"  # copaings working files: matching groups, b
 TABLES_DIR = "tables_and_stamps"    # catalog.parquet (one row per object + catalogue cuts), table.parquet
                                     # (+ pixel cuts), stamps.parquet (pixel arrays), stamps.json
 PACKAGE_DIR = "final_dataset"       # packaged dataset (MultimodalUniverse format)
+EXPORT_DIR = "debvader_datasets"    # datasets in the debvader format (export_debvader step, when run by the CLI)
 
 
 @dataclass
 class Config:
     raw: dict
     path: Path
+
+    # Values the pipeline injects; standalone configurations that predate them get the DP2 Rubin values.
+    DEFAULTS = {"bands": "ugrizy", "pixel_scale": 0.2, "psf_px": 35}
+
+    def __post_init__(self):
+        for k, v in self.DEFAULTS.items():
+            self.raw.setdefault(k, v)
 
     @classmethod
     def load(cls, path):

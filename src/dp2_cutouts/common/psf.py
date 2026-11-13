@@ -1,6 +1,6 @@
 import numpy as np
 
-# KL incomplete-- only contains what's needed for phase 1 now
+# PSF stamp utilities.
 
 def fwhm_from_stamp(psf, pixel_scale, oversample=4):
     """
@@ -30,3 +30,4 @@ def fwhm_from_stamp(psf, pixel_scale, oversample=4):
 
     area = np.count_nonzero(psf_oversampled >= 0.5 * np.max(psf_oversampled)) / (oversample ** 2)  # in px^2
     fwhm = 2.0 * np.sqrt(area / np.pi) * pixel_scale  # in arcseconds
+    return fwhm

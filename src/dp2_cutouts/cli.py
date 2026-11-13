@@ -7,15 +7,17 @@ import argparse
 
 from .config import Config
 
-STEPS = ("rubin_catalog", 
+# In dependency order: `all` runs them in this order. empty_sky needs catalog_table (for the patch list);
+# export_debvader needs stamps and empty_sky.
+STEPS = ("rubin_catalog",
          "euclid_catalog",
-           "copaings", 
-           "rubin_images", 
-           "empty_sky",
-           "catalog_table", 
-           "stamps",
-           "export_debvader", 
-           "package")
+         "copaings",
+         "rubin_images",
+         "catalog_table",
+         "stamps",
+         "empty_sky",
+         "export_debvader",
+         "package")
 
 
 def run_step(cfg, step):
@@ -34,8 +36,12 @@ def run_step(cfg, step):
         from .stages import run_copaings
         run_copaings.run(cfg)
     elif step == "rubin_images":
-        from .sources import rubin_soda
-        rubin_soda.run(cfg)
+        # SODA download of a region; with pixels.source = butler the stamps read the coadds directly.
+        if cfg["pixels"].get("source", "soda") == "butler":
+            print("rubin_images: nothing to do, pixels are read through the Butler")
+        else:
+            from .sources import rubin_soda
+            rubin_soda.run(cfg)
     elif step == "empty_sky":
         from .stages import empty_sky
         empty_sky.run(cfg)
