@@ -1,7 +1,7 @@
 # stamps.py
 # Anna Preto
 # AstroDeep Project
-# Cuts the stamps from the six images of a region, applies the pixel cuts (3, 4, 5, 7, 8), masks companions and
+# Cuts the stamps from the six images of a region, applies the pixel cuts, masks companions and
 # fills them with empty sky, and takes the masking decision. Each cut records its continuous quantity next to its
 # condition; no target is removed here.
 #
@@ -42,7 +42,7 @@ def _load_images_soda(cfg):
     img_dir = cfg.data(RUBIN_DIR, "images", "x").parent
     meta = json.load(open(img_dir / "images.json"))
     flux, var, mask, wcs, origins, bits = [], [], [], [], [], []
-    for b in cfg["cfg["bands"]"]:
+    for b in cfg["bands"]:
         with fits.open(img_dir / meta["files"][b]) as h:
             flux.append(h["IMAGE"].data.astype(np.float32))
             var.append(h["VARIANCE"].data.astype(np.float32))
@@ -63,7 +63,7 @@ def _load_images_soda(cfg):
 def companions(cfg, img, cat):
     # Every known object in the region, without any cut: Rubin (including point-like objects and those without
     # i_extendedness) and Euclid (including stars), each with its ellipse in the region pixels.
-    w = img["wcs"][cfg["cfg["bands"]"].index("i")]
+    w = img["wcs"][cfg["bands"].index("i")]
     raw = pd.read_parquet(cfg.data(RUBIN_DIR, "catalog", "object_box.parquet"))
     a, b, th = moments_to_ellipse(raw["i_ixx"], raw["i_iyy"], raw["i_ixy"])
     ap, bp, thp = psf_ellipse(raw["i_ixxPSF"], raw["i_iyyPSF"])
@@ -131,7 +131,6 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
         elif not (inside and det[iy, ix]):
             m |= radius_map(shape, x, y, r.a, r.b, r.theta) <= 1.0
     return m
-
 
 # ----------------------------------------------------------------------------- empty sky
 class SkyBank:
@@ -208,6 +207,19 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     xc, yc = x - ox, y - oy  # fractional position in the stamp (column, row)
     box = np.s_[:, oy:oy + n, ox:ox + n]
     mbox = img["mask"][box]
+
+    # Optionally fetch the PSF
+    if "psf" in img:
+        from ..sources.rubin_butler import psf_stamp
+        from ..common.psf import fwhm_from_stamp
+        size = int(cfg["psf_px"])
+        psf = np.stack([psf_stamp(img, k, img["x0"]+x, img["y0"]+y, size)
+                                  for k in range(len(cfg["bands"]))])
+        for b in cfg["bands"]:
+            fwhm = fwhm_from_stamp(psf, cfg["pixel_scale"], oversample=4)
+            out[f"psf_fwhm_{b}"] = float(fwhm)
+    else:
+        psf = None
 
     # Cut 4: no unexposed pixel in the box, in any band.
     nod = (mbox & nodata) != 0
@@ -298,7 +310,11 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
         ivar = np.where((var > 0) & ((mbits & nodata) == 0), 1.0 / var, 0.0).astype(np.float32)
     arrays = dict(object_id=row.object_id,
                   flux_raw=img["flux"][box].astype(np.float32).ravel(),
-                  flux=flux.astype(np.float32).ravel(), ivar=ivar.ravel(), maskbits=mbits.astype(np.int32).ravel(),
+                  flux=flux.astype(np.float32).ravel(), 
+                  ivar=ivar.ravel(), 
+                  maskbits=mbits.astype(np.int32).ravel(),
+                  psf=psf.ravel() if psf is not None else None,
+                  variance = var.astype(np.float32).ravel(),
                   companion_mask=need.ravel())
     if diag:
         arrays.update(diag)
@@ -309,9 +325,32 @@ def run(cfg):
     cc = cfg["cuts"]
     img = load_images(cfg)
     cat = pd.read_parquet(cfg.data(TABLES_DIR, "catalog.parquet"))
-    meta = img["meta"]
-    targets = cat[cat["cut1_pass"] & cat["cut2_pass"] & (cat["tract"] == meta["tract"])
-                  & (cat["patch"] == meta["patch"])]
+    patches = cfg["pixels"].get("patches") or sorted(
+        {(int(t), int(p)) for t, p in zip(cat["tract"], cat["patch"])})
+    
+    for tract, patch in patches:
+        done = cfg.data(TABLES_DIR, "shards", f"stamps_{tract}_{patch}.parquet")
+        if done.exists():
+            continue
+
+        img = load_images(cfg, tract, patch)
+        table, stamps_df = run_patch(cfg, img, cat, tract, patch)
+        table.to_parquet(cfg.data(TABLES_DIR, "shards", f"table_{tract}_{patch}.parquet"))
+        stamps_df.to_parquet(cfg.data(TABLES_DIR, "shards", f"stamps_{tract}_{patch}.parquet"))
+        done.touch()
+
+        del img
+
+
+def run_patch(cfg, img, cat, tract, patch):
+    cc = cfg["cuts"]
+
+    if cfg["stamps"].get("targets", "isolated") == "all":
+        targets = cat[cat[(cat["tract"] == tract) & (cat["patch"] == patch)]]
+    else: 
+        targets = cat[cat["cut1_pass"] & cat["cut2_pass"] & (cat["tract"] == tract)
+                  & (cat["patch"] == patch)]
+        
     rubin, euclid = companions(cfg, img, cat)
 
     unusable = masks.bitmask(img["bits"], ["DETECTED", "NO_DATA"] + list(cc["bad_planes"]))
@@ -335,10 +374,21 @@ def run(cfg):
     st.attrs = {}
     st.to_parquet(cfg.data(TABLES_DIR, "stamps.parquet"), index=False)
     with open(cfg.data(TABLES_DIR, "stamps.json"), "w") as f:
-        json.dump(dict(cfg["bands"]=list(cfg["bands"]), stamp_px=cc["stamp_px"], diag_px=cc["diag_px"], plane_bits=img["bits"],
-                       filled_bit=masks.FILLED_BIT, tract=meta["tract"], patch=meta["patch"]), f, indent=2)
+        json.dump(dict(bands=list(cfg["bands"]), stamp_px=cc["stamp_px"], diag_px=cc["diag_px"], plane_bits=img["bits"],
+                       filled_bit=masks.FILLED_BIT, tract=tract, patch=patch), f, indent=2)
 
     t = table[table["in_region"]]
     msg = {k: int(t[f"{k}_pass"].sum()) for k in ("cut3", "cut4", "cut5", "cut6", "cut7", "cut8", "mask")}
     print(f"patch targets {len(targets):,}; in region {len(t):,}; passing: {msg}")
     return table
+
+def split_of(tract, patch, split_cfg):
+    """
+    Determine the train / val / test split of a patch, based on its patch number only.
+    0 train, 1 validation, 2 test. 
+    """
+    import hashlib
+    h = hashlib.md5(f"{split_cfg['seed']}:{tract}:{patch}".encode()).hexdigest()
+    u = int(h[:8], 16) / 0xFFFFFFFF
+    return 0 if u < split_cfg["train"] else 1 if u < split_cfg["train"] + split_cfg["val"] else 2
+    
