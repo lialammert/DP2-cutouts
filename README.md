@@ -45,13 +45,13 @@ pytest tests
 
 | step | what it does | output (under `data_root`) |
 |---|---|---|
-| `rubin_catalog` | DP2 Object table through TAP, no cut | `10_rubin/catalog/object_box.parquet` |
-| `euclid_catalog` | MER catalogue + redshift from HuggingFace (HATS), tiles in the copaings format | `00_euclid/` |
-| `copaings` | copaings against Euclid; `prep` rewritten without the butler, the rest unchanged | `20_copaings/<name>/lsst_sb.parquet` |
-| `rubin_images` | six SIA + SODA cutouts (image, mask, variance) of a region, patch bounding box | `10_rubin/images/` |
-| `catalog_table` | one row per object, cuts 1, 2, 6, PSF per band, ellipse, redshift | `30_processed/catalog.parquet` |
-| `stamps` | cuts 3, 4, 5, 7, 8, companion masking and the 0.02 decision | `30_processed/table.parquet`, `stamps.parquet` |
-| `package` | final dataset in the MultimodalUniverse format, partitioned by order-5 HEALPix | `40_final/data/`, `40_final/catalog/` |
+| `rubin_catalog` | DP2 Object table through TAP, no cut | `rubin_data/catalog/object_box.parquet` |
+| `euclid_catalog` | MER catalogue + redshift from HuggingFace (HATS), tiles in the copaings format | `euclid_catalog/` |
+| `copaings` | copaings against Euclid; `prep` rewritten without the butler, the rest unchanged | `copaings_matching/<name>/lsst_sb.parquet` |
+| `rubin_images` | six SIA + SODA cutouts (image, mask, variance) of a region, patch bounding box | `rubin_data/images/` |
+| `catalog_table` | one row per object, cuts 1, 2, 6, PSF per band, ellipse, redshift | `tables_and_stamps/catalog.parquet` |
+| `stamps` | cuts 3, 4, 5, 7, 8, companion masking and the 0.02 decision | `tables_and_stamps/table.parquet`, `stamps.parquet` |
+| `package` | final dataset in the MultimodalUniverse format, partitioned by order-5 HEALPix | `final_dataset/data/`, `final_dataset/catalog/` |
 
 No row is removed before `package`: each cut writes its continuous quantity (`cutN_value`) and its condition
 (`cutN_pass`). The cuts applied to the final dataset are listed in `package.apply`.
@@ -62,7 +62,7 @@ No row is removed before `package`: each cut writes its continuous quantity (`cu
   MultimodalUniverse; `mask` is True on pixels not to be trusted (planes `package.mmu_mask_planes`).
 - `image_maskbits`: the full Rubin mask planes, plus the `FILLED_SKY` bit (1 << 16) for pixels replaced by
   empty sky during companion masking.
-- `40_final/catalog/`: the full catalogue before cuts, for reweighting.
+- `final_dataset/catalog/`: the full catalogue before cuts, for reweighting.
 
 ## Notebooks
 

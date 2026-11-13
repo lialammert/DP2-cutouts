@@ -5,7 +5,7 @@
 # quantify the effect of the copaings convention on S_b and on the final dataset.
 
 name: local_demo_measured
-data_root: ~/data/res/demo_measured
+data_root: /pscratch/sd/l/laliotis/dp2-cutouts/demo_measured
 sky_box: [53.00, 53.30, -27.95, -27.70]   # [ra_min, ra_max, dec_min, dec_max] in degrees
 
 rubin:

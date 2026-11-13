@@ -11,6 +11,9 @@ import pandas as pd
 import pyvo
 import requests
 
+from ..common import star_galaxy
+from ..config import RUBIN_DIR
+
 BANDS = "ugrizy"
 
 # Columns read by copaings (DEFAULT_LSST_COLUMNS), minus i_centroid_x/y and i_fwhm which do not exist in DP2:
@@ -27,7 +30,7 @@ COPAINGS_COLUMNS = [
 # Extra columns kept for later steps: identifiers, position in the sky tiling, PSF moments in all six bands
 # (PSF size and ellipticity per band).
 EXTRA_COLUMNS = (
-    ["objectId", "parentObjectId", "tract", "patch", "detect_isIsolated"]
+    ["objectId", "parentObjectId", "tract", "patch", "detect_isIsolated", "deblend_blendNChild"]
     + [f"{b}_{m}PSF" for b in BANDS for m in ("ixx", "iyy", "ixy")]
 )
 
@@ -55,7 +58,7 @@ def fetch_objects(cfg):
     # Every row in the box, without any cut: the pre-cut catalogue is used for reweighting.
     rc = cfg["rubin"]
     tap = tap_service(rc["tap_url"], rc["token_file"])
-    columns = list(dict.fromkeys(COPAINGS_COLUMNS + EXTRA_COLUMNS))
+    columns = list(dict.fromkeys(COPAINGS_COLUMNS + EXTRA_COLUMNS + star_galaxy.required_columns(cfg)))
     # The edges of an ADQL POLYGON are great-circle arcs, not lines of constant declination: we read with a
     # margin, and the exact ra/dec box is applied afterwards (copaings in_box).
     m = float(rc.get("margin_deg", 0.0))
@@ -76,7 +79,7 @@ def fetch_objects(cfg):
 
 def run(cfg):
     df = fetch_objects(cfg)
-    out = cfg.data("10_rubin", "catalog", "object_box.parquet")
+    out = cfg.data(RUBIN_DIR, "catalog", "object_box.parquet")
     df.to_parquet(out, index=False)
     print(f"Rubin: {len(df):,} objects, {df.shape[1]} columns -> {out}")
     return df

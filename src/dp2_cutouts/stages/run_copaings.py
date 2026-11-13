@@ -11,12 +11,17 @@ from concurrent.futures import ProcessPoolExecutor
 
 import pandas as pd
 
+from ..common import star_galaxy
 from ..sources import euclid_hf
+from ..config import COPAINGS_DIR, RUBIN_DIR
 
 
 def _import_copaings(cfg):
     # friendly is imported through FRIENDLY_PATH: its pyproject pins numpy < 2, so it is not installed with pip.
-    os.environ.setdefault("FRIENDLY_PATH", os.path.expanduser(cfg["copaings"]["friendly_path"]))
+    # When friendly is installed in the environment, friendly_path may be left out or null.
+    fp = cfg["copaings"].get("friendly_path")
+    if fp:
+        os.environ.setdefault("FRIENDLY_PATH", os.path.expanduser(fp))
     from copaings import catalogs, stages
     from copaings.config import Case
     return catalogs, stages, Case
@@ -27,7 +32,7 @@ def make_case(cfg):
     cc = cfg["copaings"]
     return Case(
         name=cfg.name,
-        out_root=str(cfg.data("20_copaings", "x").parent),
+        out_root=str(cfg.data(COPAINGS_DIR, "x").parent),
         tracts=list(cfg["rubin"]["tracts"]),
         sky_box=cfg.sky_box,
         common_frame_xy=True,
@@ -45,8 +50,11 @@ def make_case(cfg):
 def prep(cfg, case):
     # Same sequence as copaings.catalogs.assemble, without HST.
     catalogs, _, _ = _import_copaings(cfg)
-    raw = pd.read_parquet(cfg.data("10_rubin", "catalog", "object_box.parquet"))
+    raw = pd.read_parquet(cfg.data(RUBIN_DIR, "catalog", "object_box.parquet"))
     raw["tract_id"] = raw["tract"]
+    # copaings keeps the objects with i_extendedness == 1: make that mean "passes the configured star-galaxy
+    # criterion" (common/star_galaxy.py). Everything below, including the objectId re-attachment, uses this table.
+    raw = star_galaxy.apply(raw, cfg)
 
     def in_box(df):
         r0, r1, d0, d1 = case.sky_box

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from astropy.visualization import make_lupton_rgb
 from matplotlib.patches import Circle, Ellipse
+from .config import TABLES_DIR
 
 # Recipe order. "in_region" only exists in the local demo (the stamp must fit inside the downloaded region).
 STEPS = [
@@ -53,8 +54,8 @@ def stage_mask(table, upto):
 
 
 def load_stamps(cfg):
-    st = pd.read_parquet(cfg.data("30_processed", "stamps.parquet")).set_index("object_id")
-    meta = json.load(open(cfg.data("30_processed", "stamps.json")))
+    st = pd.read_parquet(cfg.data(TABLES_DIR, "stamps.parquet")).set_index("object_id")
+    meta = json.load(open(cfg.data(TABLES_DIR, "stamps.json")))
     nb, n, nd = len(meta["bands"]), meta["stamp_px"], meta["diag_px"]
     out = {}
     for oid, r in st.iterrows():

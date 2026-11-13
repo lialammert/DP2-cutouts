@@ -12,15 +12,17 @@ import healpy as hp
 import numpy as np
 import pandas as pd
 
+from ..common import star_galaxy
 from ..common.ellipse import LSST_PIXEL_SCALE, moments_to_ellipse
 from ..sources import euclid_hf
 from ..sources.rubin_tap import BANDS
+from ..config import COPAINGS_DIR, RUBIN_DIR, TABLES_DIR
 
 PARTITION_ORDER = 5  # HEALPix NESTED partitions of order 5 (nside 32), like the HATS Norder folders
 
 
 def copaings_dir(cfg):
-    return cfg.data("20_copaings", cfg.name, "x").parent
+    return cfg.data(COPAINGS_DIR, cfg.name, "x").parent
 
 
 def one_to_one(groups):
@@ -91,7 +93,7 @@ def psf_columns(raw):
 def build(cfg):
     cdir = copaings_dir(cfg)
     lsst = pd.read_parquet(cdir / "lsst_sb.parquet")
-    raw = pd.read_parquet(cfg.data("10_rubin", "catalog", "object_box.parquet")).set_index("objectId")
+    raw = pd.read_parquet(cfg.data(RUBIN_DIR, "catalog", "object_box.parquet")).set_index("objectId")
 
     t = pd.DataFrame(index=lsst.index)
     t["object_id"] = lsst["objectId"].astype("int64")
@@ -115,6 +117,21 @@ def build(cfg):
     t = pd.concat([t, psf], axis=1)
     t_psf = r["i_ixxPSF"].values + r["i_iyyPSF"].values
     t["resolution_i"] = 1.0 - t_psf / (t["i_ixx"].values + t["i_iyy"].values)
+
+    # Value of the configured star-galaxy criterion (e.g. griz_model_extendedness); every object in this table
+    # already passed it, copaings dropped the others. NaN when no criterion is configured.
+    t["star_galaxy_value"] = star_galaxy.values(r, cfg)
+
+    # Rubin's own deblending status, a band-independent isolation criterion: Rubin did not split this object
+    # from a neighbour if it was never deblended (detect_isIsolated) or if its blend produced a single child
+    # (deblend_blendNChild == 1). Objects in a blend of 2 or more children fail. On the demo box (tract 5063)
+    # the number of detect_isIsolated objects equals the number with deblend_blendNChild == 0; the meaning of
+    # blendNChild == 1 is inferred from that, not from the DP2 schema documentation: check it when it matters.
+    # i_blendedness is not used: its DP2 values are not on the 0-1 scale.
+    t["detect_isIsolated"] = r["detect_isIsolated"].fillna(0).to_numpy(float) == 1
+    t["deblend_blendNChild"] = r["deblend_blendNChild"].to_numpy(float)
+    t["rubin_deblend_value"] = t["deblend_blendNChild"]
+    t["rubin_deblend_pass"] = t["detect_isIsolated"] | (t["deblend_blendNChild"] == 1)
 
     # copaings blending entropy, kept as a value.
     t["sb_euclid"] = lsst["blending_entropy_Euclid"]
@@ -141,7 +158,7 @@ def build(cfg):
 
 def run(cfg):
     t = build(cfg)
-    out = cfg.data("30_processed", "catalog.parquet")
+    out = cfg.data(TABLES_DIR, "catalog.parquet")
     t.to_parquet(out, index=False)
     n = len(t)
     print(f"catalogue: {n:,} objects; one-to-one Euclid counterpart {t['has_euclid_counterpart'].sum():,}; "

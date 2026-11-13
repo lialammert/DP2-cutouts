@@ -14,6 +14,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 from astropy.table import Table
+from ..config import EUCLID_DIR
 
 # MMU column -> MER name read by copaings (catalogs.build_euclid).
 COPAINGS_COLUMNS = {
@@ -55,7 +56,7 @@ def tiles_dir(cfg):
     conv = cfg["euclid"].get("pa_convention", "copaings")
     if conv not in PA_CONVENTIONS:
         raise ValueError(f"pa_convention must be one of {PA_CONVENTIONS}")
-    return cfg.data("00_euclid", f"copaings_tiles_{conv}", "x").parent
+    return cfg.data(EUCLID_DIR, f"copaings_tiles_{conv}", "x").parent
 
 
 def fetch_box(cfg):
@@ -92,7 +93,7 @@ def numpy_backed(df):
 
 
 def read_box(cfg):
-    path = cfg.data("00_euclid", "euclid_box.parquet")
+    path = cfg.data(EUCLID_DIR, "euclid_box.parquet")
     return numpy_backed(pq.read_table(path).to_pandas(ignore_metadata=True, types_mapper=pd.ArrowDtype))
 
 
@@ -118,7 +119,7 @@ def write_copaings_tiles(df, out_dir, pa_convention="copaings"):
 
 
 def run(cfg, refetch=True):
-    out = cfg.data("00_euclid", "euclid_box.parquet")
+    out = cfg.data(EUCLID_DIR, "euclid_box.parquet")
     if refetch or not out.exists():
         df = fetch_box(cfg)
         df.to_parquet(out, index=False)

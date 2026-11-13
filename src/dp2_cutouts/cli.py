@@ -12,8 +12,13 @@ STEPS = ("rubin_catalog", "euclid_catalog", "copaings", "rubin_images", "catalog
 
 def run_step(cfg, step):
     if step == "rubin_catalog":
-        from .sources import rubin_tap
-        rubin_tap.run(cfg)
+        # rubin.source: "tap" (default, needs an RSP token) or "butler" (needs the LSST stack).
+        if cfg["rubin"].get("source", "tap") == "butler":
+            from .sources import rubin_butler
+            rubin_butler.run(cfg)
+        else:
+            from .sources import rubin_tap
+            rubin_tap.run(cfg)
     elif step == "euclid_catalog":
         from .sources import euclid_hf
         euclid_hf.run(cfg)

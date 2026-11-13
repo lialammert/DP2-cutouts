@@ -5,7 +5,7 @@
 # The reference numbers are those of the copaings demo notebook.
 
 name: local_demo
-data_root: ~/data/res/demo
+data_root: /pscratch/sd/l/laliotis/dp2-cutouts/demo
 sky_box: [53.00, 53.30, -27.95, -27.70]   # [ra_min, ra_max, dec_min, dec_max] in degrees
 
 rubin:

@@ -24,13 +24,14 @@ from ..common.ellipse import (FWHM2SIGMA, euclid_ellipse, moments_to_ellipse, ps
 from ..common.shapes import adaptive_moments, circular_weight, delta_e
 from ..sources.rubin_soda import BANDS, tract_origin
 from .catalog_table import copaings_dir
+from ..config import RUBIN_DIR, TABLES_DIR
 
 NJY_ZEROPOINT = 31.4  # AB magnitude of a 1 nJy flux
 
 
 # ----------------------------------------------------------------------------- images
 def load_images(cfg):
-    img_dir = cfg.data("10_rubin", "images", "x").parent
+    img_dir = cfg.data(RUBIN_DIR, "images", "x").parent
     meta = json.load(open(img_dir / "images.json"))
     flux, var, mask, wcs, origins, bits = [], [], [], [], [], []
     for b in BANDS:
@@ -55,7 +56,7 @@ def companions(cfg, img, cat):
     # Every known object in the region, without any cut: Rubin (including point-like objects and those without
     # i_extendedness) and Euclid (including stars), each with its ellipse in the region pixels.
     w = img["wcs"][BANDS.index("i")]
-    raw = pd.read_parquet(cfg.data("10_rubin", "catalog", "object_box.parquet"))
+    raw = pd.read_parquet(cfg.data(RUBIN_DIR, "catalog", "object_box.parquet"))
     a, b, th = moments_to_ellipse(raw["i_ixx"], raw["i_iyy"], raw["i_ixy"])
     ap, bp, thp = psf_ellipse(raw["i_ixxPSF"], raw["i_iyyPSF"])
     bad = ~(np.isfinite(a) & np.isfinite(b) & (b > 0))
@@ -299,7 +300,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
 def run(cfg):
     cc = cfg["cuts"]
     img = load_images(cfg)
-    cat = pd.read_parquet(cfg.data("30_processed", "catalog.parquet"))
+    cat = pd.read_parquet(cfg.data(TABLES_DIR, "catalog.parquet"))
     meta = img["meta"]
     targets = cat[cat["cut1_pass"] & cat["cut2_pass"] & (cat["tract"] == meta["tract"])
                   & (cat["patch"] == meta["patch"])]
@@ -320,12 +321,12 @@ def run(cfg):
     table = cat.merge(res, on="object_id", how="left")
     table["pixel_target"] = table["object_id"].isin(res["object_id"])
     table["in_region"] = table["in_region"].astype("boolean").fillna(False).astype(bool)
-    table.to_parquet(cfg.data("30_processed", "table.parquet"), index=False)
+    table.to_parquet(cfg.data(TABLES_DIR, "table.parquet"), index=False)
 
     st = pd.DataFrame(arrays)
     st.attrs = {}
-    st.to_parquet(cfg.data("30_processed", "stamps.parquet"), index=False)
-    with open(cfg.data("30_processed", "stamps.json"), "w") as f:
+    st.to_parquet(cfg.data(TABLES_DIR, "stamps.parquet"), index=False)
+    with open(cfg.data(TABLES_DIR, "stamps.json"), "w") as f:
         json.dump(dict(bands=list(BANDS), stamp_px=cc["stamp_px"], diag_px=cc["diag_px"], plane_bits=img["bits"],
                        filled_bit=masks.FILLED_BIT, tract=meta["tract"], patch=meta["patch"]), f, indent=2)
 

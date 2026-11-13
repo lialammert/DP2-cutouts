@@ -18,6 +18,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from pyvo.dal.adhoc import DatalinkResults, SodaQuery
 from pyvo.dal.sia2 import SIA2Service
+from ..config import RUBIN_DIR
 
 BANDS = "ugrizy"
 SIA_URL = "https://data.lsst.cloud/api/sia/dp2/query"
@@ -88,7 +89,7 @@ def run(cfg):
     if pc.get("center"):
         ra, dec = (float(v) for v in pc["center"])
     else:
-        cat = pd.read_parquet(cfg.data("10_rubin", "catalog", "object_box.parquet"),
+        cat = pd.read_parquet(cfg.data(RUBIN_DIR, "catalog", "object_box.parquet"),
                               columns=["coord_ra", "coord_dec", "tract", "patch"])
         sub = cat[(cat["tract"] == tract) & (cat["patch"] == patch)]
         row = find_patch_images(s, float(sub["coord_ra"].median()), float(sub["coord_dec"].median()), tract, patch)["i"]
@@ -96,7 +97,7 @@ def run(cfg):
     rows = find_patch_images(s, ra, dec, tract, patch)
 
     radius = 0.5 * int(pc["size_px"]) * 0.2 / 3600.0
-    out_dir = cfg.data("10_rubin", "images", "x").parent
+    out_dir = cfg.data(RUBIN_DIR, "images", "x").parent
     files = {}
     for b in BANDS:
         data = soda_cutout(s, rows[b]["access_url"], ra, dec, radius)

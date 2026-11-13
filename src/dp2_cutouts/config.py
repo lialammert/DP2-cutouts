@@ -9,10 +9,13 @@ from pathlib import Path
 
 import yaml
 
-# Subfolders of data_root, one per pipeline step.
-EUCLID_DIR = "00_euclid"
-RUBIN_DIR = "10_rubin"
-COPAINGS_DIR = "20_copaings"
+# Subfolders of data_root. Every name says what the folder holds; use these constants, not string literals.
+EUCLID_DIR = "euclid_catalog"       # Euclid MER catalogue in the sky box, and the tiles that copaings reads
+RUBIN_DIR = "rubin_data"            # Rubin object table (catalog/) and, for the SODA path, the coadd images (images/)
+COPAINGS_DIR = "copaings_matching"  # copaings working files: matching groups, blending entropy S_b
+TABLES_DIR = "tables_and_stamps"    # catalog.parquet (one row per object + catalogue cuts), table.parquet
+                                    # (+ pixel cuts), stamps.parquet (pixel arrays), stamps.json
+PACKAGE_DIR = "final_dataset"       # packaged dataset (MultimodalUniverse format)
 
 
 @dataclass

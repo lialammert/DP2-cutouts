@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 
 from ..common import masks
+from ..config import PACKAGE_DIR, TABLES_DIR
 
 PIXEL_SCALE = 0.2
 
@@ -82,9 +83,9 @@ def write_partitioned(table, base, max_rows):
 
 def run(cfg):
     pc = cfg["package"]
-    table = pd.read_parquet(cfg.data("30_processed", "table.parquet"))
-    st = pd.read_parquet(cfg.data("30_processed", "stamps.parquet"))
-    meta = json.load(open(cfg.data("30_processed", "stamps.json")))
+    table = pd.read_parquet(cfg.data(TABLES_DIR, "table.parquet"))
+    st = pd.read_parquet(cfg.data(TABLES_DIR, "stamps.parquet"))
+    meta = json.load(open(cfg.data(TABLES_DIR, "stamps.json")))
     bands, n = meta["bands"], meta["stamp_px"]
     mmu_mask = masks.bitmask(meta["plane_bits"], pc["mmu_mask_planes"])
 
@@ -94,7 +95,7 @@ def run(cfg):
     image, maskbits = image_column(st, bands, n, mmu_mask)
     t = to_arrow(final).append_column("image", image).append_column("image_maskbits", maskbits)
 
-    root = cfg.data("40_final", "x").parent
+    root = cfg.data(PACKAGE_DIR, "x").parent
     write_partitioned(t, root / "data", int(pc["max_rows_per_file"]))
     write_partitioned(to_arrow(table.drop(columns=[c for c in DROP if c in table.columns])), root / "catalog",
                       100_000)
