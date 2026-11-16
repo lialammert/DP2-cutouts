@@ -21,9 +21,13 @@ dependencies = [
 [project.optional-dependencies]
 notebook = ["jupyterlab", "ipykernel", "matplotlib"]
 test = ["pytest"]
+# Cross-instrument learning (Stage 1, Stage 2). debvader-keras is not on PyPI: install it from its clone, in the
+# same environment, with its JAX extra (pip install -e "<debvader-keras>[jax-cuda]" on Jean Zay).
+ml = ["keras>=3.5", "surveycodex", "matplotlib", "nbconvert", "ipykernel"]
 
 [project.scripts]
 dp2-cutouts = "dp2_cutouts.cli:main"
+dp2-ml = "dp2_cutouts.mlcli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
