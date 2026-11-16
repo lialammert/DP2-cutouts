@@ -1,0 +1,9 @@
+# .gitattributes
+# Anna Preto
+# AstroDeep Project
+# Shell and Slurm scripts keep Unix line endings whatever the machine that edits them: bash on Jean Zay fails on a
+# carriage return ("$'\r': command not found").
+*.sh    text eol=lf
+*.slurm text eol=lf
+*.py    text eol=lf
+*.yaml  text eol=lf
