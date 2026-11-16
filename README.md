@@ -56,6 +56,43 @@ pytest tests
 No row is removed before `package`: each cut writes its continuous quantity (`cutN_value`) and its condition
 (`cutN_pass`). The cuts applied to the final dataset are listed in `package.apply`.
 
+### Patch by patch (large areas)
+
+Each patch is a case of the steps above, in its own folder `data_root/patches/<tract>_<patch>/`, with a sky box =
+outer polygon of the patch + `patches.catalog_margin_arcsec`. A patch owns the objects whose `(tract, patch)` in the
+Rubin Object table are its own; objects of the margin are context for copaings and masking only.
+
+```bash
+dp2-cutouts config/local_scale.yaml patches      # list of patches from SIA (no pixel), plan/patches.parquet
+dp2-cutouts config/local_scale.yaml plan         # network: catalogues, copaings, cuts 1, 2, 6
+dp2-cutouts config/local_scale.yaml fetch        # network: six full-patch images, only for patches with targets
+dp2-cutouts config/local_scale.yaml process      # no network: cuts 3, 4, 5, 7, 8, masking
+dp2-cutouts config/local_scale.yaml assemble     # final dataset of every processed patch -> data_root/final/
+dp2-cutouts config/local_scale.yaml run          # the three phases, then assemble
+dp2-cutouts config/local_scale.yaml invariance   # copaings on the whole area vs patch by patch
+```
+
+`--patches 5063_34 5063_35` restricts a phase to some patches, `--index N` selects the N-th patch (Slurm array),
+`--force` reruns. `data_root/manifests/<tract>_<patch>.json` records, per patch and phase, the status, the
+configuration fingerprint, counts, source identifiers and checksums, software versions and the last error. A rerun
+skips what is already done with the same configuration; a change that matters to a phase reruns it and the later
+ones. Data sources are chosen in the `sources` section (`adapters.py`): `tap`, `hf`, and `soda` or `butler` for the
+pixels.
+
+On Jean Zay, `scripts/jeanzay/submit.sh` submits plan and fetch on the `prepost` partition (internet access),
+process on the compute nodes, and the assembly, as job arrays chained by dependencies.
+
+### Non-regression
+
+```bash
+dp2-cutouts config/local_demo.yaml snapshot   # copy the current outputs to data_root/regression/
+dp2-cutouts config/local_demo.yaml regress    # compare the current outputs with that copy, column by column
+```
+
+`tests/reference_fingerprints.json` holds two hashes of the reference demo (decisions and stamp pixels), which
+reveal no DP2 data. `pytest tests` checks them whenever the demo products exist on the machine: it tells whether
+another installation reproduces exactly the same dataset.
+
 ## Final dataset format
 
 - `image`: list of structs, one per band `ugrizy`, `{band, flux, ivar, mask, scale}` as in
@@ -63,7 +100,20 @@ No row is removed before `package`: each cut writes its continuous quantity (`cu
 - `image_maskbits`: the full Rubin mask planes, plus the `FILLED_SKY` bit (1 << 16) for pixels replaced by
   empty sky during companion masking.
 - `40_final/catalog/`: the full catalogue before cuts, for reweighting.
+- `has_valid_i_moments`: False when the Rubin object has no valid i-band ellipse. copaings then links it to its
+  neighbours within 2" instead of testing ellipse overlaps, so its isolation rests on that distance only. These
+  objects are kept; `dataset_info.json` gives the size of the strict selection that excludes them
+  (`n_final_strict`).
 
 ## Notebooks
 
 `notebooks/01_catalogs`, `02_cuts`, `03_masking`. Their outputs show DP2 pixels: clear them before committing.
+
+## Cross-instrument learning (Rubin × Euclid, Jean Zay)
+
+On top of the final dataset: paired datasets (D1 isolated galaxies seen by both surveys, D2 Rubin blends that
+Euclid resolves, controlled blends), Stage 1 (a Euclid encoder into the latent space of the frozen DebVAder VAE
+`paper_baseline`) and Stage 2 (a Rubin blend encoder supervised by the Euclid teacher), with their evaluations.
+Configuration `config/ml_jeanzay.yaml`, command `dp2-ml`, Slurm scripts `scripts/jeanzay/ml/`, notebooks
+`notebooks/ml/`. Everything runs on Jean Zay; the order of the steps and what to check between them is in
+[docs/cross_instrument.md](docs/cross_instrument.md).
