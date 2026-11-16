@@ -1,0 +1,184 @@
+# ml_jeanzay.yaml
+# Anna Preto
+# AstroDeep Project
+# Central configuration of the Rubin x Euclid cross-instrument work: paired datasets (D1, D2, controlled blends),
+# Stage 1 (Euclid encoder into the frozen DebVAder latent space), Stage 2 (Rubin blend encoder supervised by the
+# Euclid teacher) and their evaluations. Environment variables are expanded when the file is read; every value can
+# be overridden from the command line with --set section.key=value.
+#
+# The DebVAder run (paper_baseline) is never written here: its folder is given on the command line
+# (--debvader-run, or the DEBVADER_RUN environment variable), because it lives wherever the campaign left it.
+
+# Configuration of the stamp pipeline that produced the isolated-galaxy dataset (patch by patch).
+pipeline_config: ${DP2_CONFIG}
+
+# Root of everything this file produces: datasets, runs, evaluations, executed notebooks. Outside the repository.
+ml_root: ${DP2_ML_ROOT}
+
+seed: 20261116
+
+rubin:
+  bands: [u, g, r, i, z, y]
+  stamp_px: 59
+  # Units fed to the DebVAder encoder. paper_baseline was trained on BTK simulations in electrons (LSST survey
+  # parameters, full exposure time); DP2 pixels are in nJy. "lsst_electrons" converts nJy to the electrons the same
+  # flux would give in the simulated survey (zero point and exposure time read from surveycodex, the package BTK
+  # uses). The noise level stays that of DP2: this conversion fixes the flux scale, not the depth.
+  vae_units: lsst_electrons
+  # Band used for shape measurements (HSM adaptive moments). The stamp pipeline measures in i.
+  shape_band: i
+  # Masked Rubin pixels (MMU mask True) enter the encoder as 0 in normalised units and get zero weight in losses.
+  masked_value_normalised: 0.0
+
+euclid:
+  # Where Euclid images come from: "mmu" (image column of the MultimodalUniverse Euclid Q1 HATS catalogue, read on
+  # a node with internet access) or "irsa" (MER mosaic cutouts from IRSA; the Jean Zay proxy is reported to block
+  # IRSA, see debvader-keras docs/real-data.md). Run `dp2-ml probe-euclid` first on prepost to see what works.
+  image_source: mmu
+  hats_url: hf://datasets/hugging-science/mmu_euclid_q1/euclid
+  irsa_sia_url: https://irsa.ipac.caltech.edu/SIA
+  irsa_collection: euclid_DpdMerBksMosaic
+  # Bands kept on disk when present (MER mosaics share a 0.1"/px grid for VIS and NISP).
+  bands: [VIS, Y, J, H]
+  # Bands read by the Euclid encoder. VIS alone carries the morphology; NISP adds near-infrared colours.
+  encoder_bands: [VIS]
+  pixel_scale: 0.1
+  # 119 px x 0.1" = 11.9", the closest odd size to the 11.8" of a 59 px Rubin stamp.
+  stamp_px: 119
+  # Nominal VIS PSF FWHM (arcsec), used to build Euclid-resolution ellipses (D2 isolation and masking).
+  vis_psf_fwhm: 0.17
+  # Rotation added to the catalogue position angle before building ellipses (degrees). Kept at 0 (current copaings
+  # convention) until the position-angle check (D1 quality report, notebooks/ml/01) has been looked at: the
+  # inspection images suggest ~90 degrees.
+  pa_offset_deg: 0.0
+
+splits:
+  # Splits are drawn by Rubin (tract, patch), the same assignment for every dataset, so that no patch feeds two
+  # splits and no Stage 2 test patch has been seen by the Stage 1 teacher.
+  fractions: {train: 0.8, val: 0.1, test: 0.1}
+  # Pairs of objects closer than this but in different splits are counted in the quality report (border leakage).
+  leakage_radius_arcsec: 12.0
+
+dataset1:
+  # D1 = final dataset of the stamp pipeline (every cut of the recipe applied, masking included) with a Euclid image.
+  # Nothing is re-selected here: the pair-level checks below are recorded, and only unusable pairs are dropped
+  # (no Euclid image, no valid pixel), each with its reason in rejected.parquet.
+  max_astrometric_offset_arcsec: 0.3   # recorded flag, not a cut
+  min_valid_fraction_euclid: 0.9       # below this the pair is rejected (reason recorded)
+  contamination_radius_arcsec: 3.0     # other Euclid sources inside this radius are counted per pair
+  contamination_delta_mag: 2.5         # ... if brighter than target VIS mag + this
+  # Conditioning features of the Euclid encoder: Rubin PSF of the stamp (known at inference, Rubin-side metadata).
+  cond_features: [psf_sigma_u, psf_sigma_g, psf_sigma_r, psf_sigma_i, psf_sigma_z, psf_sigma_y,
+                  psf_e1_u, psf_e1_g, psf_e1_r, psf_e1_i, psf_e1_z, psf_e1_y,
+                  psf_e2_u, psf_e2_g, psf_e2_r, psf_e2_i, psf_e2_z, psf_e2_y]
+
+stage1:
+  euclid_encoder:
+    filters: [32, 64, 128, 256, 256]
+    cond_embedding: 64
+    dense: 512
+  latent_loss: mu_whitened      # mu_mse | mu_whitened | gaussian_kl
+  cross_loss: normalised_mse    # normalised_mse | gaussian_nll | chi2_physical
+  cross_target: observation     # observation | reference_reconstruction
+  band_weights: [1, 1, 1, 1, 1, 1]
+  contrastive:
+    projection_dims: [256, 128]
+    temperature: 0.07
+    learn_temperature: true
+    space: mu                    # projections of the posterior means (the only option implemented)
+  weights: {latent: 1.0, cross: 1.0, infonce: 0.0}
+  # Random elliptical holes filled with sky from the same stamp, so that the encoder meets the masked inputs of D2.
+  mask_augment_prob: 0.3
+  augment_flips: true            # same flip / 90 degree rotation applied to the Euclid input and the Rubin target
+  batch_size: 128
+  epochs: 300
+  learning_rate: 0.0003
+  clipnorm: 1.0
+  early_stopping_patience: 30
+  # Ablations of section 6C: run names and the loss weights each one overrides.
+  ablations:
+    s1_latent: {latent: 1.0, cross: 0.0, infonce: 0.0}
+    s1_latent_cross: {latent: 1.0, cross: 1.0, infonce: 0.0}
+    s1_latent_cross_clip: {latent: 1.0, cross: 1.0, infonce: 0.1}
+
+stage1_acceptance:
+  # Viability gate for moving to Stage 2. These numbers are proposals to be validated, not results: they compare
+  # the Euclid path D_R(E_E(x_E)) with the reference Rubin path D_R(E_R(x_R)) on the D1 test split.
+  # - ellipticity bias between the two paths, per component: well below the 0.02 the recipe tolerates for masking;
+  max_mean_delta_e: 0.005
+  # - multiplicative and additive terms of the linear fit e_cross = (1 + m) e_ref + c;
+  max_abs_m: 0.05
+  max_abs_c: 0.005
+  # - the Euclid path may deviate from the observed shape at most this factor more than the reference path does;
+  max_scatter_ratio: 1.25
+  # - flux bias and scatter between the two paths, in r, i, z (aperture of radius flux_aperture_px);
+  flux_bands: [r, i, z]
+  flux_aperture_px: 8
+  max_median_flux_bias: 0.02
+  max_flux_scatter: 0.05
+  # - centroid offset between the two reconstructions, in Rubin pixels.
+  max_median_centroid_offset_px: 0.1
+
+dataset2:
+  sb_rubin_min: 0.0              # Rubin group blended: max S_b of its Rubin members > this
+  sb_euclid_max: 0.0             # Euclid target alone at Euclid resolution: Euclid-side S_b <= this
+  max_euclid_in_group: 2         # start with two-component groups
+  overlap_grid_px: 0.05          # grid step (Rubin px) of the ellipse overlap fraction
+  # Separation test on the Euclid image: other Euclid sources masked over k times their Euclid-resolution ellipse,
+  # holes filled with empty sky of the same cutout, target measured before and after (HSM, VIS).
+  mask_k: 2.0
+  accept:
+    max_delta_e: 0.02
+    max_centroid_shift_arcsec: 0.05
+    max_rel_size_change: 0.05
+    max_rel_flux_change: 0.05
+    max_masked_fraction_in_target: 0.10
+  # Rubin pixel quality of the blend stamp (same planes as the recipe).
+  bad_planes: [SATURATED, COSMIC_RAY, INTERPOLATED, DETECTION_EDGE]
+  k_ellipse_bad_pixels: 3.0
+  # A scene is "complete" when no other Euclid source brighter than target VIS mag + this lies in the Rubin stamp:
+  # only complete scenes enter the scene-consistency loss.
+  scene_complete_delta_mag: 3.0
+
+controlled_blends:
+  n_per_split: {val: 2000, test: 4000}
+  separation_px: [2.0, 12.0]     # integer shifts drawn in this range of radius
+  flux_ratio: [0.1, 1.0]         # companion flux scaled by this factor (its noise is scaled with it, recorded)
+  same_patch: true               # companion from the same patch: same PSF to first order
+
+stage2:
+  centering: euclid              # euclid (oracle: stamp centred on the Euclid target) | rubin (Rubin-only)
+  init: stage2                   # warm start of the blend encoder: stage2 (DebVAder deblender) | stage1 | random
+  latent_loss: mu_whitened
+  contrastive:
+    projection_dims: [256, 128]
+    temperature: 0.07
+    learn_temperature: true
+    # Negatives whose teacher latents are closer than this quantile of all pairwise distances are not used
+    # (morphological twins would otherwise be pushed apart).
+    negative_mask_quantile: 0.01
+  scene:
+    enabled: false
+    weight: 1.0
+  weights: {latent: 1.0, infonce: 0.0}
+  batch_size: 128
+  epochs: 300
+  learning_rate: 0.0001
+  clipnorm: 1.0
+  early_stopping_patience: 30
+  ablations:
+    s2_latent: {latent: 1.0, infonce: 0.0, scene: 0.0}
+    s2_latent_clip: {latent: 1.0, infonce: 0.1, scene: 0.0}
+    s2_latent_scene: {latent: 1.0, infonce: 0.0, scene: 1.0}
+
+evaluation:
+  bins:
+    i_cModel_mag: [18, 21, 22, 23, 24, 25]
+    snr_i: [5, 20, 50, 100, 1000, 1000000.0]
+    sigma_hsm: [0, 1.5, 2.0, 3.0, 5.0, 100]     # HSM sigma in Rubin pixels
+    psf_sigma_i: [0, 0.3, 0.35, 0.4, 0.45, 1.0]
+    sb_rubin: [0, 0.1, 0.3, 0.5, 0.7, 2.0]
+    separation_arcsec: [0, 0.5, 1.0, 1.5, 2.0, 5.0]
+  retrieval_k: [1, 5, 10]
+  bootstrap: 200
+  n_examples_figures: 24
