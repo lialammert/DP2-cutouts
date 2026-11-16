@@ -61,7 +61,9 @@ def fetch_objects(cfg):
     m = float(rc.get("margin_deg", 0.0))
     ra0, ra1, dec0, dec1 = cfg.sky_box
     box = [ra0 - m, ra1 + m, dec0 - m, dec1 + m]
-    job = tap.submit_job(box_query(rc["table"], columns, box, rc.get("tracts")))
+    # The tract filter is off for patch cases: the catalogue margin may reach into a neighbouring tract.
+    tracts = rc.get("tracts") if rc.get("tap_tract_filter", True) else None
+    job = tap.submit_job(box_query(rc["table"], columns, box, tracts))
     try:
         job.run()
         job.wait(phases=["COMPLETED", "ERROR", "ABORTED"], timeout=1800)

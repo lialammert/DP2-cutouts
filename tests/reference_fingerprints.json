@@ -1,0 +1,25 @@
+{
+  "local_demo": {
+    "config": "config/local_demo.yaml",
+    "n_catalog": 14044,
+    "n_final": 264,
+    "decision_columns": [
+      "cut1_pass",
+      "cut2_pass",
+      "cut3_pass",
+      "cut4_pass",
+      "cut5_pass",
+      "cut6_pass",
+      "cut7_pass",
+      "cut8_evaluated",
+      "cut8_pass",
+      "has_euclid_counterpart",
+      "in_region",
+      "mask_pass",
+      "pixel_target",
+      "shape_ok"
+    ],
+    "decisions_sha256": "04932065e7691129649c1a24adb74824829326665b0ecaca7f3d14dac73347cf",
+    "pixels_sha256": "e6d4c4f2b3d052a11ee29b74916aec789de9457e1c76ee398a1925059f5edf01"
+  }
+}

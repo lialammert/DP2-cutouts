@@ -109,6 +109,10 @@ def build(cfg):
     # Single ellipse (half light, tract pixels) and galaxy / PSF resolution factor in the i band.
     a, b_, th = moments_to_ellipse(t["i_ixx"], t["i_iyy"], t["i_ixy"])
     t["ellipse_a"], t["ellipse_b"], t["ellipse_theta"] = a, b_, th
+    # Without a valid i-band ellipse, copaings does not test the overlap: it links the object to every neighbour
+    # within 10 px (2"). Its isolation therefore rests on that distance only. Kept as is (copaings unchanged), and
+    # flagged so that a strict selection can exclude these objects.
+    t["has_valid_i_moments"] = np.isfinite(a) & np.isfinite(b_) & (b_ > 0)
     r = raw.loc[t["object_id"].values]
     psf = psf_columns(r)
     psf.index = t.index
@@ -129,7 +133,9 @@ def build(cfg):
     t["cut1_pass"] = ~(t["has_euclid_counterpart"] & (point | spurious))
     # Cut 2: matched one-to-one after the overlap test. S_b = 0 is not enough: on the demo box, 418 objects have
     # S_b = 0 in groups that are not one-to-one (galaxies split 1 Euclid / 2 Rubin, blends 2 Euclid / 1 Rubin...).
-    # Both are required, and both quantities are kept.
+    # Both are required, and both quantities are kept. Conversely, copaings sets S_b = 0 for every one-to-one group
+    # (sb_merge), so S_b == 0 is implied by the counterpart today; it is kept because it is the recipe's criterion and
+    # guards against a change of convention in copaings.
     t["cut2_value"] = t["sb_euclid"]
     t["cut2_pass"] = (t["sb_euclid"] == 0) & t["has_euclid_counterpart"]
     # Cut 6: signal-to-noise ratio in the i band.

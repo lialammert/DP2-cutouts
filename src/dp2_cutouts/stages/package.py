@@ -40,17 +40,30 @@ def selection(table, apply):
     return keep
 
 
+def nested_lists(values, shape):
+    # Arrow nested lists built straight from a flat numpy array (no Python objects): each element has the given
+    # shape, e.g. (59, 59) gives list<list<value>>. Memory stays that of the pixels.
+    arr = pa.array(values)
+    for d in reversed(shape):
+        count = len(arr) // d
+        arr = pa.ListArray.from_arrays(pa.array(np.arange(0, count * d + 1, d, dtype=np.int32)), arr)
+    return arr
+
+
 def image_column(st, bands, n, mmu_mask):
-    images, maskbits = [], []
-    for r in st.itertuples():
-        f = np.asarray(r.flux, np.float32).reshape(len(bands), n, n)
-        iv = np.asarray(r.ivar, np.float32).reshape(len(bands), n, n)
-        mb = np.asarray(r.maskbits, np.int32).reshape(len(bands), n, n)
-        bad = (mb & mmu_mask) != 0
-        images.append([dict(band=b, flux=f[k].tolist(), ivar=iv[k].tolist(), mask=bad[k].tolist(), scale=PIXEL_SCALE)
-                       for k, b in enumerate(bands)])
-        maskbits.append(mb.tolist())
-    return pa.array(images, type=IMAGE_TYPE), pa.array(maskbits, type=MASKBITS_TYPE)
+    nb, N = len(bands), len(st)
+    f = np.stack([np.asarray(v, np.float32) for v in st["flux"]]) if N else np.zeros((0,), np.float32)
+    iv = np.stack([np.asarray(v, np.float32) for v in st["ivar"]]) if N else np.zeros((0,), np.float32)
+    mb = np.stack([np.asarray(v, np.int32) for v in st["maskbits"]]) if N else np.zeros((0,), np.int32)
+    bad = (mb & mmu_mask) != 0
+    fields = list(IMAGE_TYPE.value_type)
+    struct = pa.StructArray.from_arrays(
+        [pa.array(np.tile(np.asarray(bands, dtype=object), N), pa.string()),
+         nested_lists(f.ravel(), (n, n)), nested_lists(iv.ravel(), (n, n)), nested_lists(bad.ravel(), (n, n)),
+         pa.array(np.full(N * nb, PIXEL_SCALE, np.float32))], fields=fields)
+    images = pa.ListArray.from_arrays(pa.array(np.arange(0, N * nb + 1, nb, dtype=np.int32)), struct)
+    maskbits = nested_lists(mb.ravel(), (nb, n, n))
+    return images.cast(IMAGE_TYPE), maskbits.cast(MASKBITS_TYPE)
 
 
 def to_arrow(df):
@@ -61,8 +74,13 @@ def to_arrow(df):
         is_null = [v is None or (np.isscalar(v) and pd.isna(v)) for v in s]
         first = next((v for v, z in zip(s, is_null) if not z), None)
         if s.dtype == object and isinstance(first, (list, tuple, np.ndarray)):
-            vals = [None if z else np.asarray(v, float).tolist() for v, z in zip(s, is_null)]
-            cols.append(pa.array(vals, type=pa.list_(pa.float64())))
+            # Built from one flat numpy array and offsets (no Python float per value).
+            parts = [np.asarray(v, float).ravel() for v, z in zip(s, is_null) if not z]
+            lens = np.array([0 if z else len(np.ravel(v)) for v, z in zip(s, is_null)], np.int64)
+            offsets = np.concatenate([[0], np.cumsum(lens)]).astype(np.int32)
+            values = np.concatenate(parts) if parts else np.zeros(0, float)
+            cols.append(pa.ListArray.from_arrays(pa.array(offsets), pa.array(values, pa.float64()),
+                                                 type=pa.list_(pa.float64()), mask=pa.array(is_null, pa.bool_())))
         elif s.dtype == object:
             # Pixel columns from the join (booleans or numbers with gaps outside targets).
             cols.append(pa.array([None if z else v for v, z in zip(s, is_null)], from_pandas=True))
@@ -72,36 +90,61 @@ def to_arrow(df):
     return pa.Table.from_arrays(cols, names=names)
 
 
-def write_partitioned(table, base, max_rows):
-    if base.exists():
+def write_partitioned(table, base, max_rows, basename="part-{i}.parquet", append=False):
+    # append=False replaces the folder; append=True adds files (one batch per patch, distinct basenames).
+    if base.exists() and not append:
         shutil.rmtree(base)
     ds.write_dataset(table, base, format="parquet", partitioning=["healpix5"], partitioning_flavor="hive",
                      max_rows_per_file=max_rows, max_rows_per_group=min(max_rows, 1024),
-                     basename_template="part-{i}.parquet")
+                     basename_template=basename, existing_data_behavior="overwrite_or_ignore")
 
 
-def run(cfg):
+def final_rows(cfg, table, st, meta):
+    # Rows of the final dataset among `table`, with their image columns, as an Arrow table.
     pc = cfg["package"]
-    table = pd.read_parquet(cfg.data("30_processed", "table.parquet"))
-    st = pd.read_parquet(cfg.data("30_processed", "stamps.parquet"))
-    meta = json.load(open(cfg.data("30_processed", "stamps.json")))
     bands, n = meta["bands"], meta["stamp_px"]
     mmu_mask = masks.bitmask(meta["plane_bits"], pc["mmu_mask_planes"])
-
     keep = selection(table, pc["apply"])
     final = table[keep].drop(columns=[c for c in DROP if c in table.columns]).reset_index(drop=True)
     st = st.set_index("object_id").loc[final["object_id"]].reset_index()
     image, maskbits = image_column(st, bands, n, mmu_mask)
-    t = to_arrow(final).append_column("image", image).append_column("image_maskbits", maskbits)
+    return final, to_arrow(final).append_column("image", image).append_column("image_maskbits", maskbits)
 
-    root = cfg.data("40_final", "x").parent
-    write_partitioned(t, root / "data", int(pc["max_rows_per_file"]))
-    write_partitioned(to_arrow(table.drop(columns=[c for c in DROP if c in table.columns])), root / "catalog",
-                      100_000)
-    info = dict(bands=bands, stamp_px=n, pixel_scale=PIXEL_SCALE, plane_bits=meta["plane_bits"],
+
+def write_info(cfg, meta, root, n_catalog, final_columns):
+    # final_columns: has_valid_i_moments of the final rows (for the strict selection), or None.
+    pc = cfg["package"]
+    info = dict(bands=meta["bands"], stamp_px=meta["stamp_px"], pixel_scale=PIXEL_SCALE, plane_bits=meta["plane_bits"],
                 filled_bit=masks.FILLED_BIT, mmu_mask_planes=pc["mmu_mask_planes"], cuts_applied=pc["apply"],
-                n_catalog=len(table), n_final=len(final), partitioning="healpix5 (HEALPix NESTED, order 5)")
+                n_catalog=int(n_catalog), n_final=int(len(final_columns)),
+                partitioning="healpix5 (HEALPix NESTED, order 5)")
+    # Strict selection: the final dataset minus the objects whose isolation rests on copaings' distance fallback
+    # (no valid i-band ellipse). Not applied; the column lets analyses filter on it.
+    if final_columns.notna().all():
+        info["n_final_strict"] = int(final_columns.astype(bool).sum())
+        info["strict_selection"] = "final dataset with has_valid_i_moments == True"
     with open(root / "dataset_info.json", "w") as f:
         json.dump(info, f, indent=2)
+    return info
+
+
+def run(cfg):
+    table = pd.read_parquet(cfg.data("30_processed", "table.parquet"))
+    st = pd.read_parquet(cfg.data("30_processed", "stamps.parquet"))
+    meta = json.load(open(cfg.data("30_processed", "stamps.json")))
+    return write(cfg, table, st, meta, cfg.data("40_final", "x").parent)
+
+
+def write(cfg, table, st, meta, root):
+    # table: every catalogue row (with pixel columns for the targets); st: stamp arrays; meta: stamps.json.
+    if meta is None:
+        raise RuntimeError("no processed stamps to package")
+    final, t = final_rows(cfg, table, st, meta)
+    root.mkdir(parents=True, exist_ok=True)
+    write_partitioned(t, root / "data", int(cfg["package"]["max_rows_per_file"]))
+    write_partitioned(to_arrow(table.drop(columns=[c for c in DROP if c in table.columns])), root / "catalog",
+                      100_000)
+    moments = final["has_valid_i_moments"] if "has_valid_i_moments" in final.columns else pd.Series([None] * len(final))
+    write_info(cfg, meta, root, len(table), moments)
     print(f"final dataset: {len(final):,} stamps out of {len(table):,} catalogue objects -> {root}")
     return final
