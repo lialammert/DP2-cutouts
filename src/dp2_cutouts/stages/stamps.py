@@ -405,6 +405,8 @@ def run_patch(cfg, img, cat, tract, patch):
     t = table[table["in_region"]]
     msg = {k: int(t[f"{k}_pass"].sum()) for k in ("cut3", "cut4", "cut5", "cut6", "cut7", "cut8", "mask")
            if f"{k}_pass" in t}
+    if "shape_ok" in t:
+        msg["shape_failed"] = int((~t["shape_ok"].astype("boolean").fillna(False)).sum())
     print(f"patch {tract}/{patch}: targets {len(targets):,}; in region {len(t):,}; passing: {msg}")
     return table, st, info
 

@@ -11,6 +11,9 @@ import numpy as np
 
 def adaptive_moments(image, weight=None, center=None):
     # image: array [row, column]; weight: 0 on pixels to ignore; center: (column, row) as 0-based indices.
+    failed = dict(e1=np.nan, e2=np.nan, sigma=np.nan, ok=False)
+    if weight is not None and not np.any(np.asarray(weight) > 0):
+        return failed       # no usable pixel (e.g. the stamp is unexposed in a band); galsim would raise
     img = galsim.Image(np.ascontiguousarray(image, dtype=np.float64))
     kw = {}
     if weight is not None:
@@ -18,9 +21,13 @@ def adaptive_moments(image, weight=None, center=None):
     if center is not None:
         # galsim indexes pixels from 1.
         kw["guess_centroid"] = galsim.PositionD(center[0] + 1.0, center[1] + 1.0)
-    res = galsim.hsm.FindAdaptiveMom(img, strict=False, **kw)
+    try:
+        # strict=False turns failures of the moment iteration into a status, but some input checks still raise.
+        res = galsim.hsm.FindAdaptiveMom(img, strict=False, **kw)
+    except galsim.errors.GalSimHSMError:
+        return failed
     if res.moments_status != 0:
-        return dict(e1=np.nan, e2=np.nan, sigma=np.nan, ok=False)
+        return failed
     return dict(e1=float(res.observed_shape.e1), e2=float(res.observed_shape.e2),
                 sigma=float(res.moments_sigma), ok=True)
 

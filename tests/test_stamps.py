@@ -48,3 +48,15 @@ def test_stamp_centered_and_not_transposed():
     # The same galaxy, stamp transposed by mistake: e1 changes sign.
     mt = adaptive_moments(stamp.T, center=(29, 29))
     assert mt["e1"] < -0.5
+
+
+def test_adaptive_moments_without_usable_pixels_returns_nan():
+    # A stamp unexposed (NO_DATA) in a band gives an all-zero weight: a failed measurement (NaN), never an error.
+    stamp = gaussian((59, 59), 29.0, 29.0, 3.0, 2.0)
+    m = adaptive_moments(stamp, np.zeros((59, 59), np.int32), (29, 29))
+    assert not m["ok"] and np.isnan(m["e1"]) and np.isnan(m["sigma"])
+    # A partly unexposed stamp is still measured.
+    w = np.ones((59, 59), np.int32)
+    w[:, :10] = 0
+    m = adaptive_moments(stamp, w, (29, 29))
+    assert m["ok"] and m["e1"] > 0.3
