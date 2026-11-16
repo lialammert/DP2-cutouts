@@ -11,6 +11,7 @@
 # The integer centre of a stamp is floor(x + 0.5); the fractional position is kept for measurements.
 
 import json
+import time
 
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ from ..common import masks
 from ..common.ellipse import (FWHM2SIGMA, euclid_ellipse, moments_to_ellipse, psf_ellipse,
                               radius_map)
 from ..common.shapes import adaptive_moments, circular_weight, delta_e
+from ..common.progress import Progress, elapsed_since, log
 from ..sources.rubin_soda import tract_origin
 from .catalog_table import copaings_dir
 from ..config import RUBIN_DIR, TABLES_DIR
@@ -346,18 +348,25 @@ def run(cfg):
     """Cut the stamps patch by patch. Each patch writes three patch files; a patch whose `done` marker exists
     is skipped, so an interrupted run resumes where it stopped. Delete the patch files to recompute a patch."""
     cat = pd.read_parquet(cfg.data(TABLES_DIR, "catalog.parquet"))
-    for tract, patch in patch_list(cfg, cat):
+    patches = patch_list(cfg, cat)
+    log(f"stamps: {len(patches)} patch(es): {', '.join(f'{t}/{p}' for t, p in patches)}")
+    for n_done, (tract, patch) in enumerate(patches):
         done = patch_files_path(cfg, "done", tract, patch, "txt")
         if done.exists():
-            print(f"patch {tract}/{patch}: already done, skipped")
+            log(f"patch {tract}/{patch}: already done, skipped")
             continue
+        log(f"patch {tract}/{patch} ({n_done + 1} of {len(patches)}): loading the coadds")
+        t0 = time.monotonic()
         img = load_images(cfg, tract, patch)
+        log(f"patch {tract}/{patch}: coadds loaded ({elapsed_since(t0)})")
         table, stamps_df, info = run_patch(cfg, img, cat, tract, patch)
+        log(f"patch {tract}/{patch}: writing the patch files")
         table.to_parquet(patch_files_path(cfg, "table", tract, patch), index=False)
         stamps_df.to_parquet(patch_files_path(cfg, "stamps", tract, patch), index=False)
         with open(patch_files_path(cfg, "stamps", tract, patch, "json"), "w") as f:
             json.dump(info, f, indent=2)
         done.write_text("ok\n")          # written last: its presence means the three files are complete
+        log(f"patch {tract}/{patch}: done ({elapsed_since(t0)} in total)")
         del img
 
 
@@ -377,15 +386,19 @@ def run_patch(cfg, img, cat, tract, patch):
         targets = cat[in_patch & cat["cut1_pass"] & cat["cut2_pass"]]
 
     rubin, euclid = companions(cfg, img, cat)
+    log(f"patch {tract}/{patch}: companions read ({len(rubin):,} Rubin, {len(euclid):,} Euclid)")
     unusable = masks.bitmask(img["bits"], ["DETECTED", "NO_DATA"] + list(cc["bad_planes"]))
     banks = {n: SkyBank(img, unusable, n) for n in (cc["stamp_px"], cc["diag_px"])}
+    log(f"patch {tract}/{patch}: empty-sky banks built")
     rows, arrays = [], []
+    progress = Progress(len(targets), f"patch {tract}/{patch} targets")
     for row in targets.itertuples(index=False):
         rng = np.random.default_rng([int(cc["seed"]), int(row.object_id) & 0x7FFFFFFF])
         out, arr = process_target(row, img, cfg, rubin, euclid, banks, rng)
         rows.append(out)
         if arr is not None:
             arrays.append(arr)
+        progress.update()
     res = pd.DataFrame(rows) if rows else pd.DataFrame({"object_id": pd.Series([], dtype="int64")})
 
     # This patch's catalogue rows; pixel columns are empty for the objects that were not targets.
@@ -407,7 +420,7 @@ def run_patch(cfg, img, cat, tract, patch):
            if f"{k}_pass" in t}
     if "shape_ok" in t:
         msg["shape_failed"] = int((~t["shape_ok"].astype("boolean").fillna(False)).sum())
-    print(f"patch {tract}/{patch}: targets {len(targets):,}; in region {len(t):,}; passing: {msg}")
+    log(f"patch {tract}/{patch}: targets {len(targets):,}; in region {len(t):,}; passing: {msg}")
     return table, st, info
 
 

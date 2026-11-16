@@ -22,6 +22,7 @@ import json
 import numpy as np
 
 from ..common import masks
+from ..common.progress import Progress, log
 from ..config import TABLES_DIR
 from .stamps import SkyBank, load_images, patch_list, patch_files_path
 
@@ -53,10 +54,14 @@ def run(cfg):
     for tract, patch in patch_list(cfg, cat):
         out = patch_files_path(cfg, "empty", tract, patch, "npz")
         if out.exists():
-            print(f"empty sky {tract}/{patch}: already done, skipped")
+            log(f"empty sky {tract}/{patch}: already done, skipped")
             continue
+        log(f"empty sky {tract}/{patch}: loading the coadds")
         img = load_images(cfg, tract, patch)
+        log(f"empty sky {tract}/{patch}: coadds loaded, finding clean windows")
         corners, n_windows = clean_windows(img, cfg, size)
+        log(f"empty sky {tract}/{patch}: {len(corners)} clean windows of {n_windows}")
+        progress = Progress(min(n_want, len(corners)), f"empty sky {tract}/{patch} windows kept")
         rng = np.random.default_rng([int(cfg["cuts"]["seed"]), int(tract), int(patch)])
         order = rng.permutation(len(corners))
 
@@ -84,9 +89,10 @@ def run(cfg):
             windows["dec"].append(float(dec))
             windows["x_tract"].append(img["x0"] + col)
             windows["y_tract"].append(img["y0"] + row)
+            progress.update()
 
         n, p = len(windows["ra"]), int(cfg["psf_px"])
-        print(f"empty sky {tract}/{patch}: {len(corners)} clean windows of {n_windows}; kept {n} "
+        log(f"empty sky {tract}/{patch}: {len(corners)} clean windows of {n_windows}; kept {n} "
               f"({n_no_psf} skipped for a missing PSF)")
         arrays = dict(
             flux=np.asarray(windows["flux"], np.float32).reshape(n, size, size, len(bands)),

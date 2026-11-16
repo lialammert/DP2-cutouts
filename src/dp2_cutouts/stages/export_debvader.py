@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from ..common import masks
+from ..common.progress import log
 from ..config import EXPORT_DIR, TABLES_DIR
 from .package import selection
 from .stamps import split_of
@@ -97,7 +98,7 @@ def export_isolated(cfg, out_dir):
     final = table[selection(table, cfg["export"]["apply"])].reset_index(drop=True)
     N = len(final)
     row_of = {int(o): k for k, o in enumerate(final["object_id"])}
-    print(f"export isolated: {N:,} objects pass {cfg['export']['apply']} (of {len(table):,} rows in the patch files)")
+    log(f"export isolated: {N:,} objects pass {cfg['export']['apply']} (of {len(table):,} rows in the patch files)")
 
     images = _memmap(out_dir / "images.npy", (N, size, size, C), np.float32)
     variance = _memmap(out_dir / "variance.npy", (N, size, size, C), np.float32)
@@ -105,6 +106,7 @@ def export_isolated(cfg, out_dir):
     psf = _memmap(out_dir / "psf.npy", (N, p, p, C), np.float32)
     filled = np.zeros(N, bool)
     for f in sorted(patch_files_dir(cfg).glob("stamps_*.parquet")):
+        log(f"export isolated: reading {f.name}")
         info = json.load(open(f.with_suffix(".json")))
         if info["psf_px"] is None:
             raise RuntimeError(f"{f.name} has no PSF stamps (SODA path): the debvader format needs them")
@@ -139,7 +141,7 @@ def export_isolated(cfg, out_dir):
 
     write_stats(out_dir, images, split)
     write_dataset_json(out_dir, cfg, "isolated", N, split, size, p)
-    print(f"  -> {out_dir}  (train {int((split == 0).sum())}, val {int((split == 1).sum())}, "
+    log(f"  -> {out_dir}  (train {int((split == 0).sum())}, val {int((split == 1).sum())}, "
           f"test {int((split == 2).sum())})")
     return N
 
@@ -154,7 +156,7 @@ def export_empty(cfg, out_dir, isolated_dir):
         raise FileNotFoundError(f"no empty-sky patch file in {patch_files_dir(cfg)}: run the empty_sky step first")
     parts = [dict(np.load(f)) for f in patch_files]
     N = sum(len(d["ra"]) for d in parts)
-    print(f"export empty: {N:,} empty-sky stamps from {len(patch_files)} patches "
+    log(f"export empty: {N:,} empty-sky stamps from {len(patch_files)} patches "
           f"(clean windows per patch: {[int(d['n_clean']) for d in parts]})")
 
     images = _memmap(out_dir / "images.npy", (N, size, size, len(bands)), np.float32)
@@ -188,7 +190,7 @@ def export_empty(cfg, out_dir, isolated_dir):
     # The normalisation constants belong to the isolated training set; every other dataset copies them.
     (out_dir / "stats.json").write_text((Path(isolated_dir) / "stats.json").read_text())
     write_dataset_json(out_dir, cfg, "empty", N, split, size, p)
-    print(f"  -> {out_dir}")
+    log(f"  -> {out_dir}")
     return N
 
 
