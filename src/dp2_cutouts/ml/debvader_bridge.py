@@ -14,6 +14,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -46,7 +47,25 @@ def resolve_stats(run_dir, config, stats_path=None):
     stats = json.loads(p.read_text())
     if "nonlinear" not in stats:
         raise KeyError(f"{p} has no 'nonlinear' entry: it does not describe a nonlinear-normalised dataset")
-    return p, np.asarray(stats["nonlinear"]["scale_per_band"], dtype=np.float32)
+    return p, np.asarray(stats["nonlinear"]["scale_per_band"], dtype=np.float32), stats
+
+
+def real_build_dir(config):
+    # The dataset folder of a run trained on a real-data build (images.npy + meta.npz, as debvader-keras' loader
+    # recognises it), or None for the simulated datasets.
+    path = getattr(config.data, "dataset_path", None)
+    if not path:
+        return None
+    d = Path(os.path.expandvars(str(path))).expanduser()
+    return d if (d / "images.npy").is_file() and (d / "meta.npz").is_file() else None
+
+
+def training_units(config, stats):
+    # Units of the pixels the VAE was trained on. A build written by dp2-ml export-rubin-vae says it in its
+    # stats.json; other real builds are in nJy (build_stage1_real.py); the BTK simulations in LSST electrons.
+    if "units" in stats:
+        return stats["units"]
+    return "nJy" if real_build_dir(config) is not None else "lsst_electrons"
 
 
 class FrozenRubinVAE:
@@ -84,7 +103,8 @@ class FrozenRubinVAE:
         self.vae.trainable = False
         self.encoder, self.decoder = self.vae.encoder, self.vae.decoder
 
-        self.stats_path, self.scale_per_band = resolve_stats(self.run_dir, self.config, stats_path)
+        self.stats_path, self.scale_per_band, stats = resolve_stats(self.run_dir, self.config, stats_path)
+        self.units_mode = training_units(self.config, stats)
         if len(self.scale_per_band) != self.n_bands:
             raise ValueError(f"stats.json has {len(self.scale_per_band)} bands, the model {self.n_bands}")
         self.beta = float(DEFAULT_NONLINEAR_BETA)
@@ -142,6 +162,7 @@ class FrozenRubinVAE:
         return dict(run_dir=str(self.run_dir), stage=self.stage, weights=str(self.weights_path),
                     weights_fingerprint=self.loaded_fingerprint, encoder_fingerprint=weights_fingerprint(self.encoder),
                     decoder_fingerprint=weights_fingerprint(self.decoder), stats=str(self.stats_path),
+                    training_units=self.units_mode,
                     scale_per_band=[float(v) for v in self.scale_per_band], latent_dim=self.latent_dim,
                     input_shape=list(self.input_shape), keras_backend=keras.backend.backend(),
                     keras_version=keras.__version__)

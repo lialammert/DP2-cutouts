@@ -266,17 +266,21 @@ def evaluate_stage2(cfg, debvader_run, stage1_run, run_name, stats_path=None, sp
     vae = FrozenRubinVAE(debvader_run, stage="stage1", stats_path=stats_path)
     teacher = load_euclid_encoder(cfg, cfg.run_dir(stage1_run), vae.latent_dim)
     student = load_student(debvader_run, cfg.run_dir(run_name), stats_path, tag)
-    deblender = student_encoder(debvader_run, "stage2", stats_path)
-    deblender.trainable = False
+    # The DebVAder deblender is a baseline only when the run has a stage 2 (a real-data stage 1 run has none).
+    paths = ["student", "naive"]
+    encoders = dict(student=lambda t: student(t, training=False), naive=lambda t: vae.encode_params(t))
+    if (vae.run_dir / "checkpoints" / "stage2_best.weights.h5").exists():
+        deblender = student_encoder(debvader_run, "stage2", stats_path)
+        deblender.trainable = False
+        paths.insert(1, "deblender")
+        encoders["deblender"] = lambda t: deblender(t, training=False)
     ref = dict(np.load(cfg.run_dir(stage1_run) / "latent_reference.npz"))
     run2 = json.loads((cfg.run_dir(run_name) / "run.json").read_text())
     centering = run2["settings"]["centering"]
-    encoders = dict(student=lambda t: student(t, training=False), deblender=lambda t: deblender(t, training=False),
-                    naive=lambda t: vae.encode_params(t))
     norm = Normaliser(cfg, vae, cfg.dataset_dir("d1"))
     W = ref["W"]
     wdist = lambda a, b: np.sqrt((((a - b) @ W.T) ** 2).sum(-1) / vae.latent_dim)  # noqa: E731
-    summary = {}
+    summary = dict(paths=paths)
 
     # --- D2: real blends, scored against the Euclid teacher.
     d2 = Store(cfg.dataset_dir("d2"))
@@ -297,22 +301,21 @@ def evaluate_stage2(cfg, debvader_run, stage1_run, run_name, stats_path=None, sp
             return o
         o = batched(run, dict(xr=xr, xe=xe, cond=cond[r]))
         ones = np.ones_like(wr)
-        df = pd.concat([measure(o[p], ones, cfg, p) for p in ("teacher", "student", "deblender", "naive")], axis=1)
-        for p in ("student", "deblender", "naive"):
+        df = pd.concat([measure(o[p], ones, cfg, p) for p in ["teacher"] + paths], axis=1)
+        for p in paths:
             df[f"latent_dist_{p}_teacher"] = wdist(o[f"mu_{p}"], o["mu_teacher"])
         df["row"] = r
         res.append(df)
         if ex is None:
-            ex = dict(blend=fr, teacher=o["teacher"], student=o["student"], deblender=o["deblender"],
-                      naive=o["naive"], euclid=xe)
+            ex = dict(blend=fr, teacher=o["teacher"], euclid=xe, **{p: o[p] for p in paths})
     df = pd.concat(res, ignore_index=True)
     df = pd.concat([d2.meta.iloc[df["row"].to_numpy()].reset_index(drop=True), df.drop(columns=["row"])], axis=1)
-    df = pd.concat([df] + [compare(df, p, "teacher", cfg) for p in ("student", "deblender", "naive")], axis=1)
+    df = pd.concat([df] + [compare(df, p, "teacher", cfg) for p in paths], axis=1)
     df["separation_arcsec"] = df["partner_sep_arcsec"]
     df["i_cModel_mag"] = df["rubin_i_cModel_mag"]  # magnitude of the Rubin object of the group, for the bins
     df.to_parquet(out_dir / f"stage2_d2_{split}.parquet", index=False)
     s = {}
-    for p in ("student", "deblender", "naive"):
+    for p in paths:
         s[p] = dict(median_latent_dist=float(df[f"latent_dist_{p}_teacher"].median()),
                     scatter_de1=robust_scatter(df[f"de1_{p}_teacher"]),
                     scatter_de2=robust_scatter(df[f"de2_{p}_teacher"]),
@@ -324,9 +327,9 @@ def evaluate_stage2(cfg, debvader_run, stage1_run, run_name, stats_path=None, sp
     summary["d2_vs_teacher"] = s
     summary["d2_n"] = int(len(df))
     metrics = {f"latent_dist_{p}": (lambda d, p=p: float(d[f"latent_dist_{p}_teacher"].median()))
-               for p in ("student", "deblender", "naive")}
+               for p in paths}
     metrics.update({f"scatter_de1_{p}": (lambda d, p=p: robust_scatter(d[f"de1_{p}_teacher"]))
-                    for p in ("student", "deblender", "naive")})
+                    for p in paths})
     bins = pd.concat([binned(df, by, edges, metrics) for by, edges in cfg["evaluation"]["bins"].items()
                       if by in df.columns], ignore_index=True)
     bins.to_parquet(out_dir / f"stage2_d2_{split}_bins.parquet", index=False)
@@ -353,22 +356,21 @@ def evaluate_stage2(cfg, debvader_run, stage1_run, run_name, stats_path=None, sp
             o = batched(run, dict(xb=xb, xt=xt))
             ones = np.ones_like(wb)
             df_b = pd.concat([measure(ft, wt, cfg, "truth"), measure(o["ref"], ones, cfg, "ref")]
-                             + [measure(o[p], ones, cfg, p) for p in ("student", "deblender", "naive")], axis=1)
-            for p in ("student", "deblender", "naive"):
+                             + [measure(o[p], ones, cfg, p) for p in paths], axis=1)
+            for p in paths:
                 df_b[f"latent_dist_{p}_ref"] = wdist(o[f"mu_{p}"], o["mu_ref"])
                 df_b[f"chi2_{p}_truth"] = ((o[p] - ft) ** 2 * ivt * wt).sum((1, 2, 3)) / np.maximum(wt.sum((1, 2, 3)), 1)
             df_b["row"] = r
             res.append(df_b)
             if exb is None:
-                exb = dict(blend=fb, truth=ft, ref=o["ref"], student=o["student"], deblender=o["deblender"],
-                           naive=o["naive"])
+                exb = dict(blend=fb, truth=ft, ref=o["ref"], **{p: o[p] for p in paths})
         db = pd.concat(res, ignore_index=True)
         db = pd.concat([bl.meta.iloc[db["row"].to_numpy()].reset_index(drop=True), db.drop(columns=["row"])], axis=1)
-        db = pd.concat([db] + [compare(db, p, "ref", cfg) for p in ("student", "deblender", "naive")]
-                       + [compare(db, p, "truth", cfg) for p in ("student", "deblender", "naive")], axis=1)
+        db = pd.concat([db] + [compare(db, p, "ref", cfg) for p in paths]
+                       + [compare(db, p, "truth", cfg) for p in paths], axis=1)
         db.to_parquet(out_dir / f"stage2_blends_{split}.parquet", index=False)
         sb = {}
-        for p in ("student", "deblender", "naive"):
+        for p in paths:
             m_e1, c_e1 = linear_mc(db[f"{p}_e1"].to_numpy(float), db["ref_e1"].to_numpy(float))
             sb[p] = dict(median_latent_dist=float(db[f"latent_dist_{p}_ref"].median()),
                          median_chi2_truth=float(db[f"chi2_{p}_truth"].median()),
@@ -379,10 +381,9 @@ def evaluate_stage2(cfg, debvader_run, stage1_run, run_name, stats_path=None, sp
         summary["blends_vs_reference"] = sb
         summary["blends_n"] = int(len(db))
         db["separation_arcsec"] = db["separation_px"] * common.RUBIN_SCALE
-        bm = {f"chi2_{p}": (lambda d, p=p: float(d[f"chi2_{p}_truth"].median())) for p in ("student", "deblender",
-                                                                                          "naive")}
+        bm = {f"chi2_{p}": (lambda d, p=p: float(d[f"chi2_{p}_truth"].median())) for p in paths}
         bm.update({f"scatter_de1_{p}": (lambda d, p=p: robust_scatter(d[f"de1_{p}_ref"]))
-                   for p in ("student", "deblender", "naive")})
+                   for p in paths})
         edges = dict(separation_arcsec=cfg["evaluation"]["bins"]["separation_arcsec"],
                      flux_ratio=[0.0, 0.25, 0.5, 0.75, 1.0])
         pd.concat([binned(db, k, e, bm) for k, e in edges.items()], ignore_index=True).to_parquet(

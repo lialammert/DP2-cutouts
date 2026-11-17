@@ -59,7 +59,7 @@ def run(cfg, debvader_run, stats_path=None, n=3000, reference_npz=None, out_name
     bands = list(cfg["rubin"]["bands"])
     meta, flux, ivar, mask, total = sample_final(cfg.pipeline(), bands, int(n), int(cfg["seed"]))
     rep["final_dataset_rows"] = total
-    units = UnitConverter(cfg["rubin"]["vae_units"], bands)
+    units = UnitConverter.for_vae(cfg, v1)
     rep["units"] = units.describe()
     f = units.flux(flux)
     iv = units.ivar(ivar)

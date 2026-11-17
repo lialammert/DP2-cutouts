@@ -54,3 +54,16 @@ class UnitConverter:
 
     def describe(self):
         return dict(mode=self.mode, bands=self.bands, factor=[float(v) for v in self.factor])
+
+    @classmethod
+    def for_vae(cls, cfg, vae):
+        # rubin.vae_units "auto" takes the units of the data the VAE was trained on (vae.units_mode: nJy for a
+        # real-data build, lsst_electrons for the BTK simulations). An explicit value must agree with it: feeding
+        # a VAE other units than its training set's is exactly the factor-of-fifty error resolve_stats_path warns of.
+        mode = cfg["rubin"]["vae_units"]
+        if mode == "auto":
+            mode = vae.units_mode
+        elif mode != vae.units_mode:
+            raise ValueError(f"rubin.vae_units={mode!r} but the VAE of {vae.run_dir} was trained in "
+                             f"{vae.units_mode!r}; use 'auto'")
+        return cls(mode, cfg["rubin"]["bands"])

@@ -48,5 +48,16 @@ def cross_split_neighbours(ra, dec, split, radius_arcsec):
 
 def split_table(meta, cfg):
     sp = cfg["splits"]
-    s = assign(meta["tract"].to_numpy(), meta["patch"].to_numpy(), sp["fractions"], cfg["seed"])
+    tracts, patches = meta["tract"].to_numpy(), meta["patch"].to_numpy()
+    s = assign(tracts, patches, sp["fractions"], cfg["seed"])
+    # splits.fixed {"tract_patch": split} overrides the draw: with a handful of patches the hash can leave a split
+    # empty (9 patches gave no test patch), and the patches that matter are then chosen by hand.
+    fixed = dict(sp.get("fixed") or {})
+    bad = {k: v for k, v in fixed.items() if v not in SPLITS}
+    if bad:
+        raise ValueError(f"splits.fixed: unknown split in {bad}; expected one of {SPLITS}")
+    if fixed:
+        names = np.array([f"{int(t)}_{int(p)}" for t, p in zip(tracts, patches)], dtype=object)
+        for name, split in fixed.items():
+            s[names == name] = split
     return pd.Series(s, index=meta.index, name="split")

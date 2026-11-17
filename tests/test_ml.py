@@ -119,3 +119,24 @@ def test_units_lsst_electrons():
     assert u.factor[0] == u.factor.min()
     f = np.ones((2, 3, 3, 6))
     assert np.allclose(u.flux_back(u.flux(f)), f, rtol=1e-6)
+
+
+def test_units_follow_the_vae(tmp_path):
+    pytest.importorskip("surveycodex")
+    from types import SimpleNamespace
+    from dp2_cutouts.ml.debvader_bridge import training_units
+    from dp2_cutouts.ml.units import UnitConverter
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "images.npy").write_bytes(b"")
+    (real / "meta.npz").write_bytes(b"")
+    conf = lambda p: SimpleNamespace(data=SimpleNamespace(dataset_path=str(p)))  # noqa: E731
+    assert training_units(conf(real), {}) == "nJy"
+    assert training_units(conf("paper_v1"), {}) == "lsst_electrons"
+    assert training_units(conf("paper_v1"), {"units": "nJy"}) == "nJy"
+    cfg = dict(rubin=dict(vae_units="auto", bands=list("ugrizy")))
+    vae = SimpleNamespace(units_mode="nJy", run_dir=tmp_path)
+    assert np.all(UnitConverter.for_vae(cfg, vae).factor == 1.0)
+    cfg["rubin"]["vae_units"] = "lsst_electrons"
+    with pytest.raises(ValueError):
+        UnitConverter.for_vae(cfg, vae)

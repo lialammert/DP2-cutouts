@@ -159,13 +159,11 @@ def empty_arrays(n_r, b_r, n_e, b_e):
 
 
 def info(cfg):
-    from ..ml.units import UnitConverter
+    # Pixels are stored in nJy whatever the VAE: the conversion to its units is done when a batch is read.
     return dict(name="d1", rubin_bands=list(cfg["rubin"]["bands"]), euclid_bands=list(cfg["euclid"]["bands"]),
                 rubin_units="nJy", euclid_units="as delivered by the source (MER: microJy per pixel)",
                 rubin_pixel_scale=common.RUBIN_SCALE, euclid_pixel_scale=float(cfg["euclid"]["pixel_scale"]),
                 euclid_image_source=cfg["euclid"]["image_source"],
-                vae_units=UnitConverter(cfg["rubin"]["vae_units"], cfg["rubin"]["bands"]).describe()
-                if cfg["rubin"]["vae_units"] != "nJy" else dict(mode="nJy"),
                 config_fingerprint=cfg.fingerprint(["rubin", "euclid", "dataset1", "splits", "seed"]),
                 mask_convention="True = pixel not to be trusted",
                 stamp_centre="integer pixel nearest to the catalogue position; sub-pixel offsets in meta")

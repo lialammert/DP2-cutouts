@@ -59,7 +59,7 @@ def cond_indices(columns):
 class Normaliser:
     def __init__(self, cfg, vae, dataset_dir):
         from .units import UnitConverter
-        self.units = UnitConverter(cfg["rubin"]["vae_units"], cfg["rubin"]["bands"])
+        self.units = UnitConverter.for_vae(cfg, vae)
         self.vae = vae
         self.masked_value = float(cfg["rubin"]["masked_value_normalised"])
         es = json.loads((dataset_dir / "euclid_stats.json").read_text())["nonlinear"]

@@ -6,8 +6,10 @@
 # Euclid teacher) and their evaluations. Environment variables are expanded when the file is read; every value can
 # be overridden from the command line with --set section.key=value.
 #
-# The DebVAder run (paper_baseline) is never written here: its folder is given on the command line
-# (--debvader-run, or the DEBVADER_RUN environment variable), because it lives wherever the campaign left it.
+# The DebVAder run is never written here: its folder is given on the command line (--debvader-run, or the
+# DEBVADER_RUN environment variable), because it lives wherever the campaign left it. paper_baseline (BTK
+# simulations, trained without noise) does not reconstruct DP2 stamps (phase 0, 2026-11-17); the reference VAE is
+# a DebVAder stage 1 trained from scratch on the Rubin stamps of D1 (section rubin_vae).
 
 # Configuration of the stamp pipeline that produced the isolated-galaxy dataset (patch by patch).
 pipeline_config: ${DP2_CONFIG}
@@ -20,11 +22,11 @@ seed: 20261116
 rubin:
   bands: [u, g, r, i, z, y]
   stamp_px: 59
-  # Units fed to the DebVAder encoder. paper_baseline was trained on BTK simulations in electrons (LSST survey
-  # parameters, full exposure time); DP2 pixels are in nJy. "lsst_electrons" converts nJy to the electrons the same
-  # flux would give in the simulated survey (zero point and exposure time read from surveycodex, the package BTK
-  # uses). The noise level stays that of DP2: this conversion fixes the flux scale, not the depth.
-  vae_units: lsst_electrons
+  # Units fed to the DebVAder encoder: those of the data the VAE was trained on. "auto" reads them from the run
+  # (nJy for a VAE trained on DP2 stamps; lsst_electrons for paper_baseline, trained on BTK simulations, for which
+  # nJy are converted to the electrons the same flux gives in the simulated survey, surveycodex zero points and
+  # exposure times). An explicit value that disagrees with the run stops the job.
+  vae_units: auto
   # Band used for shape measurements (HSM adaptive moments). The stamp pipeline measures in i.
   shape_band: i
   # Masked Rubin pixels (MMU mask True) enter the encoder as 0 in normalised units and get zero weight in losses.
@@ -58,6 +60,11 @@ splits:
   fractions: {train: 0.8, val: 0.1, test: 0.1}
   # Pairs of objects closer than this but in different splits are counted in the quality report (border leakage).
   leakage_radius_arcsec: 12.0
+  # Patches whose split is set by hand, overriding the draw ("tract_patch": train | val | test). The 9 patches of
+  # the first scale run (tract 5063, patches 23-25, 33-35, 43-45) drew 8 train, 1 val (5063_33), 0 test: the
+  # opposite corner of the block is taken as test. Set before D1 is built: changing it means rebuilding D1, D2,
+  # the blends and the Rubin VAE training set (--force).
+  fixed: {"5063_45": test}
 
 dataset1:
   # D1 = final dataset of the stamp pipeline (every cut of the recipe applied, masking included) with a Euclid image.
@@ -71,6 +78,25 @@ dataset1:
   cond_features: [psf_sigma_u, psf_sigma_g, psf_sigma_r, psf_sigma_i, psf_sigma_z, psf_sigma_y,
                   psf_e1_u, psf_e1_g, psf_e1_r, psf_e1_i, psf_e1_z, psf_e1_y,
                   psf_e2_u, psf_e2_g, psf_e2_r, psf_e2_i, psf_e2_z, psf_e2_y]
+
+rubin_vae:
+  # Training set of the reference Rubin VAE: the Rubin stamps of D1 written as a debvader-keras "real build"
+  # (images.npy in nJy, meta.npz with the D1 split, stats.json), trained from scratch with debvader-keras' own
+  # trainer (scripts/train.py --stage 1) and the architecture of the template run (paper_baseline).
+  # Masked pixels (neighbours, bad pixels) are replaced by Gaussian noise at the sky level of their stamp and band,
+  # as build_stage1_real.py does: the VAE never sees holes, and its target is the stamp itself.
+  min_valid_fraction: 0.7        # stamps with fewer unmasked pixels than this (any band) are left out
+  stats_max_stamps: 20000        # train stamps drawn for scale_per_band (99.9th percentile of |flux|, as debvader)
+  run_name: dp2_d1_real          # name of the debvader-keras run (EXPERIMENTS_DIR/<run_name>)
+  # Overrides of the template run's config.json (dotted keys). Data: the real build, every stamp of each split
+  # (sizes 0 = all), no S/N cut (the cut is for shape heads, absent here), no cache (a re-export must be read).
+  debvader_overrides:
+    data.real_min_snr: 0.0
+    data.train_size: 0
+    data.validation_size: 0
+    data.cache_data: false
+    data.use_btk: false
+    data.use_sample_weighting: false
 
 stage1:
   euclid_encoder:
@@ -148,7 +174,8 @@ controlled_blends:
 
 stage2:
   centering: euclid              # euclid (oracle: stamp centred on the Euclid target) | rubin (Rubin-only)
-  init: stage2                   # warm start of the blend encoder: stage2 (DebVAder deblender) | stage1 | random
+  init: stage1                   # warm start of the blend encoder: stage1 (reference encoder) | stage2 (DebVAder
+                                 # deblender, only for a run that has one, e.g. paper_baseline) | random
   latent_loss: mu_whitened
   contrastive:
     projection_dims: [256, 128]

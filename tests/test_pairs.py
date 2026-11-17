@@ -132,3 +132,97 @@ def test_repo_ml_config_parses(monkeypatch):
     assert len(cfg["stage1"]["band_weights"]) == len(cfg["rubin"]["bands"])
     assert set(cfg["euclid"]["encoder_bands"]) <= set(cfg["euclid"]["bands"])
     json.dumps(cfg.raw)
+
+
+def test_fixed_splits_override_the_draw():
+    meta = pd.DataFrame(dict(tract=[5063] * 9, patch=[23, 24, 25, 33, 34, 35, 43, 44, 45]))
+    cfg = dict(seed=20261116, splits=dict(fractions=dict(train=0.8, val=0.1, test=0.1)))
+    drawn = splits.split_table(meta, cfg)
+    cfg["splits"]["fixed"] = {"5063_45": "test"}
+    s = splits.split_table(meta, cfg)
+    assert s.iloc[-1] == "test" and (s.iloc[:-1] == drawn.iloc[:-1]).all()
+    cfg["splits"]["fixed"] = {"5063_45": "tset"}
+    with pytest.raises(ValueError):
+        splits.split_table(meta, cfg)
+
+
+def test_repo_split_of_the_first_scale_run_has_every_split(monkeypatch):
+    # The 9 patches of the first Jean Zay scale run must give train, val and test with the repository config.
+    from pathlib import Path
+    from dp2_cutouts.mlconfig import MLConfig
+    monkeypatch.setenv("DP2_CONFIG", "x.yaml")
+    monkeypatch.setenv("DP2_ML_ROOT", "/tmp/ml")
+    cfg = MLConfig.load(Path(__file__).parents[1] / "config" / "ml_jeanzay.yaml")
+    meta = pd.DataFrame(dict(tract=[5063] * 9, patch=[23, 24, 25, 33, 34, 35, 43, 44, 45]))
+    assert set(splits.split_table(meta, cfg)) == set(splits.SPLITS)
+
+
+def test_fill_masked_replaces_only_bad_pixels():
+    from dp2_cutouts.pairs.rubin_vae import fill_masked
+    rng = np.random.default_rng(0)
+    n, h, c = 3, 41, 2
+    flux = rng.normal(size=(n, h, h, c)).astype(np.float32) * 2.0
+    ivar = np.full(flux.shape, 0.25, np.float32)        # sigma 2
+    mask = np.zeros(flux.shape, bool)
+    mask[:, :20] = True                                  # half the stamp masked
+    flux[0, 30, 30, 0] = np.nan                          # non-finite pixel, not masked
+    ivar[1, 35, 35, 1] = 0.0                             # no variance, not masked
+    out, frac = fill_masked(flux, ivar, mask, rng)
+    good = ~mask
+    good[0, 30, 30, 0] = good[1, 35, 35, 1] = False
+    assert np.array_equal(out[good], flux[good])
+    assert np.all(np.isfinite(out))
+    assert abs(out[mask].std() - 2.0) < 0.05             # sky noise of the stamp, not zeros
+    assert frac[2] == pytest.approx(20 / 41)
+
+
+def test_export_rubin_vae_real_build(tmp_path):
+    from dp2_cutouts.pairs import rubin_vae
+    rng = np.random.default_rng(1)
+    n, h = 12, 59
+    d1 = tmp_path / "datasets" / "d1"
+    d1.mkdir(parents=True)
+    split = np.array(["train"] * 8 + ["val"] * 2 + ["test"] * 2, dtype=object)
+    meta = pd.DataFrame(dict(object_id=np.arange(n), tract=5063, patch=np.repeat([23, 33, 45], 4), split=split,
+                             rubin_valid_fraction=np.r_[np.full(n - 1, 0.95), 0.2], e1_rubin_check=0.1,
+                             e2_rubin_check=-0.1, i_cModel_mag=23.0, snr_i=30.0))
+    meta.to_parquet(d1 / "meta.parquet", index=False)
+    flux = rng.normal(size=(n, h, h, 6)).astype(np.float32)
+    mask = np.zeros(flux.shape, bool)
+    mask[:, :5] = True
+    for name, arr in dict(rubin_flux=flux, rubin_ivar=np.ones_like(flux), rubin_mask=mask).items():
+        np.save(d1 / f"{name}.npy", arr)
+    (d1 / "info.json").write_text(json.dumps(dict(n=n, rubin_bands=list("ugrizy"), config_fingerprint="x",
+                                                  arrays={})))
+    template = tmp_path / "paper_baseline"
+    template.mkdir()
+    (template / "config.json").write_text(json.dumps(dict(
+        data=dict(dataset_path="paper_v1", normalization=["nonlinear"], input_shape=[59, 59, 6], train_size=100000),
+        model=dict(latent_dim=32), training=dict(epochs=2000))))
+
+    class Cfg(dict):
+        def dataset_dir(self, name):
+            return tmp_path / "datasets" / name
+
+        def fingerprint(self, sections):
+            return "f"
+
+    cfg = Cfg(seed=3, rubin=dict(bands=list("ugrizy"), shape_band="i"),
+              rubin_vae=dict(min_valid_fraction=0.7, stats_max_stamps=100, run_name="r",
+                             debvader_overrides={"data.train_size": 0, "data.real_min_snr": 0.0}))
+    info = rubin_vae.export(cfg, template)
+    out = tmp_path / "datasets" / "rubin_vae"
+    images = np.load(out / "images.npy")
+    m = np.load(out / "meta.npz")
+    assert images.shape == (n - 1, h, h, 6) and info["dropped_low_valid_fraction"] == 1
+    assert list(m["split"]) == [0] * 8 + [1] * 2 + [2]
+    assert np.array_equal(images[:, 5:], flux[: n - 1, 5:])           # unmasked pixels untouched
+    assert np.all(images[:, :5] != 0)
+    conf = json.loads((out / "debvader_config.json").read_text())
+    assert conf["data"]["dataset_path"] == str(out) and conf["data"]["train_size"] == 0
+    assert info["overrides_added_to_template"] == ["data.real_min_snr"]
+    stats = json.loads((out / "stats.json").read_text())
+    assert stats["units"] == "nJy" and len(stats["nonlinear"]["scale_per_band"]) == 6
+    assert rubin_vae.export(cfg, template)["n"] == n - 1                # already written: skipped
+    with pytest.raises(KeyError):
+        rubin_vae.debvader_config(template, out, {"datta.x": 1})

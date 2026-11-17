@@ -8,8 +8,15 @@ Runbook of the Rubin x Euclid cross-instrument work on Jean Zay: datasets D1 and
 # Rubin × Euclid cross-instrument learning — runbook (Jean Zay)
 
 Everything here runs on Jean Zay. Nothing is meant to run on a laptop: the Euclid images alone do not fit.
-The DebVAder reference is the `paper_baseline` run of debvader-keras. Its folder is **given on the command line**
-(`DEBVADER_RUN`), never written in a file.
+The DebVAder reference run is **given on the command line** (`DEBVADER_RUN`), never written in a file.
+
+**Reference VAE (2026-11-17).** `paper_baseline` was trained on noiseless BTK simulations (`generate_dataset.py`,
+regime `clean`). Phase 0 on 3000 DP2 stamps: units right (flux within 16 % at S/N 100–1000), but the sky noise is
+read as diffuse light — a reconstructed plateau of ~4σ over the whole stamp (i band: 2540 e⁻ per pixel at the edge,
+DP2 sky σ 670), reconstructed flux +1560 % at S/N 5–20, median χ² per pixel 13.5 at every S/N. Its latent space
+cannot be the reference for real stamps. The reference is now a DebVAder stage 1 **trained from scratch on the
+Rubin stamps of D1** (step 3b below), same architecture, debvader-keras' own trainer; `paper_baseline` only serves
+as the architecture template of that run.
 
 ## What is built
 
@@ -21,6 +28,8 @@ The DebVAder reference is the `paper_baseline` run of debvader-keras. Its folder
 | D2 | `dp2-ml <cfg> d2 --index N`, then `d2-merge` | per-patch copaings + images, internet, D1 merged | `datasets/d2/` |
 | quality | `dp2-ml <cfg> quality d1` / `quality d2` | merged dataset | `datasets/d*/quality_report.json` |
 | blends | `dp2-ml <cfg> blends` | D1 | `datasets/blends/` |
+| Rubin VAE set | `dp2-ml <cfg> export-rubin-vae` (`--debvader-run` = template) | D1 | `datasets/rubin_vae/` |
+| Rubin VAE | `scripts/jeanzay/ml/rubin_vae.slurm` (debvader-keras `train.py --stage 1`) | the set, GPU | `$EXPERIMENTS_DIR/<rubin_vae.run_name>/` |
 | Stage 1 | `train-stage1 --ablation A`, `eval-stage1 --ablation A` | D1, VAE, GPU | `runs/A/`, `evaluations/A/` |
 | Stage 2 | `train-stage2 --ablation B --stage1-run A`, `eval-stage2 ...` | D2, blends, Stage 1 run, GPU | `runs/B/`, `evaluations/B/` |
 | notebooks | `scripts/jeanzay/ml/notebooks.slurm` | the above | `notebooks/` (executed copies with figures) |
@@ -33,13 +42,19 @@ The DebVAder reference is the `paper_baseline` run of debvader-keras. Its folder
   sources are masked. The Rubin stamp is the unmasked blend, centred on the Euclid target (`rubin_*`) and on the Rubin
   object (`rubin_*_rc`).
 - **Splits**: by Rubin `(tract, patch)` through a hash, the same for every dataset: no patch feeds two splits, and
-  no Stage 2 test patch was seen by the Stage 1 teacher.
+  no Stage 2 test patch was seen by the Stage 1 teacher. `splits.fixed` overrides the draw for named patches: the 9
+  patches of the first scale run drew no test patch, so `5063_45` is set to test (val: `5063_33`, by the draw).
+- **Rubin VAE set**: the Rubin stamps of D1 in debvader-keras' real-build format (`images.npy` in nJy, `meta.npz`
+  with the D1 split, `stats.json`, `debvader_config.json`). Masked pixels get Gaussian noise at the sky level of
+  their stamp and band, so the VAE never sees holes; stamps below `rubin_vae.min_valid_fraction` are left out. The
+  VAE is trained on the D1 train split only, early-stopped on val: test patches stay unseen by every network.
 - **Stage 1**: Euclid encoder trained to land where the frozen DebVAder encoder puts the Rubin view
   (latent loss), and so that the frozen decoder gives back the Rubin stamp (cross loss). Ablations in
   `stage1.ablations`.
-- **Stage 2**: Rubin blend encoder (DebVAder encoder architecture, warm-started from the DebVAder deblender) trained
-  to return the teacher latent of the target. Baselines in the evaluation: the untouched DebVAder deblender and the
-  isolated-galaxy encoder fed the blend.
+- **Stage 2**: Rubin blend encoder (DebVAder encoder architecture, warm-started from the reference encoder,
+  `stage2.init`) trained to return the teacher latent of the target. Baselines in the evaluation: the
+  isolated-galaxy encoder fed the blend, and the untouched DebVAder deblender when the reference run has a stage 2
+  (the D1-trained run has none).
 
 ## Installation on Jean Zay (once)
 
@@ -63,9 +78,15 @@ export DP2_CONFIG=config/<patch-by-patch pipeline config>.yaml   # the one that 
 export DP2_ML_CONFIG=config/ml_jeanzay.yaml
 export DP2_ML_ROOT=$WORK/dp2-ml
 export DP2_CPU_ACCOUNT=<projet>@cpu DP2_GPU_ACCOUNT=<projet>@a100
-export DEBVADER_RUN=<folder of the paper_baseline run>   # contains config.json and checkpoints/
-# export DEBVADER_STATS=<stats.json of its training set>   # only if the run folder has no stats.json
+export DEBVADER_RUN=<folder of the DebVAder run>         # contains config.json and checkpoints/
+# export DEBVADER_STATS=<stats.json of its training set>   # only if neither the run nor its dataset has one
+export DEBVADER_REPO=$WORK/debvader-keras                 # checkout with scripts/train.py (step 3b)
+export EXPERIMENTS_DIR=$WORK/debvader-results             # where debvader-keras writes its runs (step 3b)
 ```
+
+`DEBVADER_RUN` is `paper_baseline` up to step 3b (template of the architecture), then the D1-trained run
+`$EXPERIMENTS_DIR/<rubin_vae.run_name>` for every later step. `rubin.vae_units: auto` takes the units from the run
+(nJy for the D1-trained run, BTK electrons for paper_baseline); an explicit value that disagrees stops the job.
 
 To find the run folder: it holds `config.json` and `checkpoints/stage1_best.weights.h5`, e.g.
 `find $WORK $SCRATCH -path '*paper_baseline*' -name stage1_best.weights.h5 2>/dev/null`.
@@ -89,6 +110,11 @@ To find the run folder: it holds `config.json` and `checkpoints/stage1_best.weig
    `notebooks/ml/01`: astrometry (systematic shift ≪ 1 Rubin pixel), e1/e2 correlation between VIS and Rubin
    (positive), position-angle table (set `euclid.pa_offset_deg` to the convention with the smallest median
    difference, then rebuild D2 with `--force`), split leakage.
+3b. **Rubin VAE** — with `DEBVADER_RUN` = paper_baseline: `submit_ml.sh rubin-vae` (export on CPU, then training
+   and phase 0 of the new run on one A100; resubmit `rubin_vae.slurm` as is if it hits 20 h, `--resume` continues).
+   Read `datasets/rubin_vae/info.json` (counts per split, filled fraction) and
+   `evaluations/phase0_<run>/phase0_report.json`: χ² per pixel near 1, no reconstructed plateau, flux and
+   ellipticity residuals centred at every S/N. Then `export DEBVADER_RUN=$EXPERIMENTS_DIR/<run>`.
 4. **Stage 1** — `submit_ml.sh stage1` (every ablation) or `submit_ml.sh stage1 s1_latent_cross`.
    `evaluations/<run>/stage1_test_summary.json` holds the gate. **Go to Stage 2 only if it passes**, or after
    deciding explicitly which criterion is relaxed and why.
@@ -96,8 +122,8 @@ To find the run folder: it holds `config.json` and `checkpoints/stage1_best.weig
 6. **Notebooks** — `STAGE1_RUN=... STAGE2_RUN=... submit_ml.sh notebooks`; executed copies in
    `$DP2_ML_ROOT/notebooks/`, to copy back for reading.
 
-`submit_ml.sh all` chains 2 → 6 (teacher `STAGE1_RUN`, default `s1_latent_cross`) — use it only once 1 and 3 have
-been checked by eye. Training jobs stop at 20 h (A100 limit) and resume from `runs/<name>/backup/` when resubmitted
+`submit_ml.sh all` chains 2 → 6 (teacher `STAGE1_RUN`, default `s1_latent_cross`) — use it only once 1, 3 and 3b
+have been checked by eye, with `DEBVADER_RUN` already the D1-trained run. Training jobs stop at 20 h (A100 limit) and resume from `runs/<name>/backup/` when resubmitted
 with the same command.
 
 ## Overrides without editing the file
@@ -109,9 +135,9 @@ Every value of `ml_jeanzay.yaml` can be overridden: `dp2-ml $DP2_ML_CONFIG train
 
 | assumption | where it is checked |
 |---|---|
-| paper_baseline expects BTK electrons; nJy × surveycodex factor gives the same scale | phase 0, normalisation block |
+| ~~paper_baseline reconstructs DP2 stamps~~ — refuted by phase 0 (noiseless training) | replaced by the D1-trained VAE |
+| the D1-trained VAE reconstructs DP2 stamps down to the noise | phase 0 of the new run |
 | MMU Euclid cutouts are centred on the object, north up, east left, 0.1″/px | D1 quality: astrometry, centroid offsets, e1/e2 correlation; `scale_ok` per cutout |
 | MMU band names (`VIS`, `NIR_J`, ...) | probe |
 | copaings position-angle convention | D1 quality: position-angle table |
-| the stage 2 checkpoint of paper_baseline shares the stage 1 decoder | phase 0, `decoder_shared` |
 | the Stage 1 acceptance thresholds | they are proposals; read the numbers |

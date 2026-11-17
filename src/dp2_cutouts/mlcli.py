@@ -3,11 +3,13 @@
 # AstroDeep Project
 # Command-line entry point of the cross-instrument work: dp2-ml <ml_config.yaml> <command> [options].
 #   probe-euclid --patch P          which Euclid image source works from this node (prepost)
-#   phase0                          reference VAE checks on DP2 stamps (needs --debvader-run)
+#   phase0 [--run-name N]           reference VAE checks on DP2 stamps (needs --debvader-run); evaluations/N
 #   d1 | d2 [--index N|--patches]   build the D1 / D2 shard of one or more patches (prepost: Euclid images)
 #   d1-merge | d2-merge             merge the shards into the memory-mapped dataset
 #   quality d1|d2                   quality report of a merged dataset
 #   blends                          controlled blends from D1 (val, test)
+#   export-rubin-vae                Rubin stamps of D1 as a debvader-keras real build, to train the reference VAE
+#                                   (--debvader-run: template run whose config.json gives the architecture)
 #   train-stage1 | eval-stage1      Stage 1 (needs --debvader-run; --ablation picks the loss weights)
 #   train-stage2 | eval-stage2      Stage 2 (needs --debvader-run and --stage1-run)
 # The DebVAder run folder (paper_baseline) is given with --debvader-run or the DEBVADER_RUN environment variable;
@@ -18,14 +20,14 @@ import os
 import sys
 import traceback
 
-COMMANDS = ("probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "blends", "train-stage1",
-            "eval-stage1", "train-stage2", "eval-stage2")
+COMMANDS = ("probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "blends", "export-rubin-vae",
+            "train-stage1", "eval-stage1", "train-stage2", "eval-stage2")
 
 
 def _debvader_run(args):
     run = args.debvader_run or os.environ.get("DEBVADER_RUN")
     if not run:
-        sys.exit("give the DebVAder run folder (paper_baseline): --debvader-run PATH or DEBVADER_RUN=PATH")
+        sys.exit("give the DebVAder run folder: --debvader-run PATH or DEBVADER_RUN=PATH")
     return run
 
 
@@ -100,6 +102,10 @@ def main(argv=None):
         from .pairs import blends
         blends.build(cfg)
         return
+    if c == "export-rubin-vae":
+        from .pairs import rubin_vae
+        rubin_vae.export(cfg, _debvader_run(args), args.force)
+        return
 
     # Everything below imports keras (backend chosen in dp2_cutouts.ml).
     from . import ml  # noqa: F401
@@ -112,7 +118,7 @@ def main(argv=None):
     run = _debvader_run(args)
     if c == "phase0":
         from .ml import phase0
-        phase0.run(cfg, run, args.debvader_stats, args.n, args.reference_npz)
+        phase0.run(cfg, run, args.debvader_stats, args.n, args.reference_npz, out_name=args.run_name or "phase0")
     elif c == "train-stage1":
         from .ml import stage1
         name = args.run_name or args.ablation or "stage1"

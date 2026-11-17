@@ -7,14 +7,18 @@
 #
 #   export DP2_ML_VENV=$WORK/venvs/dp2-ml DP2_CONFIG=config/<pipeline>.yaml DP2_ML_CONFIG=config/ml_jeanzay.yaml
 #   export DP2_ML_ROOT=$WORK/dp2-ml DP2_CPU_ACCOUNT=<projet>@cpu DP2_GPU_ACCOUNT=<projet>@a100
-#   export DEBVADER_RUN=<path of the paper_baseline run>          # given here, never written in a file
+#   export DEBVADER_RUN=<path of the DebVAder run>                 # given here, never written in a file
 #   scripts/jeanzay/ml/submit_ml.sh probe <tract_patch>            # 1. which Euclid image source works
 #   scripts/jeanzay/ml/submit_ml.sh phase0                         # 2. reference VAE on DP2 stamps
 #   scripts/jeanzay/ml/submit_ml.sh datasets                       # 3. D1, D2, quality, controlled blends
+#   scripts/jeanzay/ml/submit_ml.sh rubin-vae                      # 3b. DebVAder stage 1 trained on D1 (Rubin),
+#        DEBVADER_RUN = paper_baseline here (template of the architecture); afterwards DEBVADER_RUN is the new run
+#        ($EXPERIMENTS_DIR/<rubin_vae.run_name>) for every step below
 #   scripts/jeanzay/ml/submit_ml.sh stage1 [ablation ...]          # 4. Stage 1 runs (default: every ablation)
 #   STAGE1_RUN=s1_latent_cross scripts/jeanzay/ml/submit_ml.sh stage2 [ablation ...]   # 5. Stage 2 runs
 #   scripts/jeanzay/ml/submit_ml.sh notebooks                      # 6. executed notebooks with the figures
-#   scripts/jeanzay/ml/submit_ml.sh all                            # 2 to 6 chained (STAGE1_RUN: teacher of 5)
+#   scripts/jeanzay/ml/submit_ml.sh all                            # 2 to 6 chained (STAGE1_RUN: teacher of 5),
+#        with DEBVADER_RUN already the reference VAE (3b done)
 # FETCH_MAX (default 4) caps the simultaneous Euclid download tasks. Reruns skip shards and runs already done.
 
 set -euo pipefail
@@ -29,7 +33,7 @@ export DP2_REPO="$(cd "$DP2_ML_SCRIPTS/../../.." && pwd)"
 export DEBVADER_RUN="${DEBVADER_RUN:-}" DEBVADER_STATS="${DEBVADER_STATS:-}"
 FETCH_MAX="${FETCH_MAX:-4}"
 mkdir -p logs
-STEP="${1:?step: probe | phase0 | datasets | stage1 | stage2 | notebooks | all}"
+STEP="${1:?step: probe | phase0 | datasets | rubin-vae | stage1 | stage2 | notebooks | all}"
 shift || true
 
 CPU=(sbatch --parsable --account="$DP2_CPU_ACCOUNT")
@@ -84,6 +88,16 @@ submit_datasets() {
     AFTER_STAGE2="$q1:$bl:$q2"
 }
 
+submit_rubin_vae() {
+    # Export D1's Rubin stamps (CPU), then train DebVAder stage 1 on them and run phase 0 on the result (GPU).
+    local after="${1:-}" ex tr
+    : "${DEBVADER_RUN:?set DEBVADER_RUN to the template run (paper_baseline): its config.json gives the architecture}"
+    ex=$("${CPU[@]}" --job-name=dp2-rvae-export $(dep "$after") "$DP2_ML_SCRIPTS/cpu.slurm" export-rubin-vae)
+    tr=$(gpu --job-name=dp2-rubin-vae --dependency=afterok:"$ex" "$DP2_ML_SCRIPTS/rubin_vae.slurm")
+    echo "rubin-vae: export $ex, train + phase0 $tr" >&2
+    echo "$tr"
+}
+
 submit_stage1() {
     local after="${1:-}"; shift || true
     local names=("$@") ids=()
@@ -120,6 +134,7 @@ case "$STEP" in
     probe) submit_probe "$@" ;;
     phase0) submit_phase0 ;;
     datasets) submit_datasets ;;
+    rubin-vae) submit_rubin_vae "" >/dev/null ;;
     stage1) submit_stage1 "" "$@" >/dev/null ;;
     stage2) submit_stage2 "" "$@" >/dev/null ;;
     notebooks) submit_notebooks "" ;;
