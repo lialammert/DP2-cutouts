@@ -33,6 +33,7 @@ META = {
     "has_euclid_counterpart": "has_euclid_counterpart",
     "rubin_deblend_pass": "rubin_deblend_pass",
     "star_galaxy_value": "star_galaxy_value",
+    "has_valid_i_moments": "has_valid_i_moments",      # False: copaings isolation by distance only
 }
 
 
@@ -157,7 +158,7 @@ def export_empty(cfg, out_dir, isolated_dir):
     parts = [dict(np.load(f)) for f in patch_files]
     N = sum(len(d["ra"]) for d in parts)
     log(f"export empty: {N:,} empty-sky stamps from {len(patch_files)} patches "
-          f"(clean windows per patch: {[int(d['n_clean']) for d in parts]})")
+          f"(fully clean windows per patch: {[int(d['n_clean']) for d in parts]})")
 
     images = _memmap(out_dir / "images.npy", (N, size, size, len(bands)), np.float32)
     variance = _memmap(out_dir / "variance.npy", (N, size, size, len(bands)), np.float32)
@@ -172,8 +173,10 @@ def export_empty(cfg, out_dir, isolated_dir):
             raise RuntimeError("empty-sky patch file without PSF stamps (SODA path): the debvader format needs them")
         images[at:at + n] = d["flux"]
         variance[at:at + n] = d["variance"]
+        # DETECTED is valid in the isolated stamps (the target's own footprint) but not here: a pixel of an
+        # empty-sky window still DETECTED after the fill could not be replaced by clean sky.
         mask[at:at + n] = bad_mask(d["maskbits"], d["variance"], json.loads(str(d["plane_bits"])),
-                                   cfg["export"]["mask_planes"])
+                                   list(cfg["export"]["mask_planes"]) + ["DETECTED"])
         psf[at:at + n] = d["psf"]
         at += n
     for a in (images, variance, mask, psf):
@@ -182,11 +185,15 @@ def export_empty(cfg, out_dir, isolated_dir):
     def column(k):
         return np.concatenate([d[k] for d in parts])
 
+    # Per-window selection quantities (patch files made before the fill have none: NaN).
+    extra = {k: np.concatenate([d[k] if k in d else np.full(len(d["ra"]), np.nan, np.float32) for d in parts])
+             for k in ("detected_fraction", "fill_bad_fraction")}
+
     split = np.array([split_of(t, q, cfg["split"], x, y) for t, q, x, y in
                       zip(column("tract"), column("patch"), column("x_tract"), column("y_tract"))], np.int8)
     np.savez(out_dir / "meta.npz", split=split, ra=column("ra"), dec=column("dec"), tract=column("tract"),
              patch=column("patch"), x_tract=column("x_tract"), y_tract=column("y_tract"),
-             bands=np.array(bands), units=np.array("nJy"))
+             bands=np.array(bands), units=np.array("nJy"), **extra)
     # The normalisation constants belong to the isolated training set; every other dataset copies them.
     (out_dir / "stats.json").write_text((Path(isolated_dir) / "stats.json").read_text())
     write_dataset_json(out_dir, cfg, "empty", N, split, size, p)

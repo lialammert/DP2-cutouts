@@ -111,6 +111,10 @@ def build(cfg):
     # Single ellipse (half light, tract pixels) and galaxy / PSF resolution factor in the i band.
     a, b_, th = moments_to_ellipse(t["i_ixx"], t["i_iyy"], t["i_ixy"])
     t["ellipse_a"], t["ellipse_b"], t["ellipse_theta"] = a, b_, th
+    # Without a valid i-band ellipse (moments NaN or degenerate), copaings cannot test ellipse overlaps for this
+    # object and links it to its neighbours by distance only, so its isolation (cut 2) is a weaker test.
+    # Recorded, not cut on. These are the Rubin catalogue moments, not our HSM measurement on the stamp (shape_ok).
+    t["has_valid_i_moments"] = np.isfinite(a) & np.isfinite(b_) & (b_ > 0)
     r = raw.loc[t["object_id"].values]
     psf = psf_columns(r)
     psf.index = t.index
