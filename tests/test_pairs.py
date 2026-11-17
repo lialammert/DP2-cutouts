@@ -226,3 +226,23 @@ def test_export_rubin_vae_real_build(tmp_path):
     assert rubin_vae.export(cfg, template)["n"] == n - 1                # already written: skipped
     with pytest.raises(KeyError):
         rubin_vae.debvader_config(template, out, {"datta.x": 1})
+
+
+def test_read_mmu_rows_by_row_group(tmp_path, monkeypatch):
+    # MMU-like file: string object_id, nested image column, several row groups; only target rows come back.
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    n = 50
+    img = [[dict(band="VIS", flux=[[float(i)] * 3] * 3, scale=0.1)] for i in range(n)]
+    t = pa.table(dict(object_id=pa.array([str(-1000 - i) for i in range(n)]), image=img))
+    f = tmp_path / "Npix=1.parquet"
+    pq.write_table(t, f, row_group_size=10)
+    monkeypatch.setattr(euclid_images, "mmu_partition_files", lambda url, box=None: [f])
+    df = euclid_images.read_mmu_rows("x", [-1003, -1042, 7], ["object_id", "image"])
+    assert sorted(df["object_id"]) == ["-1003", "-1042"]
+    row = df.set_index("object_id").loc["-1042", "image"]
+    assert euclid_images._as_records(row)[0]["flux"][0][0] == 42.0
+    lay = euclid_images.mmu_layout([f])[0]
+    assert lay["row_groups"] == 5 and lay["max_rows_per_group"] == 10
+    with pytest.raises(MemoryError):
+        euclid_images.read_mmu_rows("x", [-1003], ["object_id", "image"], max_group_mb=0.0)

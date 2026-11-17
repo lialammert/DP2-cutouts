@@ -110,35 +110,82 @@ def parse_mmu_image(image, want_bands, n, scale_expected):
                 scale_ok=bool(np.isfinite(scale) and abs(scale - scale_expected) < 1e-3))
 
 
-def mmu_id_is_string(hats_url):
-    # MMU stores the Euclid object_id as a string, the Euclid catalogue of the pipeline as int64. The row filter
-    # must use the column's own type (pyarrow refuses "string vs int64"); read from the schema, no data loaded.
+def mmu_partition_files(hats_url, box=None):
+    # Parquet files of the MMU HATS partitions that overlap the box (catalogue metadata only, no data read).
     import lsdb
-    import pandas as pd
-    dt = lsdb.open_catalog(hats_url, columns=["object_id"]).dtypes["object_id"]
-    return bool(pd.api.types.is_string_dtype(dt) or pd.api.types.is_object_dtype(dt))
-
-
-def read_mmu_rows(hats_url, ids, columns, box=None):
-    # Rows of the MMU catalogue whose object_id is in ids (int64 Euclid ids), filtered while reading.
-    import lsdb
-    as_str = mmu_id_is_string(hats_url)
-    keys = [str(int(v)) for v in ids] if as_str else [int(v) for v in ids]
-    try:
-        cat = lsdb.open_catalog(hats_url, columns=columns, filters=[("object_id", "in", keys)])
-    except TypeError:
-        cat = lsdb.open_catalog(hats_url, columns=columns)
+    from hats.io import paths
+    cat = lsdb.open_catalog(hats_url, columns=["object_id"])
+    base = cat.hc_structure.catalog_base_dir
+    suffix = getattr(cat.hc_structure.catalog_info, "npix_suffix", None) or ".parquet"
     if box is not None:
         cat = cat.box_search(ra=(box[0], box[1]), dec=(box[2], box[3]))
-    df = cat.compute()
-    return df[df["object_id"].astype(str).isin([str(int(v)) for v in ids])]
+    files = []
+    for px in cat.get_healpix_pixels():
+        p = paths.pixel_catalog_file(base, px, npix_suffix=suffix)
+        files.extend(sorted(p.rglob("*.parquet")) if suffix in ("/", "\\") else [p])
+    return files
 
 
-def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None):
+def _column_bytes(md, g, name):
+    rg = md.row_group(g)
+    return sum(rg.column(c).total_compressed_size for c in range(rg.num_columns)
+               if rg.column(c).path_in_schema.split(".")[0] == name)
+
+
+def mmu_layout(files, image_column="image"):
+    # Row groups of each file and the compressed size of the image column per group, from the parquet footers.
+    import pyarrow.parquet as pq
+    out = []
+    for f in files:
+        with f.open("rb") as fh:
+            md = pq.ParquetFile(fh).metadata
+            groups = range(md.num_row_groups)
+            out.append(dict(file=str(f), rows=md.num_rows, row_groups=md.num_row_groups,
+                            max_rows_per_group=max((md.row_group(g).num_rows for g in groups), default=0),
+                            max_image_mb_per_group=max((_column_bytes(md, g, image_column) for g in groups),
+                                                       default=0) / 1e6))
+    return out
+
+
+def read_mmu_rows(hats_url, ids, columns, box=None, max_group_mb=4000.0):
+    # Rows of the MMU catalogue whose object_id is in ids, read row group by row group: the small object_id column
+    # first, then the requested columns of the groups holding a target only. Only those column chunks are fetched
+    # (range requests), and memory never holds more than one row group. lsdb's compute() instead loads whole
+    # partitions in parallel before filtering (37 GB for the 4 partitions of one patch: OOM on prepost).
+    # MMU stores object_id as a string, the pipeline's Euclid catalogue as int64: compared as strings.
+    import pandas as pd
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    want = pa.array(sorted({str(int(v)) for v in ids}), pa.string())
+    cols = list(dict.fromkeys(["object_id", *columns]))
+    found = {c: [] for c in cols}
+    for f in mmu_partition_files(hats_url, box):
+        with f.open("rb") as fh:
+            pf = pq.ParquetFile(fh)
+            for g in range(pf.num_row_groups):
+                oid = pf.read_row_group(g, columns=["object_id"]).column("object_id")
+                hit = pc.is_in(pc.cast(oid, pa.string()), value_set=want)
+                if not pc.any(hit).as_py():
+                    continue
+                mb = _column_bytes(pf.metadata, g, "image") / 1e6
+                if "image" in cols and mb > max_group_mb:
+                    raise MemoryError(f"{f}: row group {g} holds {mb:.0f} MB of images (compressed), above "
+                                      f"euclid.mmu_max_group_mb={max_group_mb:.0f}")
+                t = pf.read_row_group(g, columns=cols).filter(hit)
+                for c in cols:
+                    found[c].extend(t.column(c).to_pylist())
+                del t
+    df = pd.DataFrame(found)
+    df["object_id"] = df["object_id"].astype(str)
+    return df
+
+
+def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None, max_group_mb=4000.0):
     # objects: DataFrame with object_id, ra, dec. Returns {object_id: cutout dict}. Rows are filtered on object_id
     # while reading (pyarrow filter), so memory holds the requested rows, not the partitions.
     ids = [int(v) for v in objects["object_id"]]
-    df = read_mmu_rows(hats_url, ids, ["object_id", "image"], box)
+    df = read_mmu_rows(hats_url, ids, ["object_id", "image"], box, max_group_mb)
     pos = objects.set_index(objects["object_id"].astype("int64"))
     out = {}
     for i in range(len(df)):
@@ -245,7 +292,7 @@ def fetch(ec, objects, box=None):
     # ec: the "euclid" section of the ML configuration.
     bands, n, scale = list(ec["bands"]), int(ec["stamp_px"]), float(ec["pixel_scale"])
     if ec["image_source"] == "mmu":
-        return fetch_mmu(ec["hats_url"], objects, bands, n, scale, box)
+        return fetch_mmu(ec["hats_url"], objects, bands, n, scale, box, float(ec.get("mmu_max_group_mb", 4000)))
     if ec["image_source"] == "irsa":
         return IrsaCutouts(ec["irsa_sia_url"], ec["irsa_collection"], bands, n, scale).fetch(objects)
     raise ValueError(f"unknown euclid.image_source {ec['image_source']!r} (mmu | irsa)")

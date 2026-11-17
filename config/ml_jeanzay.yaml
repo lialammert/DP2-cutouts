@@ -38,6 +38,9 @@ euclid:
   # IRSA, see debvader-keras docs/real-data.md). Run `dp2-ml probe-euclid` first on prepost to see what works.
   image_source: mmu
   hats_url: hf://datasets/hugging-science/mmu_euclid_q1/euclid
+  # MMU files are read row group by row group (only the groups holding a target); a group whose image column is
+  # larger than this (MB, compressed) stops the job instead of filling the node's memory.
+  mmu_max_group_mb: 4000
   irsa_sia_url: https://irsa.ipac.caltech.edu/SIA
   irsa_collection: euclid_DpdMerBksMosaic
   # Bands kept on disk when present (MER mosaics share a 0.1"/px grid for VIS and NISP).

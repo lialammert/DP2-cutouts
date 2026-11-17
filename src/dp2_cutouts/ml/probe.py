@@ -51,8 +51,11 @@ def run(cfg, patch_name, n=5):
     try:
         t0 = time.time()
         ids = [int(v) for v in objs["object_id"]]
-        rep["mmu_object_id_is_string"] = euclid_images.mmu_id_is_string(ec["hats_url"])
-        df = euclid_images.read_mmu_rows(ec["hats_url"], ids, ["object_id", "image"], box)
+        files = euclid_images.mmu_partition_files(ec["hats_url"], box)
+        rep["mmu_layout"] = euclid_images.mmu_layout(files)
+        print(json.dumps(rep["mmu_layout"], indent=2), flush=True)
+        df = euclid_images.read_mmu_rows(ec["hats_url"], ids, ["object_id", "image"], box,
+                                         float(ec.get("mmu_max_group_mb", 4000)))
         rep["mmu_rows"] = int(len(df))
         if len(df):
             first = df["image"].iloc[0]
@@ -60,7 +63,7 @@ def run(cfg, patch_name, n=5):
             rep["mmu_raw_structure"] = _describe(recs[0]) if recs else _describe(first)
             rep["mmu_bands_raw"] = [str(r.get("band")) for r in recs]
         cuts = euclid_images.fetch_mmu(ec["hats_url"], objs, list(ec["bands"]), int(ec["stamp_px"]),
-                                       float(ec["pixel_scale"]), box)
+                                       float(ec["pixel_scale"]), box, float(ec.get("mmu_max_group_mb", 4000)))
         rep["mmu"] = dict(ok=len(cuts) > 0, n=len(cuts), seconds=round(time.time() - t0, 1),
                           cutouts={str(k): dict(bands=v["bands"], shape=list(v["flux"].shape), source_px=v["source_px"],
                                                 source_scale=v["source_scale"], scale_ok=v["scale_ok"],
