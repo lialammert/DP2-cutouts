@@ -15,6 +15,9 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 mkdir -p logs
 
 source "$DP2_VENV/bin/activate"
+# fast3tree (copaings) compiles its C library into site-packages on first use; array tasks starting together race on
+# the same .c/.so files (FileNotFoundError on the .c, AttributeError on a half-written .so). Build it once here.
+python -c "from fast3tree.make import make_lib; print('fast3tree:', make_lib(3, True))"
 dp2-cutouts "$DP2_CONFIG" patches
 N=$(python -c "
 from dp2_cutouts.config import Config
