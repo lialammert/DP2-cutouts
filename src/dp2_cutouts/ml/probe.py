@@ -18,6 +18,18 @@ import pandas as pd
 from ..sources import euclid_images
 
 
+def _failure(e, stage):
+    # Where it broke: the step, our own frames (the tail of a network traceback is all httpx), the error chain.
+    frames = [f"{fr.filename.rsplit('dp2_cutouts', 1)[-1]}:{fr.lineno} {fr.line}"
+              for fr in traceback.extract_tb(e.__traceback__) if "dp2_cutouts" in fr.filename]
+    chain, c = [], e
+    while c is not None and len(chain) < 5:
+        chain.append(f"{type(c).__module__}.{type(c).__name__}: {str(c)[:300]}")
+        c = c.__cause__ or c.__context__
+    return dict(ok=False, stage=stage, error=repr(e), transient=euclid_images.is_transient(e), our_frames=frames,
+                chain=chain, traceback_tail=traceback.format_exc()[-1500:])
+
+
 def _describe(v, depth=0):
     if depth > 3:
         return type(v).__name__
@@ -48,12 +60,16 @@ def run(cfg, patch_name, n=5):
     objs, box = objects_of_patch(cfg, patch_name, n)
     rep = dict(patch=patch_name, objects=objs.to_dict("records"))
 
+    stage = "start"
     try:
         t0 = time.time()
         ids = [int(v) for v in objs["object_id"]]
+        stage = "open catalogue, partitions of the patch"
         files = euclid_images.mmu_partition_files(ec["hats_url"], box)
+        stage = "parquet footers (mmu_layout)"
         rep["mmu_layout"] = euclid_images.mmu_layout(files)
         print(json.dumps(rep["mmu_layout"], indent=2), flush=True)
+        stage = "read rows (object_id, image)"
         df = euclid_images.read_mmu_rows(ec["hats_url"], ids, ["object_id", "image"], box,
                                          float(ec.get("mmu_max_group_mb", 4000)))
         rep["mmu_rows"] = int(len(df))
@@ -62,6 +78,7 @@ def run(cfg, patch_name, n=5):
             recs = euclid_images._as_records(first)
             rep["mmu_raw_structure"] = _describe(recs[0]) if recs else _describe(first)
             rep["mmu_bands_raw"] = [str(r.get("band")) for r in recs]
+        stage = "fetch_mmu (read + parse)"
         cuts = euclid_images.fetch_mmu(ec["hats_url"], objs, list(ec["bands"]), int(ec["stamp_px"]),
                                        float(ec["pixel_scale"]), box, float(ec.get("mmu_max_group_mb", 4000)))
         rep["mmu"] = dict(ok=len(cuts) > 0, n=len(cuts), seconds=round(time.time() - t0, 1),
@@ -71,7 +88,7 @@ def run(cfg, patch_name, n=5):
                                                 valid_fraction=float((~v["mask"]).mean()))
                                    for k, v in cuts.items()})
     except Exception as e:  # noqa: BLE001 - the report must say what failed
-        rep["mmu"] = dict(ok=False, error=repr(e), traceback=traceback.format_exc()[-2000:])
+        rep["mmu"] = _failure(e, stage)
 
     try:
         t0 = time.time()
@@ -82,7 +99,7 @@ def run(cfg, patch_name, n=5):
         rep["irsa"] = dict(ok=c is not None, seconds=round(time.time() - t0, 1),
                            bands=c["bands"] if c else None, shape=list(c["flux"].shape) if c else None)
     except Exception as e:  # noqa: BLE001
-        rep["irsa"] = dict(ok=False, error=repr(e), traceback=traceback.format_exc()[-2000:])
+        rep["irsa"] = _failure(e, "irsa cutout")
 
     works = [s for s in ("mmu", "irsa") if rep.get(s, {}).get("ok")]
     rep["recommendation"] = works[0] if works else "none: neither source answered from this node"

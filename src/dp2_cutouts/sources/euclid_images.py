@@ -110,11 +110,46 @@ def parse_mmu_image(image, want_bands, n, scale_expected):
                 scale_ok=bool(np.isfinite(scale) and abs(scale - scale_expected) < 1e-3))
 
 
+TRANSIENT_ERRORS = {"ProxyError", "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout",
+                    "ReadError", "RemoteProtocolError", "ConnectionError", "ConnectionResetError", "TimeoutError",
+                    "ClientConnectorError", "ServerDisconnectedError", "ClientPayloadError", "IncompleteRead"}
+TRANSIENT_STATUS = ("429", "500", "502", "503", "504")
+
+
+def is_transient(exc):
+    # Network hiccups worth retrying: the Jean Zay proxy answers "500 Internal Server Error" now and then, and
+    # huggingface_hub's own backoff does not retry a ProxyError. Walks the cause chain.
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if type(exc).__name__ in TRANSIENT_ERRORS:
+            return True
+        msg = str(exc)
+        if any(f"{c} " in msg or msg.endswith(c) or f"status={c}" in msg for c in TRANSIENT_STATUS):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def with_retries(fn, what, tries=6, wait=10.0, max_wait=300.0, sleep=time.sleep):
+    # fn() retried on transient network errors, waiting 10, 20, 40 ... s (capped); anything else is raised at once.
+    for k in range(tries):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 - filtered by is_transient
+            if k == tries - 1 or not is_transient(e):
+                raise
+            delay = min(wait * 2 ** k, max_wait)
+            print(f"[mmu] {what}: {type(e).__name__}: {str(e)[:120]} -> retry {k + 1}/{tries - 1} in {delay:.0f} s",
+                  flush=True)
+            sleep(delay)
+
+
 def mmu_partition_files(hats_url, box=None):
     # Parquet files of the MMU HATS partitions that overlap the box (catalogue metadata only, no data read).
     import lsdb
     from hats.io import paths
-    cat = lsdb.open_catalog(hats_url, columns=["object_id"])
+    cat = with_retries(lambda: lsdb.open_catalog(hats_url, columns=["object_id"]), "open catalogue")
     base = cat.hc_structure.catalog_base_dir
     suffix = getattr(cat.hc_structure.catalog_info, "npix_suffix", None) or ".parquet"
     if box is not None:
@@ -126,6 +161,12 @@ def mmu_partition_files(hats_url, box=None):
     return files
 
 
+def _footer(f):
+    import pyarrow.parquet as pq
+    with f.open("rb") as fh:
+        return pq.ParquetFile(fh).metadata
+
+
 def _column_bytes(md, g, name):
     rg = md.row_group(g)
     return sum(rg.column(c).total_compressed_size for c in range(rg.num_columns)
@@ -134,16 +175,14 @@ def _column_bytes(md, g, name):
 
 def mmu_layout(files, image_column="image"):
     # Row groups of each file and the compressed size of the image column per group, from the parquet footers.
-    import pyarrow.parquet as pq
     out = []
     for f in files:
-        with f.open("rb") as fh:
-            md = pq.ParquetFile(fh).metadata
-            groups = range(md.num_row_groups)
-            out.append(dict(file=str(f), rows=md.num_rows, row_groups=md.num_row_groups,
-                            max_rows_per_group=max((md.row_group(g).num_rows for g in groups), default=0),
-                            max_image_mb_per_group=max((_column_bytes(md, g, image_column) for g in groups),
-                                                       default=0) / 1e6))
+        md = with_retries(lambda: _footer(f), f"footer of {f.name}")
+        groups = range(md.num_row_groups)
+        out.append(dict(file=str(f), rows=md.num_rows, row_groups=md.num_row_groups,
+                        max_rows_per_group=max((md.row_group(g).num_rows for g in groups), default=0),
+                        max_image_mb_per_group=max((_column_bytes(md, g, image_column) for g in groups),
+                                                   default=0) / 1e6))
     return out
 
 
@@ -160,22 +199,31 @@ def read_mmu_rows(hats_url, ids, columns, box=None, max_group_mb=4000.0):
     want = pa.array(sorted({str(int(v)) for v in ids}), pa.string())
     cols = list(dict.fromkeys(["object_id", *columns]))
     found = {c: [] for c in cols}
-    for f in mmu_partition_files(hats_url, box):
+
+    def read_group(f, g):
+        # One row group on a fresh handle, so that a retry never resumes a half-broken connection. None when the
+        # group holds no target.
         with f.open("rb") as fh:
             pf = pq.ParquetFile(fh)
-            for g in range(pf.num_row_groups):
-                oid = pf.read_row_group(g, columns=["object_id"]).column("object_id")
-                hit = pc.is_in(pc.cast(oid, pa.string()), value_set=want)
-                if not pc.any(hit).as_py():
-                    continue
-                mb = _column_bytes(pf.metadata, g, "image") / 1e6
-                if "image" in cols and mb > max_group_mb:
-                    raise MemoryError(f"{f}: row group {g} holds {mb:.0f} MB of images (compressed), above "
-                                      f"euclid.mmu_max_group_mb={max_group_mb:.0f}")
-                t = pf.read_row_group(g, columns=cols).filter(hit)
-                for c in cols:
-                    found[c].extend(t.column(c).to_pylist())
-                del t
+            oid = pf.read_row_group(g, columns=["object_id"]).column("object_id")
+            hit = pc.is_in(pc.cast(oid, pa.string()), value_set=want)
+            if not pc.any(hit).as_py():
+                return None
+            mb = _column_bytes(pf.metadata, g, "image") / 1e6
+            if "image" in cols and mb > max_group_mb:
+                raise MemoryError(f"{f}: row group {g} holds {mb:.0f} MB of images (compressed), above "
+                                  f"euclid.mmu_max_group_mb={max_group_mb:.0f}")
+            return pf.read_row_group(g, columns=cols).filter(hit)
+
+    for f in mmu_partition_files(hats_url, box):
+        n_groups = with_retries(lambda: _footer(f), f"footer of {f.name}").num_row_groups
+        for g in range(n_groups):
+            t = with_retries(lambda: read_group(f, g), f"{f.name} row group {g}/{n_groups}")
+            if t is None:
+                continue
+            for c in cols:
+                found[c].extend(t.column(c).to_pylist())
+            del t
     df = pd.DataFrame(found)
     df["object_id"] = df["object_id"].astype(str)
     return df

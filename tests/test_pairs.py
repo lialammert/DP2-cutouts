@@ -246,3 +246,35 @@ def test_read_mmu_rows_by_row_group(tmp_path, monkeypatch):
     assert lay["row_groups"] == 5 and lay["max_rows_per_group"] == 10
     with pytest.raises(MemoryError):
         euclid_images.read_mmu_rows("x", [-1003], ["object_id", "image"], max_group_mb=0.0)
+
+
+def test_mmu_retries_transient_network_errors_only():
+    class ProxyError(Exception):
+        pass
+
+    calls, waits = [], []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError("download failed") from ProxyError("500 Internal Server Error")
+        return "ok"
+
+    assert euclid_images.with_retries(flaky, "test", sleep=waits.append) == "ok"
+    assert len(calls) == 3 and waits == [10.0, 20.0]
+    assert euclid_images.is_transient(OSError("HTTP status=503 from proxy"))
+
+    def broken():
+        calls.append(1)
+        raise KeyError("object_id")
+
+    calls.clear()
+    with pytest.raises(KeyError):
+        euclid_images.with_retries(broken, "test", sleep=waits.append)
+    assert len(calls) == 1
+
+    def always():
+        raise ProxyError("500 Internal Server Error")
+
+    with pytest.raises(ProxyError):
+        euclid_images.with_retries(always, "test", tries=3, sleep=lambda s: None)
