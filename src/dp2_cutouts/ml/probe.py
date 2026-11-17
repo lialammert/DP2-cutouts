@@ -49,17 +49,10 @@ def run(cfg, patch_name, n=5):
     rep = dict(patch=patch_name, objects=objs.to_dict("records"))
 
     try:
-        import lsdb
         t0 = time.time()
         ids = [int(v) for v in objs["object_id"]]
-        try:
-            cat = lsdb.open_catalog(ec["hats_url"], columns=["object_id", "image"], filters=[("object_id", "in", ids)])
-            rep["mmu_row_filter"] = True
-        except TypeError:
-            cat = lsdb.open_catalog(ec["hats_url"], columns=["object_id", "image"])
-            rep["mmu_row_filter"] = False
-        df = cat.box_search(ra=(box[0], box[1]), dec=(box[2], box[3])).compute()
-        df = df[df["object_id"].astype("int64").isin(ids)]
+        rep["mmu_object_id_is_string"] = euclid_images.mmu_id_is_string(ec["hats_url"])
+        df = euclid_images.read_mmu_rows(ec["hats_url"], ids, ["object_id", "image"], box)
         rep["mmu_rows"] = int(len(df))
         if len(df):
             first = df["image"].iloc[0]

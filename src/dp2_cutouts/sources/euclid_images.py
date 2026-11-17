@@ -110,25 +110,39 @@ def parse_mmu_image(image, want_bands, n, scale_expected):
                 scale_ok=bool(np.isfinite(scale) and abs(scale - scale_expected) < 1e-3))
 
 
-def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None):
-    # objects: DataFrame with object_id, ra, dec. Returns {object_id: cutout dict}. Rows are filtered on object_id
-    # while reading (pyarrow filter), so memory holds the requested rows, not the partitions.
+def mmu_id_is_string(hats_url):
+    # MMU stores the Euclid object_id as a string, the Euclid catalogue of the pipeline as int64. The row filter
+    # must use the column's own type (pyarrow refuses "string vs int64"); read from the schema, no data loaded.
     import lsdb
+    import pandas as pd
+    dt = lsdb.open_catalog(hats_url, columns=["object_id"]).dtypes["object_id"]
+    return bool(pd.api.types.is_string_dtype(dt) or pd.api.types.is_object_dtype(dt))
 
-    ids = [int(v) for v in objects["object_id"]]
-    kw = dict(columns=["object_id", "image"])
+
+def read_mmu_rows(hats_url, ids, columns, box=None):
+    # Rows of the MMU catalogue whose object_id is in ids (int64 Euclid ids), filtered while reading.
+    import lsdb
+    as_str = mmu_id_is_string(hats_url)
+    keys = [str(int(v)) for v in ids] if as_str else [int(v) for v in ids]
     try:
-        cat = lsdb.open_catalog(hats_url, filters=[("object_id", "in", ids)], **kw)
+        cat = lsdb.open_catalog(hats_url, columns=columns, filters=[("object_id", "in", keys)])
     except TypeError:
-        cat = lsdb.open_catalog(hats_url, **kw)
+        cat = lsdb.open_catalog(hats_url, columns=columns)
     if box is not None:
         cat = cat.box_search(ra=(box[0], box[1]), dec=(box[2], box[3]))
     df = cat.compute()
-    df = df[df["object_id"].astype("int64").isin(ids)]
+    return df[df["object_id"].astype(str).isin([str(int(v)) for v in ids])]
+
+
+def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None):
+    # objects: DataFrame with object_id, ra, dec. Returns {object_id: cutout dict}. Rows are filtered on object_id
+    # while reading (pyarrow filter), so memory holds the requested rows, not the partitions.
+    ids = [int(v) for v in objects["object_id"]]
+    df = read_mmu_rows(hats_url, ids, ["object_id", "image"], box)
     pos = objects.set_index(objects["object_id"].astype("int64"))
     out = {}
     for i in range(len(df)):
-        oid = int(df["object_id"].iloc[i])
+        oid = int(str(df["object_id"].iloc[i]))
         cut = parse_mmu_image(df["image"].iloc[i], want_bands, n, scale)
         if cut is None:
             continue
