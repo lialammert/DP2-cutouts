@@ -38,9 +38,13 @@ euclid:
   # IRSA, see debvader-keras docs/real-data.md). Run `dp2-ml probe-euclid` first on prepost to see what works.
   image_source: mmu
   hats_url: hf://datasets/hugging-science/mmu_euclid_q1/euclid
-  # MMU files are read row group by row group (only the groups holding a target); a group whose image column is
-  # larger than this (MB, compressed) stops the job instead of filling the node's memory.
-  mmu_max_group_mb: 4000
+  # Each MMU partition is one ~30 GB row group: the partitions of all patches are downloaded once by
+  # `dp2-ml mmu-mirror` (submit_ml.sh mmu-mirror, prepost) into this folder, then read locally. "auto":
+  # $SCRATCH/mmu_euclid_q1 (else $DP2_ML_ROOT/mmu_euclid_q1); null: stream Hugging Face directly (slow).
+  # $SCRATCH files untouched for 30 days are purged: the readers check the mirror and ask for a rerun if needed.
+  mmu_cache: auto
+  # Rows decoded at a time while streaming a partition (memory ~ mmu_batch_rows x a few MB).
+  mmu_batch_rows: 64
   irsa_sia_url: https://irsa.ipac.caltech.edu/SIA
   irsa_collection: euclid_DpdMerBksMosaic
   # Bands kept on disk when present (MER mosaics share a 0.1"/px grid for VIS and NISP).

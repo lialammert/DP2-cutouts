@@ -8,6 +8,8 @@
 #   export DP2_ML_VENV=$WORK/venvs/dp2-ml DP2_CONFIG=config/<pipeline>.yaml DP2_ML_CONFIG=config/ml_jeanzay.yaml
 #   export DP2_ML_ROOT=$WORK/dp2-ml DP2_CPU_ACCOUNT=<projet>@cpu DP2_GPU_ACCOUNT=<projet>@a100
 #   export DEBVADER_RUN=<path of the DebVAder run>                 # given here, never written in a file
+#   scripts/jeanzay/ml/submit_ml.sh mmu-mirror                     # 0. MMU partitions of all patches, downloaded
+#        once into euclid.mmu_cache (~30 GB each; `dp2-ml $DP2_ML_CONFIG mmu-mirror --dry-run` lists them first)
 #   scripts/jeanzay/ml/submit_ml.sh probe <tract_patch>            # 1. which Euclid image source works
 #   scripts/jeanzay/ml/submit_ml.sh phase0                         # 2. reference VAE on DP2 stamps
 #   scripts/jeanzay/ml/submit_ml.sh datasets                       # 3. D1, D2, quality, controlled blends
@@ -33,7 +35,7 @@ export DP2_REPO="$(cd "$DP2_ML_SCRIPTS/../../.." && pwd)"
 export DEBVADER_RUN="${DEBVADER_RUN:-}" DEBVADER_STATS="${DEBVADER_STATS:-}"
 FETCH_MAX="${FETCH_MAX:-4}"
 mkdir -p logs
-STEP="${1:?step: probe | phase0 | datasets | rubin-vae | stage1 | stage2 | notebooks | all}"
+STEP="${1:?step: mmu-mirror | probe | phase0 | datasets | rubin-vae | stage1 | stage2 | notebooks | all}"
 shift || true
 
 CPU=(sbatch --parsable --account="$DP2_CPU_ACCOUNT")
@@ -55,6 +57,10 @@ ablations() {
     python -c "
 import yaml
 print(' '.join(yaml.safe_load(open('$DP2_ML_CONFIG'))['$1']['ablations']))"
+}
+
+submit_mmu_mirror() {
+    "${CPU[@]}" --job-name=dp2-mmu-mirror --time=20:00:00 "$DP2_ML_SCRIPTS/cpu.slurm" mmu-mirror
 }
 
 submit_probe() {
@@ -131,6 +137,7 @@ submit_notebooks() {
 }
 
 case "$STEP" in
+    mmu-mirror) submit_mmu_mirror ;;
     probe) submit_probe "$@" ;;
     phase0) submit_phase0 ;;
     datasets) submit_datasets ;;

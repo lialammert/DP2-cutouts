@@ -64,23 +64,30 @@ def run(cfg, patch_name, n=5):
     try:
         t0 = time.time()
         ids = [int(v) for v in objs["object_id"]]
-        stage = "open catalogue, partitions of the patch"
-        files = euclid_images.mmu_partition_files(ec["hats_url"], box)
+        cache = euclid_images.mmu_cache_dir(ec)
+        rep["mmu_cache"] = str(cache)
+        if cache is not None:
+            # Mirror first (submit_ml.sh mmu-mirror): streaming ~30 GB partitions from Hugging Face for 5 objects
+            # would not fit in the probe's time limit.
+            stage = "local mirror (mmu-mirror done?)"
+            files = euclid_images.mirrored_files(ec["hats_url"], cache, box)
+        else:
+            stage = "open catalogue, partitions of the patch"
+            files = euclid_images.mmu_partition_files(ec["hats_url"], box)
         stage = "parquet footers (mmu_layout)"
         rep["mmu_layout"] = euclid_images.mmu_layout(files)
         print(json.dumps(rep["mmu_layout"], indent=2), flush=True)
         stage = "read rows (object_id, image)"
-        df = euclid_images.read_mmu_rows(ec["hats_url"], ids, ["object_id", "image"], box,
-                                         float(ec.get("mmu_max_group_mb", 4000)))
+        df = euclid_images.read_mmu_rows(ec["hats_url"], ids, ["object_id", "image"], box, cache,
+                                         int(ec.get("mmu_batch_rows", 64)))
         rep["mmu_rows"] = int(len(df))
         if len(df):
             first = df["image"].iloc[0]
             recs = euclid_images._as_records(first)
             rep["mmu_raw_structure"] = _describe(recs[0]) if recs else _describe(first)
             rep["mmu_bands_raw"] = [str(r.get("band")) for r in recs]
-        stage = "fetch_mmu (read + parse)"
-        cuts = euclid_images.fetch_mmu(ec["hats_url"], objs, list(ec["bands"]), int(ec["stamp_px"]),
-                                       float(ec["pixel_scale"]), box, float(ec.get("mmu_max_group_mb", 4000)))
+        stage = "parse cutouts"
+        cuts = euclid_images.mmu_cutouts(df, objs, list(ec["bands"]), int(ec["stamp_px"]), float(ec["pixel_scale"]))
         rep["mmu"] = dict(ok=len(cuts) > 0, n=len(cuts), seconds=round(time.time() - t0, 1),
                           cutouts={str(k): dict(bands=v["bands"], shape=list(v["flux"].shape), source_px=v["source_px"],
                                                 source_scale=v["source_scale"], scale_ok=v["scale_ok"],

@@ -16,7 +16,10 @@
 
 import gzip
 import io
+import json
+import os
 import time
+from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
@@ -186,54 +189,186 @@ def mmu_layout(files, image_column="image"):
     return out
 
 
-def read_mmu_rows(hats_url, ids, columns, box=None, max_group_mb=4000.0):
-    # Rows of the MMU catalogue whose object_id is in ids, read row group by row group: the small object_id column
-    # first, then the requested columns of the groups holding a target only. Only those column chunks are fetched
-    # (range requests), and memory never holds more than one row group. lsdb's compute() instead loads whole
-    # partitions in parallel before filtering (37 GB for the 4 partitions of one patch: OOM on prepost).
-    # MMU stores object_id as a string, the pipeline's Euclid catalogue as int64: compared as strings.
-    import pandas as pd
+# Local mirror of the MMU partitions. Each partition is ONE parquet row group of ~30 GB of compressed images
+# (probe 2026-11-18: 77 684 rows, 27 GB, in Npix=143742): nothing smaller than a partition can be fetched, and a patch
+# needs 2 to 4 of them. Rather than stream ~100 GB through the Jean Zay proxy for every patch and every dataset (D1
+# and D2 read the same partitions), `dp2-ml mmu-mirror` downloads the partitions of all patches once (resumable)
+# into euclid.mmu_cache, and the readers then stream the local files.
+
+MIRROR_MANIFEST = "mmu_mirror.json"
+
+
+def mmu_cache_dir(ec):
+    # euclid.mmu_cache: a folder, "auto" ($SCRATCH/mmu_euclid_q1, else $DP2_ML_ROOT/mmu_euclid_q1), or null to read
+    # Hugging Face directly (streamed: slow, but bounded memory).
+    v = ec.get("mmu_cache", "auto")
+    if v in (None, False, "", "none", "null"):
+        return None
+    if v == "auto":
+        base = os.environ.get("SCRATCH") or os.environ.get("DP2_ML_ROOT")
+        if not base:
+            raise KeyError("euclid.mmu_cache: auto needs $SCRATCH or $DP2_ML_ROOT")
+        return Path(base) / "mmu_euclid_q1"
+    return Path(v)
+
+
+def hf_repo_file(remote):
+    # "hf://datasets/<org>/<repo>[@revision]/<path in repo>" -> (repo_id, revision or None, path in repo)
+    s, prefix = str(remote), "hf://datasets/"
+    if not s.startswith(prefix):
+        raise ValueError(f"not a Hugging Face dataset path: {s}")
+    org, repo, path = s[len(prefix):].split("/", 2)
+    repo, _, rev = repo.partition("@")
+    return f"{org}/{repo}", rev or None, path
+
+
+def _same_box(a, b, tol=1e-9):
+    return a is not None and b is not None and np.allclose(np.asarray(a, float), np.asarray(b, float), atol=tol)
+
+
+def mirror_mmu(hats_url, cache, boxes, dry_run=False):
+    # boxes {patch name: (ra_min, ra_max, dec_min, dec_max)}. Downloads every partition overlapping a box into
+    # cache/<path in repo> (huggingface_hub: resumable, files already complete are skipped) and writes the manifest
+    # the readers use. With dry_run, only lists the files and their sizes.
+    from huggingface_hub import HfFileSystem, hf_hub_download
+    cache = Path(cache)
+    need = {}
+    for name, box in sorted(boxes.items()):
+        for f in mmu_partition_files(hats_url, box):
+            need.setdefault(str(f), []).append(name)
+    fs = HfFileSystem()
+    files = []
+    for remote, patches in sorted(need.items()):
+        repo, rev, path = hf_repo_file(remote)
+        size = int(with_retries(lambda: fs.info(remote)["size"], f"size of {path}"))
+        files.append(dict(remote=remote, repo=repo, revision=rev, path=path, local=str(cache / path), size=size,
+                          patches=sorted(patches)))
+    total = sum(f["size"] for f in files)
+    for f in files:
+        print(f"[mmu-mirror] {f['path']}  {f['size'] / 1e9:7.1f} GB  patches {' '.join(f['patches'])}", flush=True)
+    print(f"[mmu-mirror] {len(files)} partitions, {total / 1e9:.1f} GB -> {cache}", flush=True)
+    plan = dict(hats_url=str(hats_url), cache=str(cache), boxes={k: list(map(float, v)) for k, v in boxes.items()},
+                files=files, total_bytes=total)
+    if dry_run:
+        return plan
+    cache.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        local = Path(f["local"])
+        if local.exists() and local.stat().st_size == f["size"]:
+            print(f"[mmu-mirror] already there: {f['path']}", flush=True)
+            continue
+        t0 = time.time()
+        got = Path(with_retries(lambda: hf_hub_download(f["repo"], f["path"], repo_type="dataset",
+                                                        revision=f["revision"], local_dir=cache),
+                                f"download {f['path']}"))
+        if got.resolve() != local.resolve() or got.stat().st_size != f["size"]:
+            raise RuntimeError(f"{f['path']}: got {got} ({got.stat().st_size} B), expected {local} ({f['size']} B)")
+        dt = time.time() - t0
+        print(f"[mmu-mirror] {f['path']}: {f['size'] / 1e9:.1f} GB in {dt / 60:.1f} min "
+              f"({f['size'] / 1e6 / max(dt, 1e-3):.0f} MB/s)", flush=True)
+    plan["written"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    tmp = cache / (MIRROR_MANIFEST + ".tmp")
+    tmp.write_text(json.dumps(plan, indent=2))
+    tmp.replace(cache / MIRROR_MANIFEST)
+    return plan
+
+
+def mirrored_files(hats_url, cache, box=None):
+    # Local partitions of the mirror for one patch box (all of them when box is None). Fails loudly when the mirror
+    # is missing, belongs to another catalogue, does not cover the box or lost a file (purged $SCRATCH).
+    man_path = Path(cache) / MIRROR_MANIFEST
+    if not man_path.exists():
+        raise FileNotFoundError(f"no MMU mirror in {cache}: run `dp2-ml <cfg> mmu-mirror` first "
+                                "(submit_ml.sh mmu-mirror), or set euclid.mmu_cache: null to read Hugging Face directly")
+    man = json.loads(man_path.read_text())
+    if man["hats_url"] != str(hats_url):
+        raise ValueError(f"MMU mirror {cache} is of {man['hats_url']}, not {hats_url}")
+    names = None
+    if box is not None:
+        names = {k for k, b in man["boxes"].items() if _same_box(b, box)}
+        if not names:
+            raise ValueError(f"sky box {tuple(box)} is not one of the patches mirrored in {cache}: rerun mmu-mirror")
+    files = [f for f in man["files"] if names is None or names & set(f["patches"])]
+    for f in files:
+        p = Path(f["local"])
+        if not p.exists() or p.stat().st_size != f["size"]:
+            raise FileNotFoundError(f"MMU mirror incomplete: {p} missing or truncated (purged?): rerun mmu-mirror")
+    return [Path(f["local"]) for f in files]
+
+
+def _is_remote(f):
+    return getattr(f, "protocol", "") not in ("", "file", "local")
+
+
+def _scan_partition(f, want, cols, batch_rows, buffer_bytes=8 << 20):
+    # Rows of one partition file whose object_id is in want, as small arrow tables. The object_id column is read
+    # whole (a few MB); the other columns are streamed batch by batch (buffered reads: memory holds one batch, never
+    # the 30 GB column chunk), and reading stops after the last target. HATS sorts each partition by HEALPix index,
+    # so the targets of one patch sit in a contiguous stretch of the file.
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
+    fh = f.open("rb") if _is_remote(f) else None
+    try:
+        pf = pq.ParquetFile(fh if fh is not None else str(f), buffer_size=buffer_bytes, pre_buffer=False)
+        out = []
+        for g in range(pf.num_row_groups):
+            oid = pf.read_row_group(g, columns=["object_id"]).column("object_id")
+            hit = pc.fill_null(pc.is_in(pc.cast(oid, pa.string()), value_set=want), False)
+            idx = np.flatnonzero(hit.to_numpy())
+            if not len(idx):
+                continue
+            if cols == ["object_id"]:
+                out.append(pa.table(dict(object_id=oid.take(pa.array(idx)))))
+                continue
+            start = 0
+            for b in pf.iter_batches(batch_size=batch_rows, row_groups=[g], columns=cols, use_threads=False):
+                stop = start + b.num_rows
+                sel = idx[(idx >= start) & (idx < stop)] - start
+                if len(sel):
+                    out.append(pa.Table.from_batches([b.take(pa.array(sel))]))
+                start = stop
+                if start > idx[-1]:
+                    break
+        return out
+    finally:
+        if fh is not None:
+            fh.close()
+
+
+def read_mmu_rows(hats_url, ids, columns, box=None, cache=None, batch_rows=64):
+    # Rows of the MMU catalogue whose object_id is in ids, from the local mirror (cache) or, without one, streamed
+    # from Hugging Face. lsdb's compute() loads whole partitions in parallel before filtering (37 GB for the
+    # 4 partitions of one patch: OOM on prepost); here memory holds one batch of batch_rows rows plus the hits.
+    # MMU stores object_id as a string, the pipeline's Euclid catalogue as int64: compared as strings.
+    import pandas as pd
+    import pyarrow as pa
     want = pa.array(sorted({str(int(v)) for v in ids}), pa.string())
     cols = list(dict.fromkeys(["object_id", *columns]))
+    files = mirrored_files(hats_url, cache, box) if cache is not None else mmu_partition_files(hats_url, box)
     found = {c: [] for c in cols}
-
-    def read_group(f, g):
-        # One row group on a fresh handle, so that a retry never resumes a half-broken connection. None when the
-        # group holds no target.
-        with f.open("rb") as fh:
-            pf = pq.ParquetFile(fh)
-            oid = pf.read_row_group(g, columns=["object_id"]).column("object_id")
-            hit = pc.is_in(pc.cast(oid, pa.string()), value_set=want)
-            if not pc.any(hit).as_py():
-                return None
-            mb = _column_bytes(pf.metadata, g, "image") / 1e6
-            if "image" in cols and mb > max_group_mb:
-                raise MemoryError(f"{f}: row group {g} holds {mb:.0f} MB of images (compressed), above "
-                                  f"euclid.mmu_max_group_mb={max_group_mb:.0f}")
-            return pf.read_row_group(g, columns=cols).filter(hit)
-
-    for f in mmu_partition_files(hats_url, box):
-        n_groups = with_retries(lambda: _footer(f), f"footer of {f.name}").num_row_groups
-        for g in range(n_groups):
-            t = with_retries(lambda: read_group(f, g), f"{f.name} row group {g}/{n_groups}")
-            if t is None:
-                continue
+    for f in files:
+        t0 = time.time()
+        tables = with_retries(lambda: _scan_partition(f, want, cols, int(batch_rows)), f"read {f.name}")
+        n = sum(t.num_rows for t in tables)
+        print(f"[mmu] {f.name}: {n} target rows in {time.time() - t0:.0f} s", flush=True)
+        for t in tables:
             for c in cols:
                 found[c].extend(t.column(c).to_pylist())
-            del t
     df = pd.DataFrame(found)
     df["object_id"] = df["object_id"].astype(str)
     return df
 
 
-def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None, max_group_mb=4000.0):
-    # objects: DataFrame with object_id, ra, dec. Returns {object_id: cutout dict}. Rows are filtered on object_id
-    # while reading (pyarrow filter), so memory holds the requested rows, not the partitions.
+def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None, cache=None, batch_rows=64):
+    # objects: DataFrame with object_id, ra, dec. Returns {object_id: cutout dict}.
     ids = [int(v) for v in objects["object_id"]]
-    df = read_mmu_rows(hats_url, ids, ["object_id", "image"], box, max_group_mb)
+    df = read_mmu_rows(hats_url, ids, ["object_id", "image"], box, cache, batch_rows)
+    return mmu_cutouts(df, objects, want_bands, n, scale)
+
+
+def mmu_cutouts(df, objects, want_bands, n, scale):
+    # Rows read by read_mmu_rows (object_id, image) -> {object_id: cutout dict}.
     pos = objects.set_index(objects["object_id"].astype("int64"))
     out = {}
     for i in range(len(df)):
@@ -340,7 +475,8 @@ def fetch(ec, objects, box=None):
     # ec: the "euclid" section of the ML configuration.
     bands, n, scale = list(ec["bands"]), int(ec["stamp_px"]), float(ec["pixel_scale"])
     if ec["image_source"] == "mmu":
-        return fetch_mmu(ec["hats_url"], objects, bands, n, scale, box, float(ec.get("mmu_max_group_mb", 4000)))
+        return fetch_mmu(ec["hats_url"], objects, bands, n, scale, box, mmu_cache_dir(ec),
+                         int(ec.get("mmu_batch_rows", 64)))
     if ec["image_source"] == "irsa":
         return IrsaCutouts(ec["irsa_sia_url"], ec["irsa_collection"], bands, n, scale).fetch(objects)
     raise ValueError(f"unknown euclid.image_source {ec['image_source']!r} (mmu | irsa)")

@@ -244,8 +244,11 @@ def test_read_mmu_rows_by_row_group(tmp_path, monkeypatch):
     assert euclid_images._as_records(row)[0]["flux"][0][0] == 42.0
     lay = euclid_images.mmu_layout([f])[0]
     assert lay["row_groups"] == 5 and lay["max_rows_per_group"] == 10
-    with pytest.raises(MemoryError):
-        euclid_images.read_mmu_rows("x", [-1003], ["object_id", "image"], max_group_mb=0.0)
+    # Batches smaller than the row groups and not aligned on them: hits on both sides of a batch boundary.
+    df = euclid_images.read_mmu_rows("x", [-1006, -1007, -1008, -1049], ["object_id", "image"], batch_rows=3)
+    assert sorted(df["object_id"]) == ["-1006", "-1007", "-1008", "-1049"]
+    got = {k: euclid_images._as_records(v)[0]["flux"][0][0] for k, v in zip(df["object_id"], df["image"])}
+    assert got == {"-1006": 6.0, "-1007": 7.0, "-1008": 8.0, "-1049": 49.0}
 
 
 def test_mmu_retries_transient_network_errors_only():
@@ -278,3 +281,42 @@ def test_mmu_retries_transient_network_errors_only():
 
     with pytest.raises(ProxyError):
         euclid_images.with_retries(always, "test", tries=3, sleep=lambda s: None)
+
+
+def test_mmu_mirror_manifest_drives_the_reader(tmp_path, monkeypatch):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    url = "hf://datasets/org/repo/euclid"
+    assert euclid_images.hf_repo_file(url + "/dataset/Norder=7/Dir=0/Npix=5.parquet") == \
+        ("org/repo", None, "euclid/dataset/Norder=7/Dir=0/Npix=5.parquet")
+    assert euclid_images.hf_repo_file("hf://datasets/org/repo@v1/a/b.parquet") == ("org/repo", "v1", "a/b.parquet")
+    monkeypatch.setenv("SCRATCH", str(tmp_path / "scr"))
+    assert euclid_images.mmu_cache_dir({"mmu_cache": "auto"}) == tmp_path / "scr" / "mmu_euclid_q1"
+    assert euclid_images.mmu_cache_dir({"mmu_cache": None}) is None
+
+    cache = tmp_path / "mirror"
+    files = []
+    for k, ids in enumerate([range(0, 20), range(20, 40)]):
+        p = cache / "euclid" / f"Npix={k}.parquet"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        img = [[dict(band="VIS", flux=[[float(i)]], scale=0.1)] for i in ids]
+        pq.write_table(pa.table(dict(object_id=pa.array([str(i) for i in ids]), image=img)), p)
+        files.append(dict(remote=f"{url}/Npix={k}.parquet", local=str(p), size=p.stat().st_size,
+                          patches=["A"] if k == 0 else ["A", "B"]))
+    box_a, box_b = (1.0, 2.0, 3.0, 4.0), (2.0, 3.0, 3.0, 4.0)
+    man = dict(hats_url=url, boxes={"A": list(box_a), "B": list(box_b)}, files=files)
+    with pytest.raises(FileNotFoundError):
+        euclid_images.mirrored_files(url, cache, box_a)
+    (cache / euclid_images.MIRROR_MANIFEST).write_text(json.dumps(man))
+    assert len(euclid_images.mirrored_files(url, cache, box_a)) == 2
+    assert [p.name for p in euclid_images.mirrored_files(url, cache, box_b)] == ["Npix=1.parquet"]
+    with pytest.raises(ValueError):
+        euclid_images.mirrored_files(url, cache, (0.0, 1.0, 0.0, 1.0))
+    with pytest.raises(ValueError):
+        euclid_images.mirrored_files("hf://datasets/other/cat", cache, box_a)
+    df = euclid_images.read_mmu_rows(url, [3, 25, 99], ["image"], box_a, cache=cache, batch_rows=4)
+    assert sorted(df["object_id"]) == ["25", "3"]
+    # A purged file is reported, not silently read as "no image".
+    (cache / "euclid" / "Npix=1.parquet").write_bytes(b"x")
+    with pytest.raises(FileNotFoundError):
+        euclid_images.mirrored_files(url, cache, box_b)

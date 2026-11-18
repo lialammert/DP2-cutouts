@@ -2,6 +2,7 @@
 # Anna Preto
 # AstroDeep Project
 # Command-line entry point of the cross-instrument work: dp2-ml <ml_config.yaml> <command> [options].
+#   mmu-mirror [--dry-run]         download the MMU partitions of all patches once (prepost), euclid.mmu_cache
 #   probe-euclid --patch P          which Euclid image source works from this node (prepost)
 #   phase0 [--run-name N]           reference VAE checks on DP2 stamps (needs --debvader-run); evaluations/N
 #   d1 | d2 [--index N|--patches]   build the D1 / D2 shard of one or more patches (prepost: Euclid images)
@@ -20,8 +21,8 @@ import os
 import sys
 import traceback
 
-COMMANDS = ("probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "blends", "export-rubin-vae",
-            "train-stage1", "eval-stage1", "train-stage2", "eval-stage2")
+COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "blends",
+            "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2")
 
 
 def _debvader_run(args):
@@ -64,6 +65,7 @@ def main(argv=None):
     ap.add_argument("--index", type=int)
     ap.add_argument("--patch", help="probe-euclid: patch to take objects from")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--dry-run", action="store_true", help="mmu-mirror: list the partitions and their size only")
     ap.add_argument("--debvader-run")
     ap.add_argument("--debvader-stats")
     ap.add_argument("--run-name")
@@ -101,6 +103,17 @@ def main(argv=None):
     if c == "blends":
         from .pairs import blends
         blends.build(cfg)
+        return
+    if c == "mmu-mirror":
+        from .pipeline.patches import load_patches, patch_case
+        from .sources import euclid_images
+        ec = cfg["euclid"]
+        cache = euclid_images.mmu_cache_dir(ec)
+        if cache is None:
+            sys.exit("euclid.mmu_cache is null: nothing to mirror")
+        pcfg = cfg.pipeline()
+        boxes = {p["name"]: tuple(patch_case(pcfg, p).sky_box) for p in load_patches(pcfg, args.patches)}
+        euclid_images.mirror_mmu(ec["hats_url"], cache, boxes, args.dry_run)
         return
     if c == "export-rubin-vae":
         from .pairs import rubin_vae

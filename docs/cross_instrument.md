@@ -22,6 +22,7 @@ as the architecture template of that run.
 
 | step | command | needs | output under `DP2_ML_ROOT` |
 |---|---|---|---|
+| MMU mirror | `dp2-ml <cfg> mmu-mirror [--dry-run]` | internet (prepost), ~30 GB per partition | `euclid.mmu_cache` (`$SCRATCH/mmu_euclid_q1`) |
 | probe | `dp2-ml <cfg> probe-euclid --patch T_P` | internet (prepost) | `evaluations/probe_euclid/` |
 | phase 0 | `dp2-ml <cfg> phase0` | final stamp dataset, VAE | `evaluations/phase0/` |
 | D1 | `dp2-ml <cfg> d1 --index N`, then `d1-merge` | final stamp dataset, internet | `datasets/d1/` |
@@ -93,7 +94,14 @@ To find the run folder: it holds `config.json` and `checkpoints/stage1_best.weig
 
 ## Order, and what to look at before going on
 
-1. **Probe** — `scripts/jeanzay/ml/submit_ml.sh probe <tract_patch>`.
+0. **MMU mirror** — each partition of the MMU Euclid catalogue is a single parquet row group of ~30 GB of
+   compressed images (probe of 2026-11-18): no smaller piece can be fetched, and lsdb loads whole partitions in
+   memory. `dp2-ml $DP2_ML_CONFIG mmu-mirror --dry-run` (login node) lists the partitions overlapping the patches
+   and their size; `scripts/jeanzay/ml/submit_ml.sh mmu-mirror` downloads them once (resumable, files already
+   complete are skipped) into `euclid.mmu_cache`. The probe and D1/D2 then stream the local files batch by batch
+   (memory: `euclid.mmu_batch_rows` rows). `$SCRATCH` purges files untouched for 30 days: the readers check sizes
+   and ask for a rerun of the mirror rather than reporting missing images.
+1. **Probe** — `scripts/jeanzay/ml/submit_ml.sh probe <tract_patch>` (after the mirror).
    `evaluations/probe_euclid/probe_<patch>.json` says whether MMU (Hugging Face) or IRSA answers from prepost,
    and shows the raw structure of the MMU image column (band names, sizes, scale). If the band names differ from
    `MMU_BANDS` in `sources/euclid_images.py`, extend that table. If neither works, the Euclid cutouts must be
