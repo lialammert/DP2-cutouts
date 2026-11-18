@@ -300,87 +300,114 @@ def _is_remote(f):
     return getattr(f, "protocol", "") not in ("", "file", "local")
 
 
-def _scan_partition(f, want, cols, batch_rows, buffer_bytes=8 << 20):
-    # Rows of one partition file whose object_id is in want, as small arrow tables. The object_id column is read
-    # whole (a few MB); the other columns are streamed batch by batch (buffered reads: memory holds one batch, never
-    # the 30 GB column chunk), and reading stops after the last target. HATS sorts each partition by HEALPix index,
-    # so the targets of one patch sit in a contiguous stretch of the file.
+def _scan_partition(f, want, cols, batch_rows, sink, buffer_bytes=8 << 20):
+    # Rows of one partition file whose object_id is in want, handed to sink(arrow table) batch by batch; returns the
+    # number of rows found. The object_id column is read whole (a few MB); the other columns are streamed (buffered
+    # reads: memory holds one batch, never the 30 GB column chunk), and reading stops after the last target. HATS
+    # sorts each partition by HEALPix index, so the targets of one patch sit in a contiguous stretch of the file.
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
     fh = f.open("rb") if _is_remote(f) else None
     try:
         pf = pq.ParquetFile(fh if fh is not None else str(f), buffer_size=buffer_bytes, pre_buffer=False)
-        out = []
+        found = 0
         for g in range(pf.num_row_groups):
             oid = pf.read_row_group(g, columns=["object_id"]).column("object_id")
             hit = pc.fill_null(pc.is_in(pc.cast(oid, pa.string()), value_set=want), False)
             idx = np.flatnonzero(hit.to_numpy())
             if not len(idx):
                 continue
+            found += len(idx)
             if cols == ["object_id"]:
-                out.append(pa.table(dict(object_id=oid.take(pa.array(idx)))))
+                sink(pa.table(dict(object_id=oid.take(pa.array(idx)))))
                 continue
             start = 0
             for b in pf.iter_batches(batch_size=batch_rows, row_groups=[g], columns=cols, use_threads=False):
                 stop = start + b.num_rows
                 sel = idx[(idx >= start) & (idx < stop)] - start
                 if len(sel):
-                    out.append(pa.Table.from_batches([b.take(pa.array(sel))]))
+                    sink(pa.Table.from_batches([b.take(pa.array(sel))]))
                 start = stop
                 if start > idx[-1]:
                     break
-        return out
+        return found
     finally:
         if fh is not None:
             fh.close()
 
 
-def read_mmu_rows(hats_url, ids, columns, box=None, cache=None, batch_rows=64):
-    # Rows of the MMU catalogue whose object_id is in ids, from the local mirror (cache) or, without one, streamed
-    # from Hugging Face. lsdb's compute() loads whole partitions in parallel before filtering (37 GB for the
-    # 4 partitions of one patch: OOM on prepost); here memory holds one batch of batch_rows rows plus the hits.
+def scan_mmu(hats_url, ids, columns, sink, box=None, cache=None, batch_rows=64):
+    # Every row of the MMU catalogue whose object_id is in ids goes to sink(arrow table of a few rows), from the local
+    # mirror (cache) or, without one, streamed from Hugging Face. lsdb's compute() loads whole partitions before
+    # filtering (37 GB for the 4 partitions of one patch: OOM on prepost); here memory holds one batch of batch_rows
+    # rows. A partition retried after a network error hands its rows to sink again: sinks must be idempotent.
     # MMU stores object_id as a string, the pipeline's Euclid catalogue as int64: compared as strings.
-    import pandas as pd
     import pyarrow as pa
     want = pa.array(sorted({str(int(v)) for v in ids}), pa.string())
     cols = list(dict.fromkeys(["object_id", *columns]))
     files = mirrored_files(hats_url, cache, box) if cache is not None else mmu_partition_files(hats_url, box)
-    found = {c: [] for c in cols}
     for f in files:
         t0 = time.time()
-        tables = with_retries(lambda: _scan_partition(f, want, cols, int(batch_rows)), f"read {f.name}")
-        n = sum(t.num_rows for t in tables)
+        n = with_retries(lambda: _scan_partition(f, want, cols, int(batch_rows), sink), f"read {f.name}")
         print(f"[mmu] {f.name}: {n} target rows in {time.time() - t0:.0f} s", flush=True)
-        for t in tables:
-            for c in cols:
-                found[c].extend(t.column(c).to_pylist())
-    df = pd.DataFrame(found)
+
+
+def read_mmu_rows(hats_url, ids, columns, box=None, cache=None, batch_rows=64):
+    # The rows as a DataFrame of Python objects: for a handful of objects (probe, tests). The images of a whole patch
+    # go through fetch_mmu, which crops each row as soon as it is read.
+    import pandas as pd
+    cols = list(dict.fromkeys(["object_id", *columns]))
+    rows = {}
+
+    def sink(t):
+        for r in t.to_pylist():
+            rows[str(r["object_id"])] = r
+
+    scan_mmu(hats_url, ids, columns, sink, box, cache, batch_rows)
+    df = pd.DataFrame([rows[k] for k in sorted(rows)], columns=cols)
     df["object_id"] = df["object_id"].astype(str)
     return df
 
 
 def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None, cache=None, batch_rows=64):
-    # objects: DataFrame with object_id, ra, dec. Returns {object_id: cutout dict}.
-    ids = [int(v) for v in objects["object_id"]]
-    df = read_mmu_rows(hats_url, ids, ["object_id", "image"], box, cache, batch_rows)
-    return mmu_cutouts(df, objects, want_bands, n, scale)
+    # objects: DataFrame with object_id, ra, dec. Returns {object_id: cutout dict}. Each row is converted to Python
+    # and cropped to n x n as soon as it is read: the source cutouts (several MB each as Python lists) never pile up.
+    pos = objects.set_index(objects["object_id"].astype("int64"))
+    out = {}
+
+    def sink(t):
+        ids_, images = t.column("object_id"), t.column("image")
+        for i in range(t.num_rows):
+            oid = int(str(ids_[i].as_py()))
+            cut = mmu_cutout(images.slice(i, 1).to_pylist()[0], pos.loc[oid], want_bands, n, scale)
+            if cut is not None:
+                out[oid] = cut
+
+    scan_mmu(hats_url, [int(v) for v in objects["object_id"]], ["image"], sink, box, cache, batch_rows)
+    return out
+
+
+def mmu_cutout(image, row, want_bands, n, scale):
+    # One MMU image value -> cutout dict with its (assumed) WCS, or None without a wanted band.
+    cut = parse_mmu_image(image, want_bands, n, scale)
+    if cut is None:
+        return None
+    ra, dec = float(row["ra"]), float(row["dec"])
+    cut["wcs"] = tan_wcs(ra, dec, n, scale, (n - 1) / 2.0 + cut["dx"], (n - 1) / 2.0 + cut["dy"])
+    cut["wcs_assumed"] = True
+    cut["source"] = "mmu"
+    return cut
 
 
 def mmu_cutouts(df, objects, want_bands, n, scale):
     # Rows read by read_mmu_rows (object_id, image) -> {object_id: cutout dict}.
     pos = objects.set_index(objects["object_id"].astype("int64"))
     out = {}
-    for i in range(len(df)):
-        oid = int(str(df["object_id"].iloc[i]))
-        cut = parse_mmu_image(df["image"].iloc[i], want_bands, n, scale)
-        if cut is None:
-            continue
-        ra, dec = float(pos.loc[oid, "ra"]), float(pos.loc[oid, "dec"])
-        cut["wcs"] = tan_wcs(ra, dec, n, scale, (n - 1) / 2.0 + cut["dx"], (n - 1) / 2.0 + cut["dy"])
-        cut["wcs_assumed"] = True
-        cut["source"] = "mmu"
-        out[oid] = cut
+    for oid, image in zip(df["object_id"], df["image"]):
+        cut = mmu_cutout(image, pos.loc[int(str(oid))], want_bands, n, scale)
+        if cut is not None:
+            out[int(str(oid))] = cut
     return out
 
 

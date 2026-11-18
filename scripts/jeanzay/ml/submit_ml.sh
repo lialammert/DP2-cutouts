@@ -21,7 +21,10 @@
 #   scripts/jeanzay/ml/submit_ml.sh notebooks                      # 6. executed notebooks with the figures
 #   scripts/jeanzay/ml/submit_ml.sh all                            # 2 to 6 chained (STAGE1_RUN: teacher of 5),
 #        with DEBVADER_RUN already the reference VAE (3b done)
-# FETCH_MAX (default 4) caps the simultaneous Euclid download tasks. Reruns skip shards and runs already done.
+# FETCH_MAX (default 4) caps the simultaneous D1 / D2 tasks. Reruns skip shards and runs already done.
+# CPU jobs run on DP2_CPU_PARTITION (default cpu_p1, no internet: the Euclid images come from the MMU mirror) with
+# DP2_CPU_CPUS cores (default 10, i.e. ~40 GB on cpu_p1). Only mmu-mirror needs internet and always goes to prepost;
+# with euclid.image_source irsa (or mmu_cache null), set DP2_CPU_PARTITION=prepost.
 
 set -euo pipefail
 : "${DP2_ML_VENV:?}" "${DP2_CONFIG:?}" "${DP2_ML_CONFIG:?}" "${DP2_ML_ROOT:?}"
@@ -38,7 +41,13 @@ mkdir -p logs
 STEP="${1:?step: mmu-mirror | probe | phase0 | datasets | rubin-vae | stage1 | stage2 | notebooks | all}"
 shift || true
 
-CPU=(sbatch --parsable --account="$DP2_CPU_ACCOUNT")
+DP2_CPU_PARTITION="${DP2_CPU_PARTITION:-cpu_p1}"
+DP2_CPU_CPUS="${DP2_CPU_CPUS:-10}"
+CPU=(sbatch --parsable --account="$DP2_CPU_ACCOUNT" --partition="$DP2_CPU_PARTITION" --cpus-per-task="$DP2_CPU_CPUS")
+NET=(sbatch --parsable --account="$DP2_CPU_ACCOUNT" --partition=prepost)
+# qos_cpu-dev (2 h, high priority) for the short probe, where the partition offers it.
+DEV_QOS=()
+[[ "$DP2_CPU_PARTITION" == cpu_p1 ]] && DEV_QOS=(--qos=qos_cpu-dev)
 gpu() {
     : "${DP2_GPU_ACCOUNT:?set DP2_GPU_ACCOUNT=<projet>@a100}"
     : "${DEBVADER_RUN:?set DEBVADER_RUN to the paper_baseline run folder}"
@@ -60,12 +69,12 @@ print(' '.join(yaml.safe_load(open('$DP2_ML_CONFIG'))['$1']['ablations']))"
 }
 
 submit_mmu_mirror() {
-    "${CPU[@]}" --job-name=dp2-mmu-mirror --time=20:00:00 "$DP2_ML_SCRIPTS/cpu.slurm" mmu-mirror
+    "${NET[@]}" --job-name=dp2-mmu-mirror --time=20:00:00 "$DP2_ML_SCRIPTS/cpu.slurm" mmu-mirror
 }
 
 submit_probe() {
     local patch="${1:?probe needs a patch name, e.g. 5063_34}"
-    "${CPU[@]}" --job-name=dp2-probe --time=00:30:00 "$DP2_ML_SCRIPTS/cpu.slurm" probe-euclid --patch "$patch"
+    "${CPU[@]}" ${DEV_QOS[@]+"${DEV_QOS[@]}"} --job-name=dp2-probe --time=00:30:00 "$DP2_ML_SCRIPTS/cpu.slurm" probe-euclid --patch "$patch"
 }
 
 submit_phase0() {

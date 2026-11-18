@@ -53,6 +53,19 @@ def objects_of_patch(cfg, patch_name, n):
                              dec=cat["euclid_dec"].astype(float))), case.sky_box
 
 
+def _probe_irsa(ec, objs):
+    try:
+        t0 = time.time()
+        irsa = euclid_images.IrsaCutouts(ec["irsa_sia_url"], ec["irsa_collection"], list(ec["bands"]),
+                                         int(ec["stamp_px"]), float(ec["pixel_scale"]))
+        r0 = objs.iloc[0]
+        c = irsa.cutout(float(r0["ra"]), float(r0["dec"]))
+        return dict(ok=c is not None, seconds=round(time.time() - t0, 1),
+                    bands=c["bands"] if c else None, shape=list(c["flux"].shape) if c else None)
+    except Exception as e:  # noqa: BLE001
+        return _failure(e, "irsa cutout")
+
+
 def run(cfg, patch_name, n=5):
     ec = cfg["euclid"]
     out_dir = cfg.eval_dir("probe_euclid")
@@ -97,16 +110,11 @@ def run(cfg, patch_name, n=5):
     except Exception as e:  # noqa: BLE001 - the report must say what failed
         rep["mmu"] = _failure(e, stage)
 
-    try:
-        t0 = time.time()
-        irsa = euclid_images.IrsaCutouts(ec["irsa_sia_url"], ec["irsa_collection"], list(ec["bands"]),
-                                         int(ec["stamp_px"]), float(ec["pixel_scale"]))
-        r0 = objs.iloc[0]
-        c = irsa.cutout(float(r0["ra"]), float(r0["dec"]))
-        rep["irsa"] = dict(ok=c is not None, seconds=round(time.time() - t0, 1),
-                           bands=c["bands"] if c else None, shape=list(c["flux"].shape) if c else None)
-    except Exception as e:  # noqa: BLE001
-        rep["irsa"] = _failure(e, "irsa cutout")
+    # IRSA only as a fallback: it needs internet, which the cpu_p1 nodes reading the MMU mirror do not have.
+    if rep["mmu"].get("ok"):
+        rep["irsa"] = dict(ok=None, skipped="MMU works")
+    else:
+        rep["irsa"] = _probe_irsa(ec, objs)
 
     works = [s for s in ("mmu", "irsa") if rep.get(s, {}).get("ok")]
     rep["recommendation"] = works[0] if works else "none: neither source answered from this node"

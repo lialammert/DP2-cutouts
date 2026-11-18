@@ -2,7 +2,7 @@
 # cpu.slurm
 # Anna Preto
 # AstroDeep Project
-# Any dp2-ml command that needs no GPU: mmu-mirror, probe-euclid, d1, d2 (Euclid images: prepost, internet),
+# Any dp2-ml command that needs no GPU: mmu-mirror (internet: prepost), probe-euclid, d1, d2 (from the MMU mirror),
 # d1-merge, d2-merge, quality, blends. The command and its options come after the script name:
 #   sbatch --partition=prepost --account=<projet>@cpu scripts/jeanzay/ml/cpu.slurm d1 --index '$SLURM_ARRAY_TASK_ID'
 # Inside an array, the literal $SLURM_ARRAY_TASK_ID in the arguments is replaced by the task id.
