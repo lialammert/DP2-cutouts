@@ -59,9 +59,9 @@ euclid:
   stamp_px: 119
   # Nominal VIS PSF FWHM (arcsec), used to build Euclid-resolution ellipses (D2 isolation and masking).
   vis_psf_fwhm: 0.17
-  # Rotation added to the catalogue position angle before building ellipses (degrees). Kept at 0 (current copaings
-  # convention) until the position-angle check (D1 quality report, notebooks/ml/01) has been looked at: the
-  # inspection images suggest ~90 degrees.
+  # Rotation added to the catalogue position angle before building ellipses (degrees). 0 is confirmed by the
+  # position-angle check of the D1 quality report (2026-11-18, 6527 elongated objects): median |PA - HSM angle| is
+  # 3.2 deg with PA as is, 87 deg with PA + 90.
   pa_offset_deg: 0.0
 
 splits:

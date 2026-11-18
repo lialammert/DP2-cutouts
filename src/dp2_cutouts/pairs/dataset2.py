@@ -28,6 +28,10 @@ from . import common, splits, store
 RUBIN_TO_EUCLID_PX = 2.0  # 0.2" / 0.1"
 
 
+SEPARATION_METRICS = ("euclid_masked_fraction", "euclid_masked_fraction_in_target", "sep_delta_e",
+                      "sep_centroid_shift_arcsec", "sep_rel_size_change", "sep_rel_flux_change", "sigma_vis_px")
+
+
 def shard_dir(cfg, name):
     return cfg.dataset_dir("d2") / "shards" / name
 
@@ -243,9 +247,13 @@ def build_patch(cfg, patch):
     rejected = []
 
     def reject(df, reason, detail=None):
-        for r in df.itertuples(index=False):
-            rejected.append(dict(euclid_object_id=int(r.euclid_object_id), group_id=r.group_id, reason=reason,
-                                 detail=detail if detail is None else str(detail)))
+        # The separation measurements travel with the rejected rows, so that the thresholds of dataset2.accept can be
+        # judged on their distributions, not only on pass / fail counts.
+        for r in df.to_dict("records"):
+            d = dict(euclid_object_id=int(r["euclid_object_id"]), group_id=r["group_id"], reason=reason,
+                     detail=detail if detail is None else str(detail))
+            d.update({k: float(r[k]) for k in SEPARATION_METRICS if k in r})
+            rejected.append(d)
 
     if len(cand):
         blended = cand["sb_rubin"] > float(d2["sb_rubin_min"])
