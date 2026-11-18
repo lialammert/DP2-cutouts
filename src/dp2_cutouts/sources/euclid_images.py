@@ -78,7 +78,10 @@ def _stack2d(v):
     return np.asarray([np.asarray(r, dtype=np.float64) for r in v])
 
 
-def parse_mmu_image(image, want_bands, n, scale_expected):
+def parse_mmu_image(image, want_bands, n, scale_expected, mask_true_is_valid=True):
+    # mask_true_is_valid: MMU Euclid Q1 marks VALID pixels with True (probe 2026-11-18: background pixels with
+    # ivar > 0 are True; only the saturated core of a star is False). The returned mask is ours: True = do not trust,
+    # which also covers non-finite flux and, when ivar is given, ivar <= 0.
     recs = _as_records(image)
     planes, found, scales = {}, [], []
     for r in recs:
@@ -87,8 +90,14 @@ def parse_mmu_image(image, want_bands, n, scale_expected):
             continue
         flux = _stack2d(r["flux"])
         ivar = _stack2d(r["ivar"]) if r.get("ivar") is not None else np.zeros_like(flux)
-        mask = np.asarray([np.asarray(m, bool) for m in r["mask"]]) if r.get("mask") is not None \
-            else np.zeros(flux.shape, bool)
+        if r.get("mask") is not None:
+            m = np.asarray([np.asarray(v, bool) for v in r["mask"]])
+            mask = ~m if mask_true_is_valid else m
+        else:
+            mask = np.zeros(flux.shape, bool)
+        mask = mask | ~np.isfinite(flux)
+        if r.get("ivar") is not None:
+            mask = mask | ~(np.isfinite(ivar) & (ivar > 0))
         planes[key] = (flux, ivar, mask)
         found.append(key)
         scales.append(float(r.get("scale", np.nan)))
@@ -370,7 +379,8 @@ def read_mmu_rows(hats_url, ids, columns, box=None, cache=None, batch_rows=64):
     return df
 
 
-def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None, cache=None, batch_rows=64):
+def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None, cache=None, batch_rows=64,
+              mask_true_is_valid=True):
     # objects: DataFrame with object_id, ra, dec. Returns {object_id: cutout dict}. Each row is converted to Python
     # and cropped to n x n as soon as it is read: the source cutouts (several MB each as Python lists) never pile up.
     pos = objects.set_index(objects["object_id"].astype("int64"))
@@ -380,7 +390,8 @@ def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None, cache=None, bat
         ids_, images = t.column("object_id"), t.column("image")
         for i in range(t.num_rows):
             oid = int(str(ids_[i].as_py()))
-            cut = mmu_cutout(images.slice(i, 1).to_pylist()[0], pos.loc[oid], want_bands, n, scale)
+            cut = mmu_cutout(images.slice(i, 1).to_pylist()[0], pos.loc[oid], want_bands, n, scale,
+                             mask_true_is_valid)
             if cut is not None:
                 out[oid] = cut
 
@@ -388,9 +399,9 @@ def fetch_mmu(hats_url, objects, want_bands, n, scale, box=None, cache=None, bat
     return out
 
 
-def mmu_cutout(image, row, want_bands, n, scale):
+def mmu_cutout(image, row, want_bands, n, scale, mask_true_is_valid=True):
     # One MMU image value -> cutout dict with its (assumed) WCS, or None without a wanted band.
-    cut = parse_mmu_image(image, want_bands, n, scale)
+    cut = parse_mmu_image(image, want_bands, n, scale, mask_true_is_valid)
     if cut is None:
         return None
     ra, dec = float(row["ra"]), float(row["dec"])
@@ -400,12 +411,12 @@ def mmu_cutout(image, row, want_bands, n, scale):
     return cut
 
 
-def mmu_cutouts(df, objects, want_bands, n, scale):
+def mmu_cutouts(df, objects, want_bands, n, scale, mask_true_is_valid=True):
     # Rows read by read_mmu_rows (object_id, image) -> {object_id: cutout dict}.
     pos = objects.set_index(objects["object_id"].astype("int64"))
     out = {}
     for oid, image in zip(df["object_id"], df["image"]):
-        cut = mmu_cutout(image, pos.loc[int(str(oid))], want_bands, n, scale)
+        cut = mmu_cutout(image, pos.loc[int(str(oid))], want_bands, n, scale, mask_true_is_valid)
         if cut is not None:
             out[int(str(oid))] = cut
     return out
@@ -503,7 +514,7 @@ def fetch(ec, objects, box=None):
     bands, n, scale = list(ec["bands"]), int(ec["stamp_px"]), float(ec["pixel_scale"])
     if ec["image_source"] == "mmu":
         return fetch_mmu(ec["hats_url"], objects, bands, n, scale, box, mmu_cache_dir(ec),
-                         int(ec.get("mmu_batch_rows", 64)))
+                         int(ec.get("mmu_batch_rows", 64)), bool(ec.get("mmu_mask_true_is_valid", True)))
     if ec["image_source"] == "irsa":
         return IrsaCutouts(ec["irsa_sia_url"], ec["irsa_collection"], bands, n, scale).fetch(objects)
     raise ValueError(f"unknown euclid.image_source {ec['image_source']!r} (mmu | irsa)")

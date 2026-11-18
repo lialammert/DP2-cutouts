@@ -100,7 +100,8 @@ def run(cfg, patch_name, n=5):
             rep["mmu_raw_structure"] = _describe(recs[0]) if recs else _describe(first)
             rep["mmu_bands_raw"] = [str(r.get("band")) for r in recs]
         stage = "parse cutouts"
-        cuts = euclid_images.mmu_cutouts(df, objs, list(ec["bands"]), int(ec["stamp_px"]), float(ec["pixel_scale"]))
+        cuts = euclid_images.mmu_cutouts(df, objs, list(ec["bands"]), int(ec["stamp_px"]), float(ec["pixel_scale"]),
+                                         bool(ec.get("mmu_mask_true_is_valid", True)))
         rep["mmu"] = dict(ok=len(cuts) > 0, n=len(cuts), seconds=round(time.time() - t0, 1),
                           cutouts={str(k): dict(bands=v["bands"], shape=list(v["flux"].shape), source_px=v["source_px"],
                                                 source_scale=v["source_scale"], scale_ok=v["scale_ok"],

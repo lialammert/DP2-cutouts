@@ -72,13 +72,23 @@ def test_crop_center_odd_and_border():
 
 def test_parse_mmu_image_and_band_array():
     n = 9
+    # MMU convention: mask True = valid pixel.
     rec = [dict(band=b, flux=np.full((n, n), k + 1.0).tolist(), ivar=np.ones((n, n)).tolist(),
-                mask=np.zeros((n, n), bool).tolist(), scale=0.1) for k, b in enumerate(["VIS", "NIR_J"])]
+                mask=np.ones((n, n), bool).tolist(), scale=0.1) for k, b in enumerate(["VIS", "NIR_J"])]
     cut = euclid_images.parse_mmu_image(rec, ["VIS", "Y", "J", "H"], 5, 0.1)
     assert cut["bands"] == ["VIS", "J"] and cut["flux"].shape == (5, 5, 2) and cut["scale_ok"]
     f, iv, m, present = euclid_images.to_band_array(cut, ["VIS", "Y", "J", "H"])
     assert list(present) == [True, False, True, False]
     assert m[..., 1].all() and not m[..., 0].any() and np.all(f[..., 2] == 2.0)
+    # An MMU-invalid pixel (False), a zero-ivar pixel and a NaN flux are ours to mask; the flag can be flipped.
+    vis = rec[0]
+    vis["mask"][4][4] = False
+    vis["ivar"][4][5] = 0.0
+    vis["flux"][5][4] = float("nan")
+    m = euclid_images.parse_mmu_image([vis], ["VIS"], n, 0.1)["mask"][..., 0]
+    assert m[4, 4] and m[4, 5] and m[5, 4] and m.sum() == 3
+    m = euclid_images.parse_mmu_image([vis], ["VIS"], n, 0.1, mask_true_is_valid=False)["mask"][..., 0]
+    assert m.sum() == n * n - 1
 
 
 def test_overlap_fraction():

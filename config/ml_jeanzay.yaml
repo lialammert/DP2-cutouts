@@ -45,6 +45,9 @@ euclid:
   mmu_cache: auto
   # Rows decoded at a time while streaming a partition (memory ~ mmu_batch_rows x a few MB).
   mmu_batch_rows: 64
+  # MMU "mask" convention: True marks VALID pixels (probe 2026-11-18: background pixels with ivar > 0 are True, only
+  # the saturated core of a star is False). Read as False = do not trust; zero ivar and NaN flux are masked too.
+  mmu_mask_true_is_valid: true
   irsa_sia_url: https://irsa.ipac.caltech.edu/SIA
   irsa_collection: euclid_DpdMerBksMosaic
   # Bands kept on disk when present (MER mosaics share a 0.1"/px grid for VIS and NISP).
