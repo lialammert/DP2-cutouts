@@ -86,7 +86,9 @@ dataset1:
   min_valid_fraction_euclid: 0.9       # below this the pair is rejected (reason recorded)
   # Targets sharing their detection footprint with a companion keep its wings (white sky-filled disc in a dark halo,
   # step along the footprint edge; seen in the D1 notebook on 2026-11-19). Rejected when more than this fraction
-  # of the light kept in the target footprint lies in the companions' part of it (stamp column shared_light_frac).
+  # of the light kept in the target footprint lies where a shared companion is brighter than the target
+  # (exponential profiles from ellipses and catalogue fluxes; stamp column shared_light_frac). A purely geometric
+  # split (first version) gave faint clumps the target's own wings: 55 % rejected at 0.2.
   # null: no cut. Provisional value; tune it on the distribution in the D1 quality report (D1 rebuild only).
   max_shared_light_frac: 0.2
   contamination_radius_arcsec: 3.0     # other Euclid sources inside this radius are counted per pair

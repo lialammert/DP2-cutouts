@@ -51,29 +51,41 @@ def test_stamp_centered_and_not_transposed():
 
 
 def test_shared_footprint_companion_wings_are_measured():
-    # A faint target and a bright companion in one detection footprint: the companion's core (shared_k times its
-    # ellipse) is masked, its wings stay, and shared_light_frac sees them. A target alone in its footprint gives 0.
+    # A target and a companion in one detection footprint: the companion's core (shared_k times its ellipse) is
+    # masked, its wings stay. shared_light_frac counts the kept light where the companion is brighter than the
+    # target: large for a bright companion, near 0 for a faint one (a clump, a faint neighbour), 0 when alone.
     import pandas as pd
 
     from dp2_cutouts.stages.stamps import companion_mask_footprint, shared_light_fraction
 
     shape = (41, 41)
-    target = (14.0, 20.0, 2.0, 2.0, 0.0)
-    flux = gaussian(shape, 14.0, 20.0, 2.0, 2.0) + 20.0 * gaussian(shape, 26.0, 20.0, 4.0, 4.0)
-    detected = flux > 0.05 * flux.max()
-    comp = pd.DataFrame(dict(x=[26.0], y=[20.0], a=[2.0], b=[2.0], theta=[0.0]))
     usable = np.ones(shape, bool)
+    target_img = gaussian(shape, 14.0, 20.0, 2.0, 2.0)
+    f_t = target_img.sum()
+    target = (14.0, 20.0, 2.0, 2.0, 0.0, f_t)
 
-    need, info = companion_mask_footprint(detected, shape, 0, 0, target, comp, 10.0, 2, 2.0)
-    assert info["n_shared"] == 1
+    def scene(amp, xc=26.0):
+        comp_img = amp * gaussian(shape, xc, 20.0, 4.0, 4.0)
+        flux = target_img + comp_img
+        det = flux > 0.02 * target_img.max()
+        comp = pd.DataFrame(dict(x=[xc], y=[20.0], a=[2.0 * 4.0 / 2.0], b=[4.0], theta=[0.0],
+                                 flux=[comp_img.sum()]))
+        need, info = companion_mask_footprint(det, shape, 0, 0, target, comp, 10.0, 2, 2.0)
+        return flux, need, info
+
+    flux, need, info = scene(20.0)                                # 80 times the target's flux
+    assert info["n_shared"] == 1 and info["flux_ratio_max"] > 50
     assert info["target_fp"][20, 14] and info["target_fp"][20, 26]
     assert need[20, 26] and not need[20, 14]                      # companion core masked, target kept
-    assert info["shared"][20, 34] and not info["shared"][20, 14]  # wings beyond 2 ellipses are the companion's
-    frac = shared_light_fraction(flux, need, info, usable)
-    assert 0.5 < frac < 1.0
+    assert info["shared"][20, 36] and not info["shared"][20, 14]  # its wings are the companion's
+    assert shared_light_fraction(flux, need, info, usable) > 0.3
 
-    alone = gaussian(shape, 14.0, 20.0, 2.0, 2.0)
-    need, info = companion_mask_footprint(alone > 0.05 * alone.max(), shape, 0, 0, target, comp.iloc[:0], 10.0, 2,
-                                          2.0)
+    flux, need, info = scene(0.01, 19.0)                          # a faint companion in the target's wings
+    assert info["n_shared"] == 1 and info["flux_ratio_max"] < 0.1
+    assert shared_light_fraction(flux, need, info, usable) < 0.02
+
+    alone = target_img
+    need, info = companion_mask_footprint(alone > 0.05 * alone.max(), shape, 0, 0, target,
+                                          pd.DataFrame(columns=["x", "y", "a", "b", "theta", "flux"]), 10.0, 2, 2.0)
     assert info["n_shared"] == 0 and not need.any()
     assert shared_light_fraction(alone, need, info, usable) == 0.0
