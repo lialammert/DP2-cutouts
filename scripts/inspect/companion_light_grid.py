@@ -1,10 +1,11 @@
-# shared_light_grid.py
+# companion_light_grid.py
 # Anna Preto
 # AstroDeep Project
-# Visual check of shared_light_frac on one processed patch: i-band stamps drawn in bins of shared_light_frac, each
+# Visual check of a contamination measure on one processed patch (companion_light_ratio by default, or any table
+# column such as i_blendedness): i-band stamps drawn in bins of that column, each
 # shown before masking (flux_raw) and after (flux, the masked pixels outlined). Also prints sanity numbers (is the
 # target itself ever masked?). Reads the stamp table in small batches: fine on a login node.
-# Usage: python scripts/inspect/shared_light_grid.py <patch dir .../patches/<tract>_<patch>> <out.png>
+# Usage: python scripts/inspect/companion_light_grid.py <patch dir .../patches/<tract>_<patch>> <out.png> [column]
 
 import json
 import sys
@@ -17,7 +18,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
-BINS = [(0.0, 0.02), (0.05, 0.15), (0.15, 0.3), (0.3, 0.5), (0.5, 0.75), (0.75, 1.01)]
+BINS = [(0.0, 0.01), (0.01, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, np.inf)]
 PER_BIN = 4
 
 
@@ -25,22 +26,32 @@ def stretch(img, s):
     return np.arcsinh(img / (0.1 * s)) / np.arcsinh(10.0)
 
 
-def main(patch_dir, out):
+def main(patch_dir, out, column="companion_light_ratio"):
     proc = f"{patch_dir}/30_processed"
     info = json.load(open(f"{proc}/stamps.json"))
     n, ib = int(info["stamp_px"]), list(info["bands"]).index("i")
-    cols = ["object_id", "in_region", "shared_light_frac", "shared_flux_ratio_max", "n_shared_companions",
-            "masked_fraction", "masked_fraction_in_ellipse", "i_cModel_mag", "mask_pass"]
-    t = pd.read_parquet(f"{proc}/table.parquet", columns=cols)
+    wanted = ["object_id", "in_region", column, "companion_light_ratio", "i_blendedness", "shared_flux_ratio_max",
+              "n_shared_companions", "masked_fraction_in_ellipse", "i_cModel_mag"]
+    names = set(pq.read_schema(f"{proc}/table.parquet").names)
+    if column not in names:
+        sys.exit(f"no column {column!r} in {proc}/table.parquet (rerun process for the new measures)")
+    t = pd.read_parquet(f"{proc}/table.parquet", columns=[c for c in dict.fromkeys(wanted) if c in names])
+    for c in wanted:
+        if c not in t:
+            t[c] = np.nan
     t = t[t["in_region"].astype(bool)]
-    s = t["shared_light_frac"].astype(float)
+    s = t[column].astype(float)
     print(f"{len(t)} targets in {patch_dir}")
     print("masked_fraction_in_ellipse > 0.5 (target itself masked):",
           round(float((t["masked_fraction_in_ellipse"].astype(float) > 0.5).mean()), 3))
-    print("median masked_fraction_in_ellipse by shared_light_frac bin:")
-    g = t.groupby(pd.cut(s, [b[0] for b in BINS] + [1.01], include_lowest=True), observed=True)
-    print(pd.concat([g.size().rename("n"), g[["masked_fraction_in_ellipse", "shared_flux_ratio_max",
-                                             "i_cModel_mag"]].median().round(3)], axis=1).to_string())
+    print(f"medians by {column} bin:")
+    g = t.groupby(pd.cut(s, [b[0] for b in BINS] + [np.inf], include_lowest=True), observed=True)
+    other = [c for c in ("companion_light_ratio", "i_blendedness") if c != column]
+    print(pd.concat([g.size().rename("n"), g[other + ["masked_fraction_in_ellipse", "shared_flux_ratio_max",
+                                                     "i_cModel_mag"]].median().round(3)], axis=1).to_string())
+    print("Spearman correlation companion_light_ratio / i_blendedness:",
+          round(float(t["companion_light_ratio"].astype(float).corr(t["i_blendedness"].astype(float),
+                                                                     method="spearman")), 3))
 
     rng = np.random.default_rng(0)
     picks = []
@@ -82,15 +93,15 @@ def main(patch_dir, out):
             if need.any():
                 a1.contour(need, levels=[0.5], colors="tab:red", linewidths=0.6)
             m = meta.loc[oid]
-            a0.set_title(f"f={m['shared_light_frac']:.2f} r={m['shared_flux_ratio_max']:.1f}", fontsize=6)
-            a1.set_title(f"i={m['i_cModel_mag']:.1f} n={int(m['n_shared_companions'])}", fontsize=6)
-        axes[i, 0].set_ylabel(f"{lo:.2f}-{min(hi, 1):.2f}", fontsize=8)
-    fig.suptitle("i band: raw | masked (red: filled pixels); f = shared_light_frac, r = brightest shared "
-                 "companion / target", fontsize=8)
+            a0.set_title(f"c={m['companion_light_ratio']:.2f} b={m['i_blendedness']:.2f}", fontsize=6)
+            a1.set_title(f"i={m['i_cModel_mag']:.1f} r={m['shared_flux_ratio_max']:.1f}", fontsize=6)
+        axes[i, 0].set_ylabel(f"{lo:.2f}-{hi:.2f}", fontsize=8)
+    fig.suptitle(f"rows: bins of {column}. i band: raw | masked (red: filled pixels); c = companion_light_ratio, "
+                 "b = i_blendedness, r = brightest shared companion / target", fontsize=8)
     fig.tight_layout()
     fig.savefig(out, dpi=130)
     print("->", out)
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    main(*sys.argv[1:4])

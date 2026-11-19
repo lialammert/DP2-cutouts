@@ -100,15 +100,11 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
     # - every other footprint in the box is another source: masked whole, grown by grow_px pixels without
     #   eating into the target footprint;
     # - a companion whose centre falls inside the target footprint (shared footprint): shared_k times its
-    #   ellipse, within that footprint;
+    #   ellipse, within that footprint (its wings beyond stay: companion_light_ratio measures what reaches the
+    #   target);
     # - an undetected companion (seen by Euclid only): its half-light ellipse.
-    # Also returns what the masking leaves of the shared companions: the target footprint, and its pixels where a
-    # shared companion is brighter than the target (exponential profiles from the ellipses and catalogue fluxes,
-    # see log_profile). Outside shared_k times its ellipse the light of such a companion stays in the stamp (its
-    # wings, cut along the footprint edge); shared_light_frac measures it. A faint companion (a clump, a faint
-    # neighbour) owns almost nothing; a bright one owns its halo.
-    # target: (x, y, a, b, theta, flux); comp needs a column flux in the same unit as the target's (NaN: unknown,
-    # owns nothing).
+    # target: (x, y, a, b, theta, flux); comp: x, y, a, b, theta, flux (same unit as the target's, NaN unknown).
+    # Also returns the number of shared companions and the flux of the brightest one over the target's.
     h, w = shape
     det = detected[oy:oy + h, ox:ox + w]
     labels, _ = label(det, structure=np.ones((3, 3), int))
@@ -116,12 +112,10 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
     it, jt = int(np.floor(yt + 0.5)), int(np.floor(xt + 0.5))
     lt = labels[it, jt] if (0 <= it < h and 0 <= jt < w) else 0
     target_fp = labels == lt if lt > 0 else np.zeros(shape, bool)
-    lp_target = log_profile(radius_map(shape, xt, yt, *target[2:5]), target[2], target[3], target[5])
 
     m = det & ~target_fp
     if grow_px > 0 and m.any():
         m = binary_dilation(m, iterations=int(grow_px)) & ~target_fp
-    shared = np.zeros(shape, bool)
     n_shared, ratio_max = 0, 0.0
     sel = ((comp["x"] > ox - pad) & (comp["x"] < ox + w + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + h + pad))
     for r in comp[sel].itertuples():
@@ -129,37 +123,51 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
         ix, iy = int(np.floor(x + 0.5)), int(np.floor(y + 0.5))
         inside = 0 <= ix < w and 0 <= iy < h
         if inside and target_fp[iy, ix]:
-            rc = radius_map(shape, x, y, r.a, r.b, r.theta)
-            m |= (rc <= shared_k) & target_fp
-            shared |= (log_profile(rc, r.a, r.b, r.flux) > lp_target) & target_fp
+            m |= (radius_map(shape, x, y, r.a, r.b, r.theta) <= shared_k) & target_fp
             n_shared += 1
             if np.isfinite(r.flux) and target[5] > 0:
                 ratio_max = max(ratio_max, float(r.flux) / float(target[5]))
         elif not (inside and det[iy, ix]):
             m |= radius_map(shape, x, y, r.a, r.b, r.theta) <= 1.0
-    return m, dict(target_fp=target_fp, shared=shared, n_shared=n_shared, flux_ratio_max=ratio_max)
+    return m, dict(n_shared=n_shared, flux_ratio_max=ratio_max)
 
 
 EXP_HALF_LIGHT = 1.678  # half-light radius of an exponential profile, in scale lengths
 
 
-def log_profile(r_reduced, a, b, flux):
-    # Log surface brightness of an exponential profile whose half-light ellipse has semi-axes a, b and total flux
-    # flux, at reduced radius r_reduced (1 on that ellipse). Only used to compare sources: which one is brighter
-    # at a pixel. Unknown or non-positive flux: -inf (owns no pixel).
+def exp_profile(r_reduced, a, b, flux):
+    # Surface brightness of an exponential profile whose half-light ellipse has semi-axes a, b and total flux flux,
+    # at reduced radius r_reduced (1 on that ellipse). Unknown or non-positive flux or axes: 0.
     if not (np.isfinite(flux) and flux > 0 and a > 0 and b > 0):
-        return np.full(np.shape(r_reduced), -np.inf)
-    return np.log(flux * EXP_HALF_LIGHT ** 2 / (2.0 * np.pi * a * b)) - EXP_HALF_LIGHT * r_reduced
+        return np.zeros(np.shape(r_reduced))
+    return flux * EXP_HALF_LIGHT ** 2 / (2.0 * np.pi * a * b) * np.exp(-EXP_HALF_LIGHT * np.asarray(r_reduced))
 
 
-def shared_light_fraction(flux, need, info, usable):
-    # Fraction of the light kept in the target footprint (after masking) that sits in shared companions' territory:
-    # 0 for a target alone in its footprint, near 1 for a faint target in the halo of a bright neighbour.
-    kept = info["target_fp"] & ~need & usable
-    total = float(np.clip(flux[kept], 0.0, None).sum())
-    if total <= 0.0:
+def companion_light_ratio(shape, target, comp, keep, k_region=3.0, dedup_px=2.0):
+    # Light that the companions leave on the target, predicted rather than measured (the measured light of a faint
+    # target is mostly noise): exponential profiles from the catalogue ellipses and fluxes, summed over the pixels
+    # kept after masking (keep) within k_region times the target ellipse, where its shape is measured; divided by
+    # the target's own light there. 0 for an isolated target; ~1 when a neighbour's halo is as bright as the target
+    # where it is measured. NaN without a target flux.
+    # target: (x, y, a, b, theta, flux) in the box frame; comp: x, y (box frame), a, b, theta, flux, survey. A
+    # Euclid source within dedup_px of a Rubin companion or of the target is the same object: counted once.
+    xt, yt, a, b, th, ft = target
+    if not (np.isfinite(ft) and ft > 0):
         return np.nan
-    return float(np.clip(flux[kept & info["shared"]], 0.0, None).sum()) / total
+    rt = radius_map(shape, xt, yt, a, b, th)
+    region = (rt <= k_region) & keep
+    if not region.any():
+        return np.nan
+    t_light = float(exp_profile(rt[region], a, b, ft).sum())
+    rub = comp[comp["survey"] == "rubin"]
+    pts = np.vstack([rub[["x", "y"]].to_numpy(float), [[xt, yt]]])
+    c_light = 0.0
+    for r in comp.itertuples():
+        if r.survey == "euclid" and np.min(np.hypot(pts[:, 0] - r.x, pts[:, 1] - r.y)) < dedup_px:
+            continue
+        rc = radius_map(shape, r.x, r.y, r.a, r.b, r.theta)
+        c_light += float(exp_profile(rc[region], r.a, r.b, r.flux).sum())
+    return c_light / t_light if t_light > 0 else np.nan
 
 
 # ----------------------------------------------------------------------------- empty sky
@@ -259,8 +267,8 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     ec = euclid
     if pd.notna(row.euclid_ra):
         ec = euclid[~((euclid["ra"] == row.euclid_ra) & (euclid["dec"] == row.euclid_dec))]
-    # Fluxes for deciding who is brighter where (shared footprint): i-band cModel for Rubin companions; Euclid VIS
-    # fluxes brought to the i band with the target's own i / VIS ratio (1 when the target has no VIS flux).
+    # Fluxes for the light the companions leave on the target (companion_light_ratio): i-band cModel for Rubin
+    # companions; Euclid VIS fluxes brought to the i band with the target's own i / VIS ratio (1 without VIS flux).
     f_target = float(getattr(row, "i_cModelFlux", np.nan))
     vis_mag = float(getattr(row, "euclid_vis_mag", np.nan))
     f_target_vis = 10.0 ** (-0.4 * (vis_mag - NJY_ZEROPOINT)) if np.isfinite(vis_mag) else np.nan
@@ -268,7 +276,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                                              and np.isfinite(f_target) and f_target > 0) else 1.0
     rc = rc.assign(flux=rc["flux_i"])
     ec = ec.assign(flux=ec["flux_vis"] * i_over_vis)
-    cols = ["x", "y", "a", "b", "theta", "flux"]
+    cols = ["x", "y", "a", "b", "theta", "flux", "survey"]
     comp = pd.concat([rc[cols], ec[cols]], ignore_index=True)
     pad = float(np.nanmax(comp["a"])) if len(comp) else 0.0
     pad = min(pad, 50.0)
@@ -291,12 +299,12 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     if shared_info is not None:
         out["n_shared_companions"] = int(shared_info["n_shared"])
         out["shared_flux_ratio_max"] = float(shared_info["flux_ratio_max"])
-        # Without a target flux the brightness comparison is meaningless: NaN (not cut).
-        out["shared_light_frac"] = (shared_light_fraction(img["flux"][box][ib], need, shared_info,
-                                                          ~np.any(nod, axis=0))
-                                    if np.isfinite(f_target) and f_target > 0 else np.nan)
     else:
-        out["n_shared_companions"], out["shared_flux_ratio_max"], out["shared_light_frac"] = -1, np.nan, np.nan
+        out["n_shared_companions"], out["shared_flux_ratio_max"] = -1, np.nan
+    near = comp[(comp["x"] > ox - pad) & (comp["x"] < ox + n + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + n + pad)]
+    out["companion_light_ratio"] = companion_light_ratio(
+        (n, n), (xc, yc, a, b, th, f_target), near.assign(x=near["x"] - ox, y=near["y"] - oy),
+        ~need & ~np.any(nod, axis=0), float(mc.get("light_region_k", 3.0)))
 
     window, nbad = banks[n].find(need, rng, cc["sky_tries"]) if need.any() else (None, 0)
     flux, var, mbits = fill(img, ox, oy, n, need, window)

@@ -370,14 +370,14 @@ def test_rubin_to_euclid_px_follows_the_pixel_scales():
     assert dataset2.rubin_to_euclid_px({"euclid": {"pixel_scale": 0.05}}) == pytest.approx(4.0)
 
 
-def test_d1_rejects_targets_in_a_shared_footprint():
-    from dp2_cutouts.pairs.dataset1 import alone_in_footprint
+def test_d1_rejects_targets_in_companion_light():
+    from dp2_cutouts.pairs.dataset1 import clean_of_companions
 
-    meta = pd.DataFrame(dict(shared_light_frac=[0.0, 0.1, 0.5, np.nan]))
-    assert alone_in_footprint(meta, dict(max_shared_light_frac=0.2)).tolist() == [True, True, False, True]
-    assert alone_in_footprint(meta, dict(max_shared_light_frac=None)).all()
+    meta = pd.DataFrame(dict(companion_light_ratio=[0.0, 0.05, 0.5, np.nan]))
+    assert clean_of_companions(meta, dict(max_companion_light_ratio=0.1)).tolist() == [True, True, False, True]
+    assert clean_of_companions(meta, dict(max_companion_light_ratio=None)).all()
     with pytest.raises(RuntimeError, match="rerun the pipeline"):
-        alone_in_footprint(meta.drop(columns="shared_light_frac"), dict(max_shared_light_frac=0.2))
+        clean_of_companions(meta.drop(columns="companion_light_ratio"), dict(max_companion_light_ratio=0.1))
 
 
 def test_blend_flux_ratio_is_companion_over_target():

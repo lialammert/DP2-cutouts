@@ -109,12 +109,12 @@ def check_contamination(meta, cfg):
              median_nearest_euclid_arcsec=float(meta["nearest_euclid_arcsec"].replace(np.inf, np.nan).median()),
              median_masked_fraction=float(meta["masked_fraction"].median()) if "masked_fraction" in meta else np.nan,
              p95_delta_e_mask=float(meta["delta_e_mask"].quantile(0.95)) if "delta_e_mask" in meta else np.nan)
-    # Wings of companions sharing the target footprint, among the kept pairs (those above dataset1.
-    # max_shared_light_frac are counted in the rejected reasons as shared_footprint_light).
-    if "shared_light_frac" in meta:
-        s = meta["shared_light_frac"].astype(float)
+    # Companion light left on the target after masking, among the kept pairs (those above dataset1.
+    # max_companion_light_ratio are counted in the rejected reasons as companion_light).
+    if "companion_light_ratio" in meta:
+        s = meta["companion_light_ratio"].astype(float)
         q.update(frac_with_shared_companion=float((meta["n_shared_companions"].astype(float) > 0).mean()),
-                 shared_light_frac_quantiles={str(p): float(s.quantile(p)) for p in (0.5, 0.9, 0.99)})
+                 companion_light_ratio_quantiles={str(p): float(s.quantile(p)) for p in (0.5, 0.9, 0.99)})
     # Contaminants inside 3" are expected (the recipe isolates at the ellipse overlap, not at 3"): this is a warning
     # that tells how many, not a failure.
     return dict(status=_status(False, q["frac_with_contaminant"] > 0.2), numbers=q,
