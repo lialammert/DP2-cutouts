@@ -4,8 +4,9 @@
 # Dataset 1: pairs (x_R, x_E) of the same galaxy, usable individually in both surveys.
 # Rubin side: the final dataset of the stamp pipeline, unchanged (every cut of the recipe, companion masking
 # included); nothing is re-selected. Euclid side: a cutout of the same galaxy around its Euclid position.
-# Pairs are dropped only when unusable (no Euclid image, too few valid Euclid pixels, wrong pixel scale), each with
-# its reason; every other check is recorded as a column, for the quality report and for later selections.
+# Pairs are dropped when unusable (no Euclid image, too few valid Euclid pixels, wrong pixel scale) or when the
+# target shares its detection footprint with a companion whose wings stay in the stamp (alone_in_footprint), each
+# with its reason; every other check is recorded as a column, for the quality report and for later selections.
 # One shard per Rubin patch (the job of one Slurm array task), merged afterwards.
 
 import json
@@ -46,6 +47,21 @@ def contamination(neigh, tree, ra, dec, vis_mag, radius_arcsec, dmag):
     return int(bright.sum()), (float(d.min()) if d.size else np.inf)
 
 
+def alone_in_footprint(meta, d1):
+    # The one selection D1 adds to the pipeline's: a target that shares its detection footprint with a companion
+    # keeps that companion's wings (only shared_k times its ellipse is masked), so it is not an isolated galaxy.
+    # shared_light_frac (stamp stage) is the part of the light kept in the target footprint that belongs to such
+    # companions; above max_shared_light_frac the pair is rejected. NaN (target footprint empty) passes.
+    limit = d1.get("max_shared_light_frac")
+    if limit is None:
+        return np.ones(len(meta), bool)
+    if "shared_light_frac" not in meta.columns:
+        raise RuntimeError("dataset1.max_shared_light_frac is set but the stamp pipeline products have no "
+                           "shared_light_frac column: rerun the pipeline (process and assemble) first")
+    f = meta["shared_light_frac"].astype(float).to_numpy()
+    return ~(f > float(limit))
+
+
 def build_patch(cfg, patch):
     from ..pipeline.patches import patch_case
 
@@ -66,6 +82,11 @@ def build_patch(cfg, patch):
     for i in np.flatnonzero(~has):
         rejected.append(dict(object_id=int(meta["object_id"].iloc[i]), reason="no_euclid_counterpart"))
     meta, flux_r, ivar_r, mask_r = meta[has].reset_index(drop=True), flux_r[has], ivar_r[has], mask_r[has]
+    alone = alone_in_footprint(meta, d1)
+    for i in np.flatnonzero(~alone):
+        rejected.append(dict(object_id=int(meta["object_id"].iloc[i]), reason="shared_footprint_light",
+                             detail=f"{float(meta['shared_light_frac'].iloc[i]):.3f}"))
+    meta, flux_r, ivar_r, mask_r = meta[alone].reset_index(drop=True), flux_r[alone], ivar_r[alone], mask_r[alone]
     if len(meta) == 0:
         # Patch without final stamps (no target, not processed): an empty shard records that it was looked at.
         store.write_shard(shard_dir(cfg, patch["name"]), pd.DataFrame(), empty_arrays(n_r, len(rb), n_e, len(eb)),

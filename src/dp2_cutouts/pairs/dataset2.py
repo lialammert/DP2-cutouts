@@ -25,7 +25,9 @@ from ..stages import stamps as stamp_stage
 from ..stages.catalog_table import copaings_dir
 from . import common, splits, store
 
-RUBIN_TO_EUCLID_PX = 2.0  # 0.2" / 0.1"
+def rubin_to_euclid_px(cfg):
+    # Euclid pixels per Rubin pixel (0.2" / 0.1" = 2), from the pixel scales rather than written in.
+    return common.RUBIN_SCALE / float(cfg["euclid"]["pixel_scale"])
 
 
 SEPARATION_METRICS = ("euclid_masked_fraction", "euclid_masked_fraction_in_target", "sep_delta_e",
@@ -183,7 +185,8 @@ def candidate_targets(case, cfg, patch):
     e = euclid_table(case)
     a_r, b_r, th_r = euclid_ellipses(e, cfg, common.RUBIN_SCALE)
     e["a_r"], e["b_r"], e["theta"] = a_r, b_r, th_r
-    e["a_e"], e["b_e"] = a_r * RUBIN_TO_EUCLID_PX, b_r * RUBIN_TO_EUCLID_PX
+    k = rubin_to_euclid_px(cfg)
+    e["a_e"], e["b_e"] = a_r * k, b_r * k
     # Local tangent-plane coordinates in Rubin pixels (x towards west, y towards north), for the overlap test.
     ra0, dec0 = float(e["ra"].mean()), float(e["dec"].mean())
     wx, ny = common.sky_offset_arcsec(ra0, dec0, e["ra"].to_numpy(), e["dec"].to_numpy())

@@ -36,7 +36,9 @@ def psf_ellipse(ixx_psf, iyy_psf, pixel_scale=LSST_PIXEL_SCALE):
 
 def euclid_ellipse(size_true, size_minor_true, position_angle_true, psf_fwhm_i, pixel_scale=LSST_PIXEL_SCALE):
     # Copy of copaings.eot_fast.EllipseCache.true_params (semi-axes broadened by the PSF, in Rubin pixels, and
-    # theta = 270 - position_angle_true folded into [0, 180]): the same ellipse as in the overlap test.
+    # theta = 270 - position_angle_true folded into [0, 180]): the same ellipse as in the overlap test. The
+    # orientation is that of the galaxy only when the copaings tiles were written with euclid.pa_convention
+    # "measured" (see sources/euclid_hf.py); with "copaings" it is unrelated to it.
     psf = np.sqrt(2.0) * np.asarray(psf_fwhm_i, float) / FWHM2SIGMA  # arcsec
     a = np.sqrt(np.asarray(size_true, float) ** 2 + psf ** 2) / pixel_scale
     b = np.sqrt(np.asarray(size_minor_true, float) ** 2 + psf ** 2) / pixel_scale

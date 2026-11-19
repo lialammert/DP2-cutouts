@@ -330,3 +330,68 @@ def test_mmu_mirror_manifest_drives_the_reader(tmp_path, monkeypatch):
     (cache / "euclid" / "Npix=1.parquet").write_bytes(b"x")
     with pytest.raises(FileNotFoundError):
         euclid_images.mirrored_files(url, cache, box_b)
+
+
+def test_pa_check_reports_the_angle_the_code_uses():
+    from dp2_cutouts.common.ellipse import euclid_ellipse
+    from dp2_cutouts.pairs import quality
+    rng = np.random.default_rng(0)
+    n = 400
+    theta_true = rng.uniform(0, 180, n)                      # orientation on the VIS stamp
+    e = 0.4
+    m = pd.DataFrame(dict(e1_vis=e * np.cos(np.radians(2 * theta_true)),
+                          e2_vis=e * np.sin(np.radians(2 * theta_true))))
+    # "measured" tiles: the code's theta = 270 - PA must equal the orientation -> PA = 270 - theta.
+    m["euclid_position_angle"] = (270.0 - theta_true) % 360.0
+    _, _, th = euclid_ellipse(np.ones(n), np.ones(n), m["euclid_position_angle"], 0.7)
+    assert np.allclose(quality.angle_diff(th, theta_true), 0.0, atol=1e-9)
+    r = quality.pa_check(m)
+    assert r["used_by_code_median_abs_diff_deg"] < 1.0
+    # "copaings" tiles of the scale run: the catalogue angle IS the orientation, the code's 270 - PA is unrelated.
+    m["euclid_position_angle"] = theta_true
+    r = quality.pa_check(m)
+    assert r["median_abs_diff_deg"]["PA"] < 1.0 and r["used_by_code_median_abs_diff_deg"] > 30.0
+
+
+def test_pa_convention_must_be_explicit():
+    from dp2_cutouts.sources import euclid_hf
+
+    class Cfg(dict):
+        pass
+
+    with pytest.raises(ValueError):
+        euclid_hf.pa_convention(Cfg(euclid={}))
+    assert euclid_hf.pa_convention(Cfg(euclid=dict(pa_convention="measured"))) == "measured"
+
+
+def test_rubin_to_euclid_px_follows_the_pixel_scales():
+    from dp2_cutouts.pairs import dataset2
+    assert dataset2.rubin_to_euclid_px({"euclid": {"pixel_scale": 0.1}}) == pytest.approx(2.0)
+    assert dataset2.rubin_to_euclid_px({"euclid": {"pixel_scale": 0.05}}) == pytest.approx(4.0)
+
+
+def test_d1_rejects_targets_in_a_shared_footprint():
+    from dp2_cutouts.pairs.dataset1 import alone_in_footprint
+
+    meta = pd.DataFrame(dict(shared_light_frac=[0.0, 0.1, 0.5, np.nan]))
+    assert alone_in_footprint(meta, dict(max_shared_light_frac=0.2)).tolist() == [True, True, False, True]
+    assert alone_in_footprint(meta, dict(max_shared_light_frac=None)).all()
+    with pytest.raises(RuntimeError, match="rerun the pipeline"):
+        alone_in_footprint(meta.drop(columns="shared_light_frac"), dict(max_shared_light_frac=0.2))
+
+
+def test_blend_flux_ratio_is_companion_over_target():
+    # flux_ratio is F_companion / F_target in the blend: the companion stamp is scaled down to it, never up.
+    rng = np.random.default_rng(0)
+    n = 40
+    mag = rng.uniform(20.0, 26.0, n)
+    meta = pd.DataFrame(dict(split="test", tract=1, patch=0, i_cModel_mag=mag))
+    cb = dict(same_patch=True, separation_px=[2.0, 6.0], flux_ratio=[0.1, 1.0])
+    plan = blends.draw(meta, "test", 200, cb, rng)
+    f = 10.0 ** (-0.4 * mag)
+    ft, fc = f[plan["d1_row"]], f[plan["companion_row"]]
+    assert np.allclose(plan["companion_scale"] * fc / ft, plan["flux_ratio"])
+    assert (plan["companion_scale"] <= 1.0 + 1e-12).all()
+    assert (plan["d1_row"] != plan["companion_row"]).all()
+    with pytest.raises(RuntimeError, match="only"):
+        blends.draw(meta.iloc[:2], "test", 5, dict(cb, flux_ratio=[50.0, 60.0]), rng, max_tries_per_blend=10)

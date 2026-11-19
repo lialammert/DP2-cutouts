@@ -48,3 +48,32 @@ def test_stamp_centered_and_not_transposed():
     # The same galaxy, stamp transposed by mistake: e1 changes sign.
     mt = adaptive_moments(stamp.T, center=(29, 29))
     assert mt["e1"] < -0.5
+
+
+def test_shared_footprint_companion_wings_are_measured():
+    # A faint target and a bright companion in one detection footprint: the companion's core (shared_k times its
+    # ellipse) is masked, its wings stay, and shared_light_frac sees them. A target alone in its footprint gives 0.
+    import pandas as pd
+
+    from dp2_cutouts.stages.stamps import companion_mask_footprint, shared_light_fraction
+
+    shape = (41, 41)
+    target = (14.0, 20.0, 2.0, 2.0, 0.0)
+    flux = gaussian(shape, 14.0, 20.0, 2.0, 2.0) + 20.0 * gaussian(shape, 26.0, 20.0, 4.0, 4.0)
+    detected = flux > 0.05 * flux.max()
+    comp = pd.DataFrame(dict(x=[26.0], y=[20.0], a=[2.0], b=[2.0], theta=[0.0]))
+    usable = np.ones(shape, bool)
+
+    need, info = companion_mask_footprint(detected, shape, 0, 0, target, comp, 10.0, 2, 2.0)
+    assert info["n_shared"] == 1
+    assert info["target_fp"][20, 14] and info["target_fp"][20, 26]
+    assert need[20, 26] and not need[20, 14]                      # companion core masked, target kept
+    assert info["shared"][20, 34] and not info["shared"][20, 14]  # wings beyond 2 ellipses are the companion's
+    frac = shared_light_fraction(flux, need, info, usable)
+    assert 0.5 < frac < 1.0
+
+    alone = gaussian(shape, 14.0, 20.0, 2.0, 2.0)
+    need, info = companion_mask_footprint(alone > 0.05 * alone.max(), shape, 0, 0, target, comp.iloc[:0], 10.0, 2,
+                                          2.0)
+    assert info["n_shared"] == 0 and not need.any()
+    assert shared_light_fraction(alone, need, info, usable) == 0.0

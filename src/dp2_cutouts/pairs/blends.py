@@ -5,8 +5,9 @@
 # galaxy of the same patch (companion), in the validation and test splits only. Unlike D2, the isolated target is
 # known pixel by pixel, so deblending can be scored against truth. The Euclid view of the target is read from D1
 # through d1_row (not copied).
-# The companion's noise is scaled with it and added to the target's: the blend is noisier than a real blend of the
-# same two galaxies by the companion's noise; noise_excess_rms records by how much.
+# flux_ratio is the flux of the companion over that of the target (i cModel): the companion stamp is scaled to it,
+# never up. The companion's noise is scaled with it and added to the target's: the blend is noisier than a real
+# blend of the same two galaxies by the companion's noise; noise_excess_rms records by how much.
 
 import json
 
@@ -37,9 +38,14 @@ def make_one(t, c, dx, dy, ratio):
     return (t["flux"] + cf).astype(np.float32), ivar, t["mask"] | cm
 
 
-def draw(meta, split, n, cb, rng):
-    # (target, companion) rows of D1 in the same patch, integer shift with radius in the range, flux ratio.
-    rows = np.flatnonzero((meta["split"] == split).to_numpy())
+def draw(meta, split, n, cb, rng, max_tries_per_blend=1000):
+    # (target, companion) rows of D1 in the same patch, integer shift with radius in the range, and the flux ratio
+    # companion / target (i-band cModel fluxes). The companion stamp is scaled by
+    # companion_scale = flux_ratio * F_target / F_companion; only companions at least that bright are drawn
+    # (companion_scale <= 1), so that their noise is never amplified.
+    mag = meta["i_cModel_mag"].astype(float).to_numpy()
+    flux = 10.0 ** (-0.4 * mag)
+    rows = np.flatnonzero((meta["split"] == split).to_numpy() & np.isfinite(mag))
     by_patch = meta.iloc[rows].groupby(["tract", "patch"]).indices
     groups = [rows[v] for v in by_patch.values() if len(v) >= 2] if cb["same_patch"] else [rows]
     if not groups:
@@ -47,16 +53,25 @@ def draw(meta, split, n, cb, rng):
     sizes = np.array([len(g) for g in groups], float)
     r0, r1 = cb["separation_px"]
     q0, q1 = cb["flux_ratio"]
-    out = []
+    out, tries = [], 0
     while len(out) < n:
+        tries += 1
+        if tries > max_tries_per_blend * n:
+            raise RuntimeError(f"controlled blends ({split}): only {len(out)} of {n} drawn; flux_ratio {q0}-{q1} "
+                               "needs companions brighter than the targets allow")
         g = groups[rng.choice(len(groups), p=sizes / sizes.sum())]
-        t, c = rng.choice(g, size=2, replace=False)
+        t = rng.choice(g)
+        ratio = float(rng.uniform(q0, q1))
+        bright = g[(g != t) & (flux[g] >= ratio * flux[t])]
+        if len(bright) == 0:
+            continue
+        c = rng.choice(bright)
         rad, ang = rng.uniform(r0, r1), rng.uniform(0, 2 * np.pi)
         dx, dy = int(np.rint(rad * np.cos(ang))), int(np.rint(rad * np.sin(ang)))
         if (dx, dy) == (0, 0):
             continue
         out.append(dict(d1_row=int(t), companion_row=int(c), dx=dx, dy=dy, separation_px=float(np.hypot(dx, dy)),
-                        flux_ratio=float(rng.uniform(q0, q1)), split=split))
+                        flux_ratio=ratio, companion_scale=float(ratio * flux[t] / flux[c]), split=split))
     return pd.DataFrame(out)
 
 
@@ -75,7 +90,7 @@ def build(cfg):
         C = {k: d1.take(f"rubin_{k}", p["companion_row"].to_numpy()) for k in ("flux", "ivar", "mask")}
         for i, r in enumerate(p.itertuples(index=False)):
             f, iv, m = make_one({k: v[i] for k, v in T.items()}, {k: v[i] for k, v in C.items()}, r.dx, r.dy,
-                                r.flux_ratio)
+                                r.companion_scale)
             flux.append(f)
             ivar.append(iv)
             mask.append(m)

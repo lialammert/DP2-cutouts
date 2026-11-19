@@ -109,6 +109,12 @@ def check_contamination(meta, cfg):
              median_nearest_euclid_arcsec=float(meta["nearest_euclid_arcsec"].replace(np.inf, np.nan).median()),
              median_masked_fraction=float(meta["masked_fraction"].median()) if "masked_fraction" in meta else np.nan,
              p95_delta_e_mask=float(meta["delta_e_mask"].quantile(0.95)) if "delta_e_mask" in meta else np.nan)
+    # Wings of companions sharing the target footprint, among the kept pairs (those above dataset1.
+    # max_shared_light_frac are counted in the rejected reasons as shared_footprint_light).
+    if "shared_light_frac" in meta:
+        s = meta["shared_light_frac"].astype(float)
+        q.update(frac_with_shared_companion=float((meta["n_shared_companions"].astype(float) > 0).mean()),
+                 shared_light_frac_quantiles={str(p): float(s.quantile(p)) for p in (0.5, 0.9, 0.99)})
     # Contaminants inside 3" are expected (the recipe isolates at the ellipse overlap, not at 3"): this is a warning
     # that tells how many, not a failure.
     return dict(status=_status(False, q["frac_with_contaminant"] > 0.2), numbers=q,
@@ -129,7 +135,7 @@ def check_distributions(meta):
     return dict(status="pass", numbers={c: describe(meta[c]) for c in cols if c in meta})
 
 
-def check_resolution_and_orientation(meta):
+def check_resolution_and_orientation(meta, pa_offset_deg=0.0):
     ok = meta["hsm_vis_ok"].astype(bool) & np.isfinite(meta["e1"].astype(float)) & (meta["snr_i"] > 20)
     m = meta[ok]
     out = dict(n=int(len(m)))
@@ -146,7 +152,10 @@ def check_resolution_and_orientation(meta):
         out[f"corr_{c}"] = float(np.corrcoef(x, y)[0, 1])
     fail = out["corr_e1"] < 0.2 or out["corr_e2"] < 0.2
     if "euclid_position_angle" in m:
-        out["position_angle"] = pa_check(m)
+        out["position_angle"] = pa_check(m, pa_offset_deg)
+        # The ellipses built by the code (copaings overlap tests, companion masks, D2) must follow the galaxies.
+        used = out["position_angle"].get("used_by_code_median_abs_diff_deg")
+        fail = fail or (used is not None and used > PA_MAX_MEDIAN_DIFF_DEG)
     return dict(status=_status(fail), numbers=out)
 
 
@@ -156,10 +165,15 @@ def angle_diff(a, b):
     return np.minimum(d, 180.0 - d)
 
 
-def pa_check(m, e_min=0.2):
+PA_MAX_MEDIAN_DIFF_DEG = 15.0
+
+
+def pa_check(m, pa_offset_deg=0.0, e_min=0.2):
     # Orientation of the catalogue ellipse against the orientation measured on the VIS stamp (frame x = column
     # towards west, y = row towards north). A convention that is right gives a median difference of a few degrees;
-    # a wrong one gives ~45 (unrelated) or ~90 (rotated).
+    # a wrong one gives ~45 (unrelated) or ~90 (rotated). "PA" is euclid_position_angle, the position_angle_true of
+    # the copaings Euclid table (which depends on euclid.pa_convention of the stamp pipeline); the code builds its
+    # ellipses with theta = 270 - (PA + euclid.pa_offset_deg) (common/ellipse.py), reported as used_by_code.
     e = np.hypot(m["e1_vis"].astype(float), m["e2_vis"].astype(float))
     s = m[(e > e_min) & np.isfinite(m["euclid_position_angle"].astype(float))]
     if len(s) < 20:
@@ -168,7 +182,9 @@ def pa_check(m, e_min=0.2):
     pa = s["euclid_position_angle"].astype(float).to_numpy()
     conventions = {"copaings: 270 - PA": (270.0 - pa) % 180.0, "-PA": (-pa) % 180.0,
                    "PA + 90": (pa + 90.0) % 180.0, "PA": pa % 180.0}
-    return dict(n=int(len(s)), median_abs_diff_deg={k: float(np.median(angle_diff(v, measured)))
+    used = float(np.median(angle_diff((270.0 - (pa + float(pa_offset_deg))) % 180.0, measured)))
+    return dict(n=int(len(s)), used_by_code_median_abs_diff_deg=used, pa_offset_deg=float(pa_offset_deg),
+                median_abs_diff_deg={k: float(np.median(angle_diff(v, measured)))
                                                     for k, v in conventions.items()})
 
 
@@ -196,7 +212,8 @@ def run(cfg, st, name, sample_size=5000, seed=0):
                       duplicates=check_duplicates(meta),
                       contamination=check_contamination(meta, cfg),
                       distributions=check_distributions(meta),
-                      resolution_and_orientation=check_resolution_and_orientation(meta),
+                      resolution_and_orientation=check_resolution_and_orientation(
+                          meta, float(cfg["euclid"].get("pa_offset_deg", 0.0))),
                       splits=check_splits(meta, cfg)))
     report["status"] = ("fail" if any(c["status"] == "fail" for c in report["checks"].values())
                         else "warn" if any(c["status"] == "warn" for c in report["checks"].values()) else "pass")

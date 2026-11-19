@@ -59,9 +59,11 @@ euclid:
   stamp_px: 119
   # Nominal VIS PSF FWHM (arcsec), used to build Euclid-resolution ellipses (D2 isolation and masking).
   vis_psf_fwhm: 0.17
-  # Rotation added to the catalogue position angle before building ellipses (degrees). 0 is confirmed by the
-  # position-angle check of the D1 quality report (2026-11-18, 6527 elongated objects): median |PA - HSM angle| is
-  # 3.2 deg with PA as is, 87 deg with PA + 90.
+  # Rotation added to the catalogue position angle before building ellipses (degrees). Keep 0: the orientation is
+  # set by euclid.pa_convention of the stamp pipeline ("measured"), and an offset cannot repair the "copaings"
+  # convention (its error depends on each angle). The D1 quality report checks the angle the code actually uses
+  # (resolution_and_orientation: used_by_code_median_abs_diff_deg, fail above 15 deg; 45 deg on 2026-11-18 with
+  # "copaings").
   pa_offset_deg: 0.0
 
 splits:
@@ -82,6 +84,11 @@ dataset1:
   # (no Euclid image, no valid pixel), each with its reason in rejected.parquet.
   max_astrometric_offset_arcsec: 0.3   # recorded flag, not a cut
   min_valid_fraction_euclid: 0.9       # below this the pair is rejected (reason recorded)
+  # Targets sharing their detection footprint with a companion keep its wings (white sky-filled disc in a dark halo,
+  # step along the footprint edge; seen in the D1 notebook on 2026-11-19). Rejected when more than this fraction
+  # of the light kept in the target footprint lies in the companions' part of it (stamp column shared_light_frac).
+  # null: no cut. Provisional value; tune it on the distribution in the D1 quality report (D1 rebuild only).
+  max_shared_light_frac: 0.2
   contamination_radius_arcsec: 3.0     # other Euclid sources inside this radius are counted per pair
   contamination_delta_mag: 2.5         # ... if brighter than target VIS mag + this
   # Conditioning features of the Euclid encoder: Rubin PSF of the stamp (known at inference, Rubin-side metadata).
@@ -179,7 +186,8 @@ dataset2:
 controlled_blends:
   n_per_split: {val: 2000, test: 4000}
   separation_px: [2.0, 12.0]     # integer shifts drawn in this range of radius
-  flux_ratio: [0.1, 1.0]         # companion flux scaled by this factor (its noise is scaled with it, recorded)
+  flux_ratio: [0.1, 1.0]         # i-band flux companion / target; the companion stamp is scaled down to it
+                                 # (companions fainter than that are not drawn; noise scaled with it, recorded)
   same_patch: true               # companion from the same patch: same PSF to first order
 
 stage2:

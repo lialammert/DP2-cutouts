@@ -47,15 +47,23 @@ COPAINGS_NSIDE = 64
 # Angle convention of the Euclid ellipses. copaings computes theta = 270 - (PA + 90) = -PA in the Rubin pixel
 # frame, whereas matched pairs give theta = PA + 90 (median offset 1.5 degrees over 385 elongated pairs, against
 # 46 degrees for -PA). "measured" writes PA' = 90 - PA in the tiles, so that the copaings formula returns
-# theta = PA + 90 without modifying copaings.
+# theta = PA + 90 without modifying copaings. Confirmed on the scale run (D1 quality report, 2026-11-18): with
+# "copaings" the ellipses are 45 deg (median) off the orientation measured on 6527 VIS stamps, i.e. unrelated.
+# The key is required: a silent default would change the ellipses without changing the configuration fingerprint,
+# so the pipeline would keep the products of the other convention.
 PA_CONVENTIONS = ("copaings", "measured")
 
 
-def tiles_dir(cfg):
-    conv = cfg["euclid"].get("pa_convention", "copaings")
+def pa_convention(cfg):
+    conv = cfg["euclid"].get("pa_convention")
     if conv not in PA_CONVENTIONS:
-        raise ValueError(f"pa_convention must be one of {PA_CONVENTIONS}")
-    return cfg.data("00_euclid", f"copaings_tiles_{conv}", "x").parent
+        raise ValueError(f"euclid.pa_convention must be set to one of {PA_CONVENTIONS} (got {conv!r}); "
+                         "'measured' is the orientation seen on the images, 'copaings' reproduces the reference code")
+    return conv
+
+
+def tiles_dir(cfg):
+    return cfg.data("00_euclid", f"copaings_tiles_{pa_convention(cfg)}", "x").parent
 
 
 def fetch_box(cfg):
@@ -124,7 +132,7 @@ def run(cfg, refetch=True):
         df.to_parquet(out, index=False)
     else:
         df = read_box(cfg)
-    conv = cfg["euclid"].get("pa_convention", "copaings")
+    conv = pa_convention(cfg)
     tiles = write_copaings_tiles(df, tiles_dir(cfg), conv)
     print(f"Euclid: {len(df):,} objects -> {out}; copaings tiles ({conv}) {tiles}")
     return df

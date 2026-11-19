@@ -31,7 +31,10 @@ rubin:
 euclid:
   hats_url: hf://datasets/hugging-science/mmu_euclid_q1/euclid
   margin_deg: 0.01
-  pa_convention: copaings
+  # Angle convention of the Euclid ellipses (copaings overlap tests, companion masks): "measured" (theta = PA + 90,
+  # the orientation measured on the images). "copaings" (theta = -PA) leaves the ellipses unrelated to the galaxies:
+  # median 45 deg off the VIS orientation in the D1 quality report of 2026-11-18. See euclid_hf.py.
+  pa_convention: measured
 
 copaings:
   friendly_path: ~/src/friendly

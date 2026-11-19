@@ -101,6 +101,10 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
     # - a companion whose centre falls inside the target footprint (shared footprint): shared_k times its
     #   ellipse, within that footprint;
     # - an undetected companion (seen by Euclid only): its half-light ellipse.
+    # Also returns what the masking leaves of the shared companions: the target footprint, and its pixels that are
+    # nearer (in reduced radius) to a shared companion than to the target. Outside shared_k times its ellipse the
+    # light of such a companion stays in the stamp (its wings, cut along the footprint edge); shared_light_frac
+    # measures it.
     h, w = shape
     det = detected[oy:oy + h, ox:ox + w]
     labels, _ = label(det, structure=np.ones((3, 3), int))
@@ -108,20 +112,36 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
     it, jt = int(np.floor(yt + 0.5)), int(np.floor(xt + 0.5))
     lt = labels[it, jt] if (0 <= it < h and 0 <= jt < w) else 0
     target_fp = labels == lt if lt > 0 else np.zeros(shape, bool)
+    r_target = radius_map(shape, xt, yt, *target[2:5])
 
     m = det & ~target_fp
     if grow_px > 0 and m.any():
         m = binary_dilation(m, iterations=int(grow_px)) & ~target_fp
+    shared = np.zeros(shape, bool)
+    n_shared = 0
     sel = ((comp["x"] > ox - pad) & (comp["x"] < ox + w + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + h + pad))
     for r in comp[sel].itertuples():
         x, y = r.x - ox, r.y - oy
         ix, iy = int(np.floor(x + 0.5)), int(np.floor(y + 0.5))
         inside = 0 <= ix < w and 0 <= iy < h
         if inside and target_fp[iy, ix]:
-            m |= (radius_map(shape, x, y, r.a, r.b, r.theta) <= shared_k) & target_fp
+            rc = radius_map(shape, x, y, r.a, r.b, r.theta)
+            m |= (rc <= shared_k) & target_fp
+            shared |= (rc < r_target) & target_fp
+            n_shared += 1
         elif not (inside and det[iy, ix]):
             m |= radius_map(shape, x, y, r.a, r.b, r.theta) <= 1.0
-    return m
+    return m, dict(target_fp=target_fp, shared=shared, n_shared=n_shared)
+
+
+def shared_light_fraction(flux, need, info, usable):
+    # Fraction of the light kept in the target footprint (after masking) that sits in shared companions' territory:
+    # 0 for a target alone in its footprint, near 1 for a faint target in the halo of a bright neighbour.
+    kept = info["target_fp"] & ~need & usable
+    total = float(np.clip(flux[kept], 0.0, None).sum())
+    if total <= 0.0:
+        return np.nan
+    return float(np.clip(flux[kept & info["shared"]], 0.0, None).sum()) / total
 
 
 # ----------------------------------------------------------------------------- empty sky
@@ -227,17 +247,24 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     mc = cfg["masking"]
 
     def make_need(size, bx, by):
+        # Pixels to fill, and the shared-footprint diagnostics (None for the ellipse method).
         if mc["method"] == "ellipse":
-            return companion_mask((size, size), bx, by, comp, pad)
+            return companion_mask((size, size), bx, by, comp, pad), None
         if mc["method"] == "footprint":
             return companion_mask_footprint(img["detected"], (size, size), bx, by, (x - bx, y - by, a, b, th),
                                             comp, pad, mc["grow_px"], mc["shared_k"])
         raise ValueError('masking.method must be "ellipse" or "footprint"')
 
-    need = make_need(n, ox, oy)
+    need, shared_info = make_need(n, ox, oy)
     out["masked_fraction"] = float(need.mean())
     out["masked_fraction_in_ellipse"] = float(need[rmap <= 1].mean()) if (rmap <= 1).any() else np.nan
     out["n_companions"] = int(((comp["x"] - ox + 0.5).between(0, n) & (comp["y"] - oy + 0.5).between(0, n)).sum())
+    if shared_info is not None:
+        out["n_shared_companions"] = int(shared_info["n_shared"])
+        out["shared_light_frac"] = shared_light_fraction(img["flux"][box][ib], need, shared_info,
+                                                         ~np.any(nod, axis=0))
+    else:
+        out["n_shared_companions"], out["shared_light_frac"] = -1, np.nan
 
     window, nbad = banks[n].find(need, rng, cc["sky_tries"]) if need.any() else (None, 0)
     flux, var, mbits = fill(img, ox, oy, n, need, window)
@@ -271,7 +298,7 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     diag = None
     out["cut8_evaluated"] = False
     if 0 <= dox and dox + nd <= W and 0 <= doy and doy + nd <= H:
-        dneed = make_need(nd, dox, doy)
+        dneed, _ = make_need(nd, dox, doy)
         dwin, dbad = banks[nd].find(dneed, rng, cc["sky_tries"]) if dneed.any() else (None, 0)
         dflux, _, dbits = fill(img, dox, doy, nd, dneed, dwin)
         dxc, dyc = x - dox, y - doy
