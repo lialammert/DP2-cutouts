@@ -428,3 +428,29 @@ def test_latent_loss_defaults_and_launched_runs():
     assert s1["ablations"]["s1_latent_cross_dropout"]["dropout"] > 0
     assert set(s1["default_runs"]) <= set(s1["ablations"]) and "s1_latent" not in s1["default_runs"]
     assert s2["default_runs"] == ["s2_latent"]
+
+
+def test_vae_audit_gradient_through_relu_and_regions():
+    # A dead output (pre-activation <= 0 everywhere) passes no gradient although the NLL wants the mean to move;
+    # the galaxy / sky regions come from the catalogue ellipse only; catalogue S/N is 5 at the local depth.
+    from dp2_cutouts.ml import vae_audit as A
+
+    rng = np.random.default_rng(0)
+    N, H, C = 3, 15, 2
+    x = rng.normal(0.0, 0.05, (N, H, H, C)).astype(np.float32)
+    x[:, 6:9, 6:9, :] += 0.5                       # a galaxy in both bands
+    pre_mu = np.stack([np.full((N, H, H), 0.3), np.full((N, H, H), -0.2)], axis=-1)   # band 1 dead
+    mu, sigma = np.maximum(pre_mu, 0.0), np.full_like(x, 0.1)
+    pre_sc = np.ones_like(x)
+    gal, sky = A.regions((H, H), np.full((N, 2), 7.0), np.tile([1.0, 1.0, 0.0], (N, 1)), 2.0, 4.0)
+    assert gal[:, 7, 7].all() and not sky[:, 7, 7].any() and sky[:, 0, 0].all() and not (gal & sky).any()
+    st = A.band_stats(x, mu, sigma, pre_mu, pre_sc, gal)
+    assert st[1]["frac_pre_mu_negative"] == 1.0 and st[1]["frac_mu_zero"] == 1.0
+    assert st[1]["mean_abs_dL_dmu"] > 0 and st[1]["frac_gradient_blocked_mu"] == 1.0
+    assert st[1]["bias_gradient_mu"] == 0.0 and st[1]["bias_gradient_mu_without_relu"] < 0   # wants mu up, gets nothing
+    assert st[0]["frac_gradient_blocked_mu"] == 0.0
+    nll = A.gaussian_nll(np.array(0.1), np.array(0.0), np.array(0.1))
+    assert nll == pytest.approx(0.5 + np.log(0.1) + 0.5 * np.log(2 * np.pi))
+    assert A.catalogue_snr(24.0, 24.0) == pytest.approx(5.0) and A.catalogue_snr(21.5, 24.0) == pytest.approx(50.0)
+    f = A.aperture_flux(x, gal)
+    assert f.shape == (N, C) and np.all(f > 2.0)
