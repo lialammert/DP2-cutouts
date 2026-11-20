@@ -18,7 +18,7 @@ import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 
-BINS = [(0.0, 0.01), (0.01, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, np.inf)]
+BINS = [(-np.inf, 0.01), (0.01, 0.05), (0.05, 0.1), (0.1, 0.2), (0.2, 0.5), (0.5, np.inf)]
 PER_BIN = 4
 
 
@@ -45,7 +45,8 @@ def main(patch_dir, out, column="companion_light_ratio"):
     print("masked_fraction_in_ellipse > 0.5 (target itself masked):",
           round(float((t["masked_fraction_in_ellipse"].astype(float) > 0.5).mean()), 3))
     print(f"medians by {column} bin:")
-    g = t.groupby(pd.cut(s, [b[0] for b in BINS] + [np.inf], include_lowest=True), observed=True)
+    g = t.groupby(pd.cut(s, [b[0] for b in BINS] + [np.inf]), observed=True)
+    print("NaN:", int(s.isna().sum()), "| negative:", int((s < 0).sum()))
     other = [c for c in ("companion_light_ratio", "i_blendedness") if c != column]
     print(pd.concat([g.size().rename("n"), g[other + ["masked_fraction_in_ellipse", "shared_flux_ratio_max",
                                                      "i_cModel_mag"]].median().round(3)], axis=1).to_string())
