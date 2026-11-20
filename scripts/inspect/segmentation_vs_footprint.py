@@ -6,9 +6,10 @@
 # centre, the 422 targets of notebooks 02 and 03). Each target goes through the stamp stage once per method (same
 # random sky windows); prints how many are cut by the masking decision (mask_pass), by cut 8 and in total, and
 # draws raw | footprint masking | segmentation masking for the targets whose fate changes.
-# Downloads the MER_SEG tiles that cover the region (about 2.7 GB each, cached): run it on prepost.
+# Downloads the MER_SEG tiles that cover the region (about 2.7 GB each, cached): run it on prepost the first time,
+# then anywhere with --offline (tiles read from the cache).
 # Usage: python scripts/inspect/segmentation_vs_footprint.py <pipeline config> <tract_patch> <out dir>
-#            [--seg-grow 0 2 4] [--demo-px 1000 | --demo-px 0 for the whole patch] [--cache DIR]
+#            [--seg-grow 0 2 4] [--demo-px 1000 | --demo-px 0 for the whole patch] [--cache DIR] [--offline]
 
 import argparse
 import json
@@ -42,6 +43,7 @@ def main():
     ap.add_argument("--seg-grow", type=int, nargs="+", default=[0, 2, 4])
     ap.add_argument("--demo-px", type=int, default=1000)
     ap.add_argument("--cache", default=os.path.join(os.environ.get("SCRATCH", "."), "euclid_mer_seg"))
+    ap.add_argument("--offline", action="store_true", help="use the tiles already in --cache, no network")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -80,9 +82,16 @@ def main():
     gy0, gy1 = max(ry0 - dhalf - 2, 0), min(ry1 + dhalf + 2, H)
     ra_c, dec_c = w.pixel_to_world_values(0.5 * (gx0 + gx1), 0.5 * (gy0 + gy1))
     radius = 0.2 / 3600 * 0.5 * np.hypot(gx1 - gx0, gy1 - gy0) * 1.1
-    tiles = euclid_seg.find_tiles(float(ra_c), float(dec_c), radius)
+    if args.offline:
+        # No network (compute partitions): every tile already in the cache; those outside the region add nothing.
+        paths = sorted(Path(args.cache).glob("*/EUC_MER_FINAL-SEGMAP_TILE*.fits"))
+        tiles = [p.parent.name for p in paths]
+        if not paths:
+            raise SystemExit(f"--offline: no segmentation map in {args.cache} (run once on prepost to download)")
+    else:
+        tiles = euclid_seg.find_tiles(float(ra_c), float(dec_c), radius)
+        paths = [euclid_seg.download(euclid_seg.seg_url(t), Path(args.cache) / t) for t in tiles]
     print(f"MER tiles: {tiles}  ({time.time() - t0:.0f} s)")
-    paths = [euclid_seg.download(euclid_seg.seg_url(t), Path(args.cache) / t) for t in tiles]
     for p in paths:
         print(f"  {p}  {p.stat().st_size / 1e9:.2f} GB")
     from astropy.io import fits
