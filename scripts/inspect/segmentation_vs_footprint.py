@@ -26,6 +26,7 @@ import pandas as pd  # noqa: E402
 
 from dp2_cutouts.common import masks  # noqa: E402
 from dp2_cutouts.config import Config  # noqa: E402
+from dp2_cutouts.pairs.store import Store  # noqa: E402
 from dp2_cutouts.pipeline.patches import load_patches, patch_case  # noqa: E402
 from dp2_cutouts.sources import euclid_seg  # noqa: E402
 from dp2_cutouts.stages import package, stamps  # noqa: E402
@@ -44,6 +45,8 @@ def main():
     ap.add_argument("--demo-px", type=int, default=1000)
     ap.add_argument("--cache", default=os.path.join(os.environ.get("SCRATCH", "."), "euclid_mer_seg"))
     ap.add_argument("--offline", action="store_true", help="use the tiles already in --cache, no network")
+    ap.add_argument("--d1", help="D1 dataset for the Euclid VIS view of the targets (default: datasets/d1 or "
+                                 "datasets_v0/d1 under DP2_ML_ROOT)")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -158,32 +161,79 @@ def main():
     lost, gained = a.index[a["final"] & ~b["final"]], a.index[~a["final"] & b["final"]]
     print(f"{main_name} vs footprint: {len(lost)} kept before and cut now, {len(gained)} cut before and kept now")
 
-    # Figures: raw | footprint | segmentation, red = filled pixels.
+    # Figures, one target per row: raw | after footprint masking | light it removed | after segmentation masking |
+    # light it removed. Masked pixels are refilled with real sky, so they look like the background: the red outline
+    # and the "removed" columns (raw - masked, same stretch as raw) show what was taken out.
+    # Euclid views of the targets: the VIS stamp of D1 (same 11.8" field, 0.1" pixels) when the target is in D1,
+    # and the MER segmentation on the Rubin stamp grid (target segments orange, every other segment its own colour).
+    root = os.environ.get("DP2_ML_ROOT", "")
+    d1_path = args.d1 or next((q for q in (os.path.join(root, "datasets", "d1"), os.path.join(root, "datasets_v0", "d1"))
+                               if os.path.exists(os.path.join(q, "info.json"))), None)
+    d1_row, d1 = {}, None
+    if d1_path:
+        d1 = Store(d1_path)
+        d1_row = {int(o): i for i, o in enumerate(d1.meta["object_id"].to_numpy(np.int64))}
+        vis_band = list(d1.info.get("euclid_bands", ["VIS"])).index("VIS")
+        print(f"Euclid VIS stamps from {d1_path}")
+    pos_of = {int(o): (int(x_), int(y_)) for o, x_, y_ in zip(targets["object_id"], targets["ix"], targets["iy"])}
+
+    def euclid_vis(oid):
+        i = d1_row.get(int(oid))
+        return None if i is None else np.asarray(d1.take("euclid_flux", [i])[0][..., vis_band], np.float32)
+
+    def seg_rgb(oid):
+        ix, iy = pos_of[int(oid)]
+        L = img["seg"][:, iy - half:iy + half + 1, ix - half:ix + half + 1]
+        lab = L[0].copy()
+        for k_ in range(1, L.shape[0]):
+            lab = np.where(lab == 0, L[k_], lab)
+        centre = L[:, half - 1:half + 2, half - 1:half + 2]
+        tgt = set(np.unique(centre[centre != 0]).tolist())
+        rgb = np.ones(lab.shape + (3,))
+        cmap = plt.get_cmap("tab20")
+        for v in np.unique(lab[lab != 0]):
+            rgb[lab == v] = (1.0, 0.55, 0.0) if int(v) in tgt else cmap(int(v) % 20)[:3]
+        return rgb
+
     def draw(pick, path, title):
         pick = [i for i in pick if ("footprint", int(i)) in pix and (main_name, int(i)) in pix]
         if not pick:
             return
-        fig, axes = plt.subplots(len(pick), 3, figsize=(6.3, 2.2 * len(pick)), squeeze=False)
+        fig, axes = plt.subplots(len(pick), 7, figsize=(14.7, 2.2 * len(pick)), squeeze=False)
+        heads = ["Rubin i raw (before masking)", "Euclid VIS (D1)", "Euclid segmentation (orange: target)",
+                 "footprint masking (now)", "removed by footprint",
+                 main_name.replace("_", " ") + " masking", "removed by segmentation"]
         for r_, oid in enumerate(pick):
             raw, f_old, m_old = pix[("footprint", int(oid))]
             _, f_new, m_new = pix[(main_name, int(oid))]
             s = float(np.nanpercentile(np.abs(raw), 99.5)) or 1.0
-            for ax, im, m, t in ((axes[r_, 0], raw, None, "raw"),
-                                 (axes[r_, 1], f_old, m_old, "footprint (now)"),
-                                 (axes[r_, 2], f_new, m_new, main_name.replace("_", " "))):
-                ax.imshow(stretch(im, s), origin="lower", cmap="gray_r")
+            ev = euclid_vis(oid)
+            panels = ((raw, None), ("vis", None), ("seg", m_new), (f_old, m_old), (raw - f_old, m_old),
+                      (f_new, m_new), (raw - f_new, m_new))
+            for c_, (im, m) in enumerate(panels):
+                ax = axes[r_, c_]
+                if isinstance(im, str) and im == "vis":
+                    if ev is None:
+                        ax.text(0.5, 0.5, "not in D1", ha="center", va="center", fontsize=7, transform=ax.transAxes)
+                    else:
+                        ax.imshow(stretch(ev, float(np.nanpercentile(np.abs(ev), 99.5)) or 1.0), origin="lower",
+                                  cmap="gray_r")
+                elif isinstance(im, str) and im == "seg":
+                    ax.imshow(seg_rgb(oid), origin="lower")
+                else:
+                    ax.imshow(stretch(im, s), origin="lower", cmap="gray_r")
                 if m is not None and m.any():
                     ax.contour(m, levels=[0.5], colors="tab:red", linewidths=0.6)
                 ax.set_xticks([])
                 ax.set_yticks([])
                 if r_ == 0:
-                    ax.set_title(t, fontsize=8)
+                    ax.set_title(heads[c_], fontsize=8)
             fa, fb = ("kept" if a.loc[oid, "final"] else "cut"), ("kept" if b.loc[oid, "final"] else "cut")
             axes[r_, 0].set_ylabel(f"S/N_i {a.loc[oid, 'cut6_value']:.0f}: {fa} -> {fb}\ndelta_e mask "
                                    f"{a.loc[oid, 'delta_e_mask']:.3f} -> {b.loc[oid, 'delta_e_mask']:.3f}", fontsize=6)
-        fig.suptitle(title, fontsize=8)
-        fig.tight_layout()
-        fig.savefig(out / path, dpi=130)
+        fig.suptitle(title + "\none target per row, i band; red outline: pixels replaced by sky", fontsize=8, y=1.0)
+        fig.tight_layout(rect=(0, 0, 1, 0.98))
+        fig.savefig(out / path, dpi=130, bbox_inches="tight")
 
     diff = (b["masked_fraction"] - a["masked_fraction"]).abs()
     pick = list(lost[:5]) + list(gained[:3])
