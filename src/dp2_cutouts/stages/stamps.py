@@ -19,7 +19,7 @@ from astropy.wcs import WCS
 from scipy.ndimage import binary_dilation, label
 
 from ..common import masks
-from ..common.ellipse import (FWHM2SIGMA, euclid_ellipse, moments_to_ellipse, psf_ellipse,
+from ..common.ellipse import (FWHM2SIGMA, elliptical_radius, euclid_ellipse, moments_to_ellipse, psf_ellipse,
                               radius_map)
 from ..common.shapes import adaptive_moments, circular_weight, delta_e
 from ..sources.rubin_soda import BANDS, tract_origin
@@ -130,6 +130,52 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
         elif not (inside and det[iy, ix]):
             m |= radius_map(shape, x, y, r.a, r.b, r.theta) <= 1.0
     return m, dict(n_shared=n_shared, flux_ratio_max=ratio_max)
+
+
+def companion_mask_segmentation(detected, seg, shape, ox, oy, target, grow_px, seg_grow_px):
+    # "segmentation" method: the pixels Euclid assigns to each source (MER segmentation map, sampled on the Rubin
+    # grid at sub-pixel points, see sources/euclid_seg.py) separate what the merged Rubin DETECTED plane cannot:
+    # a companion touching the target is masked over its own pixels, however large, instead of a multiple of its
+    # ellipse.
+    # - target segments: the one under the target centre, and any whose centroid lies inside the target's Rubin
+    #   ellipse (Euclid often cuts one galaxy into several segments: they stay);
+    # - every other segment touching a pixel (at any of its sub-pixel points) is masked, grown by seg_grow_px
+    #   Rubin pixels for the wider Rubin PSF (its light spreads past the VIS segment), never into the target's
+    #   segments;
+    # - Rubin footprints that do not contain the target are masked as in the footprint method (sources that
+    #   Euclid did not segment, e.g. outside its coverage).
+    h, w = shape
+    det = detected[oy:oy + h, ox:ox + w]
+    labels, _ = label(det, structure=np.ones((3, 3), int))
+    xt, yt, a, b, th = target[:5]
+    it, jt = int(np.floor(yt + 0.5)), int(np.floor(xt + 0.5))
+    lt = labels[it, jt] if (0 <= it < h and 0 <= jt < w) else 0
+    target_fp = labels == lt if lt > 0 else np.zeros(shape, bool)
+    m = det & ~target_fp
+    if grow_px > 0 and m.any():
+        m = binary_dilation(m, iterations=int(grow_px)) & ~target_fp
+
+    L = seg[:, oy:oy + h, ox:ox + w]
+    ids, inv = np.unique(L, return_inverse=True)
+    inv = inv.reshape(L.shape)
+    rows, cols = np.indices(shape)
+    k = L.shape[0]
+    cnt = np.bincount(inv.ravel(), minlength=len(ids)).astype(float)
+    cx = np.bincount(inv.ravel(), weights=np.broadcast_to(cols, L.shape).ravel(), minlength=len(ids)) / cnt
+    cy = np.bincount(inv.ravel(), weights=np.broadcast_to(rows, L.shape).ravel(), minlength=len(ids)) / cnt
+    is_target = (elliptical_radius(cx - xt, cy - yt, a, b, th) <= 1.0) & (ids != 0)
+    if 0 <= it < h and 0 <= jt < w:
+        is_target |= np.isin(ids, L[:, it, jt]) & (ids != 0)
+    t_pix = is_target[inv]
+    n_pix = (L != 0) & ~t_pix
+    target_core = t_pix.any(axis=0)
+    neigh = n_pix.any(axis=0)
+    if seg_grow_px > 0 and neigh.any():
+        neigh = binary_dilation(neigh, iterations=int(seg_grow_px))
+    neigh &= ~target_core
+    info = dict(n_target_segments=int(is_target.sum()), n_other_segments=int(((ids != 0) & ~is_target).sum()),
+                target_segment_px=int(target_core.sum()), sub_samples=int(k))
+    return m | neigh, info
 
 
 EXP_HALF_LIGHT = 1.678  # half-light radius of an exponential profile, in scale lengths
@@ -290,7 +336,14 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
             return companion_mask_footprint(img["detected"], (size, size), bx, by,
                                             (x - bx, y - by, a, b, th, f_target), comp, pad, mc["grow_px"],
                                             mc["shared_k"])
-        raise ValueError('masking.method must be "ellipse" or "footprint"')
+        if mc["method"] == "segmentation":
+            if "seg" not in img:
+                raise RuntimeError('masking.method "segmentation" needs the Euclid segmentation on the Rubin grid '
+                                   '(img["seg"], sources/euclid_seg.seg_on_grid)')
+            need_s, _ = companion_mask_segmentation(img["detected"], img["seg"], (size, size), bx, by,
+                                                    (x - bx, y - by, a, b, th), mc["grow_px"], mc["seg_grow_px"])
+            return need_s, None
+        raise ValueError('masking.method must be "ellipse", "footprint" or "segmentation"')
 
     need, shared_info = make_need(n, ox, oy)
     out["masked_fraction"] = float(need.mean())

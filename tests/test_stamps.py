@@ -84,3 +84,54 @@ def test_companion_light_left_on_the_target():
     alone = comp_at(0.0, 0.0).iloc[:0]
     assert companion_light_ratio(shape, target, alone, usable) == 0.0
     assert np.isnan(companion_light_ratio(shape, (*target[:5], np.nan), bright, usable))
+
+
+def test_segmentation_masks_the_neighbour_segment_not_the_target_fragments():
+    # Euclid cuts the target into two segments (1 under the centre, 3 inside its ellipse) and a neighbour (2)
+    # touches it. Only the neighbour is masked, grown by seg_grow_px, never into the target's segments.
+    from dp2_cutouts.stages.stamps import companion_mask_segmentation
+
+    shape = (21, 21)
+    lab = np.zeros(shape, np.int64)
+    lab[8:13, 6:11] = 1      # target, centre (10, 8) in (row, column) = (y, x) ... x 6-10
+    lab[8:13, 11:13] = 3     # fragment of the target, centroid x 11.5, inside its ellipse
+    lab[8:13, 13:19] = 2     # neighbour touching the fragment
+    seg = np.broadcast_to(lab, (4,) + shape).copy()
+    detected = lab > 0       # one merged Rubin footprint
+    target = (8.0, 10.0, 4.0, 3.0, 0.0)
+    need, info = companion_mask_segmentation(detected, seg, shape, 0, 0, target, 2, 0)
+    assert info["n_target_segments"] == 2 and info["n_other_segments"] == 1
+    assert need[10, 15] and not need[10, 8] and not need[10, 12]
+    grown, _ = companion_mask_segmentation(detected, seg, shape, 0, 0, target, 2, 2)
+    assert grown[10, 19] and grown[10, 20] and not grown[10, 12]   # grows outwards, not into the fragment
+    assert (grown & (lab == 1)).sum() == 0 and (grown & (lab == 3)).sum() == 0
+
+
+def test_euclid_segmentation_is_sampled_on_the_rubin_grid(tmp_path):
+    # A 0.1" Euclid tile and a 0.2" Rubin grid on the same sky: every Rubin pixel sees the 2 x 2 Euclid pixels it
+    # covers, so a one-Euclid-pixel segment reaches exactly one Rubin pixel.
+    from astropy.io import fits
+
+    from dp2_cutouts.sources.euclid_seg import seg_on_grid
+
+    def tan(scale, crpix):
+        w = WCS(naxis=2)
+        w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        w.wcs.crval = [53.1, -27.8]
+        w.wcs.crpix = crpix
+        w.wcs.cd = [[-scale / 3600, 0.0], [0.0, scale / 3600]]
+        return w
+
+    lab = np.zeros((200, 200), np.int64)
+    lab[100, 100] = 7                      # Euclid pixel (x 100, y 100) = Rubin pixel (50, 50) below
+    lab[40:60, 140:160] = 9
+    path = tmp_path / "seg.fits"
+    fits.PrimaryHDU(lab, header=tan(0.1, [101.0, 101.0]).to_header()).writeto(path)
+    wr = tan(0.2, [50.75, 50.75])          # Rubin pixel 50 spans Euclid pixels 100 and 101 (0-based)
+    out = seg_on_grid([path], wr, (100, 100))
+    assert out.shape == (4, 100, 100)
+    seen7 = np.argwhere((out == 7).any(axis=0))
+    assert seen7.tolist() == [[50, 50]]
+    assert (out == 7).sum() == 1
+    nine = (out == 9).any(axis=0)
+    assert nine[25, 75] and nine.sum() == 100
