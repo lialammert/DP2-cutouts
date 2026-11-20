@@ -395,3 +395,36 @@ def test_blend_flux_ratio_is_companion_over_target():
     assert (plan["d1_row"] != plan["companion_row"]).all()
     with pytest.raises(RuntimeError, match="only"):
         blends.draw(meta.iloc[:2], "test", 5, dict(cb, flux_ratio=[50.0, 60.0]), rng, max_tries_per_blend=10)
+
+
+def test_loss_ablations_in_the_ml_config():
+    # Stage 1: latent + cross are the main losses, InfoNCE optional (lambda_NCE = weights.infonce, off by default);
+    # the "with / without InfoNCE" ablations differ by that term only. Stage 2: latent matching, no InfoNCE.
+    import yaml
+    from pathlib import Path
+
+    cfg = yaml.safe_load((Path(__file__).parents[1] / "config" / "ml_jeanzay.yaml").read_text())
+    s1, s2 = cfg["stage1"], cfg["stage2"]
+    assert s1["weights"]["latent"] > 0 and s1["weights"]["cross"] > 0 and s1["weights"]["infonce"] == 0
+    off, on = s1["ablations"]["s1_latent_cross"], s1["ablations"]["s1_latent_cross_nce"]
+    assert off["infonce"] == 0 and on["infonce"] > 0
+    assert {k: v for k, v in on.items() if k != "infonce"} == {k: v for k, v in off.items() if k != "infonce"}
+    assert s2["weights"]["latent"] > 0 and s2["weights"]["infonce"] == 0
+    assert all(w.get("infonce", 0) == 0 for w in s2["ablations"].values())
+
+
+def test_latent_loss_defaults_and_launched_runs():
+    # Direct latent matching by default in both stages, the whitened loss as an ablation; the runs launched by
+    # default leave out s1_latent and s2_latent_scene; dropout is tested on the Euclid encoder.
+    import yaml
+    from pathlib import Path
+
+    cfg = yaml.safe_load((Path(__file__).parents[1] / "config" / "ml_jeanzay.yaml").read_text())
+    s1, s2 = cfg["stage1"], cfg["stage2"]
+    assert s1["latent_loss"] == "mu_mse" and s2["latent_loss"] == "mu_mse"
+    assert s1["ablations"]["s1_latent_cross_whitened"]["latent_loss"] == "mu_whitened"
+    assert s2["ablations"]["s2_latent_whitened"]["latent_loss"] == "mu_whitened"
+    assert s1["euclid_encoder"]["dropout"] == 0.0
+    assert s1["ablations"]["s1_latent_cross_dropout"]["dropout"] > 0
+    assert set(s1["default_runs"]) <= set(s1["ablations"]) and "s1_latent" not in s1["default_runs"]
+    assert s2["default_runs"] == ["s2_latent"]

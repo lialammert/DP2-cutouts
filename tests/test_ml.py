@@ -140,3 +140,37 @@ def test_units_follow_the_vae(tmp_path):
     cfg["rubin"]["vae_units"] = "lsst_electrons"
     with pytest.raises(ValueError):
         UnitConverter.for_vae(cfg, vae)
+
+
+def test_ablation_settings_override_latent_loss_and_dropout():
+    # An ablation entry gives loss weights, and may set latent_loss and the Euclid encoder dropout; those two never
+    # end up among the weights.
+    from dp2_cutouts.ml import stage1, stage2
+
+    cfg = dict(stage1=dict(latent_loss="mu_mse", euclid_encoder=dict(dropout=0.0), weights=dict(latent=1.0),
+                           ablations=dict(a=dict(latent=1.0, cross=1.0, infonce=0.1, dropout=0.2),
+                                          b=dict(latent=1.0, cross=1.0, infonce=0.0, latent_loss="mu_whitened"))),
+               stage2=dict(latent_loss="mu_mse", scene=dict(enabled=False, weight=1.0), weights=dict(latent=1.0),
+                           ablations=dict(w=dict(latent=1.0, infonce=0.0, scene=0.0, latent_loss="mu_whitened"))))
+    s = stage1.settings(cfg, "a")
+    assert s["euclid_encoder"]["dropout"] == 0.2 and s["latent_loss"] == "mu_mse"
+    assert s["weights"] == dict(latent=1.0, cross=1.0, infonce=0.1)
+    s = stage1.settings(cfg, "b")
+    assert s["latent_loss"] == "mu_whitened" and s["euclid_encoder"]["dropout"] == 0.0 and "latent_loss" not in s["weights"]
+    assert stage1.settings(cfg)["latent_loss"] == "mu_mse"
+    s = stage2.settings(cfg, "w")
+    assert s["latent_loss"] == "mu_whitened" and "latent_loss" not in s["weights"] and not s["scene"]["enabled"]
+
+
+def test_euclid_encoder_dropout_acts_in_training_only():
+    pytest.importorskip("debvader")
+    from dp2_cutouts.ml.models import EuclidEncoder
+
+    keras.utils.set_random_seed(0)
+    enc = EuclidEncoder(4, filters=(4, 8), cond_embedding=4, dense=16, dropout=0.5)
+    x = [np.random.default_rng(0).normal(size=(2, 16, 16, 1)).astype("float32"), np.ones((2, 3), "float32")]
+    a, b = (np.asarray(enc(x, training=False)) for _ in range(2))
+    assert np.allclose(a, b)                                   # inference: deterministic
+    c, d = (np.asarray(enc(x, training=True)) for _ in range(2))
+    assert not np.allclose(c, d)                               # training: dropout draws differ
+    assert EuclidEncoder.from_config(enc.get_config()).dropout_rate == 0.5

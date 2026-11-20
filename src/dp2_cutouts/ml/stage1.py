@@ -3,9 +3,11 @@
 # AstroDeep Project
 # Stage 1: a Euclid encoder E_E trained to place a Euclid image of a galaxy where the frozen DebVAder encoder E_R
 # places the Rubin image of the same galaxy, so that the frozen Rubin decoder D_R turns it into the Rubin view.
-#   latent  L(mu_E, mu_R)                       (mu_mse | mu_whitened | gaussian_kl)
-#   cross   L(D_R(mu_E), target)                target = observed Rubin stamp or D_R(mu_R)
-#   infonce symmetric InfoNCE between projections of mu_E and mu_R (optional)
+#   latent  L(mu_E, mu_R)                       (mu_mse | mu_whitened | gaussian_kl)        main loss
+#   cross   L(D_R(mu_E), target)                target = observed Rubin stamp or D_R(mu_R)  main loss
+#   infonce symmetric InfoNCE between projections of mu_E and mu_R: optional, coefficient lambda_NCE =
+#           weights.infonce (0 = off, no projection heads); its benefit is tested by the s1_latent_cross /
+#           s1_latent_cross_nce ablations, not assumed
 # E_R and D_R never move (checked by fingerprints before / after). The reference latents are computed online on the
 # same augmented Rubin input as the Euclid one, never cached, so that flips do not desynchronise them.
 
@@ -33,7 +35,7 @@ class Stage1Model(keras.Model):
         self.rubin_decoder.trainable = False
         ee = s1["euclid_encoder"]
         self.euclid_encoder = EuclidEncoder(self.D, ee["filters"], ee["cond_embedding"], ee["dense"],
-                                            name="euclid_encoder")
+                                            ee.get("dropout", 0.0), name="euclid_encoder")
         self.weights_ = {k: float(v) for k, v in s1["weights"].items()}
         self.latent_kind, self.cross_kind = s1["latent_loss"], s1["cross_loss"]
         self.cross_target = s1["cross_target"]
@@ -134,11 +136,17 @@ def latent_reference(vae, cfg, max_n=20000, batch=256):
 
 
 def settings(cfg, ablation=None):
+    # An ablation gives the loss weights, and may also set latent_loss and the Euclid encoder dropout.
     s1 = json.loads(json.dumps(cfg["stage1"]))
     if ablation:
         if ablation not in s1["ablations"]:
             raise KeyError(f"unknown Stage 1 ablation {ablation!r}; known: {sorted(s1['ablations'])}")
-        s1["weights"] = dict(s1["ablations"][ablation])
+        w = dict(s1["ablations"][ablation])
+        if "latent_loss" in w:
+            s1["latent_loss"] = w.pop("latent_loss")
+        if "dropout" in w:
+            s1["euclid_encoder"]["dropout"] = float(w.pop("dropout"))
+        s1["weights"] = w
     return s1
 
 
@@ -195,7 +203,8 @@ def train(cfg, debvader_run, run_name, ablation=None, stats_path=None, resume=Tr
 def load_euclid_encoder(cfg, run_dir, latent_dim, tag="best"):
     run = json.loads((run_dir / "run.json").read_text())
     ee = run["settings"]["euclid_encoder"]
-    enc = EuclidEncoder(latent_dim, ee["filters"], ee["cond_embedding"], ee["dense"], name="euclid_encoder")
+    enc = EuclidEncoder(latent_dim, ee["filters"], ee["cond_embedding"], ee["dense"], ee.get("dropout", 0.0),
+                        name="euclid_encoder")
     n_e = int(cfg["euclid"]["stamp_px"])
     enc([ops.zeros((1, n_e, n_e, len(cfg["euclid"]["encoder_bands"]))),
          ops.zeros((1, len(cfg["dataset1"]["cond_features"])))])

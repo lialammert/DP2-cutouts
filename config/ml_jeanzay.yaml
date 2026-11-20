@@ -122,7 +122,12 @@ stage1:
     filters: [32, 64, 128, 256, 256]
     cond_embedding: 64
     dense: 512
-  latent_loss: mu_whitened      # mu_mse | mu_whitened | gaussian_kl
+    # Dropout on the dense part of E_E (training only; 0 = none). Earlier CLIP experiments on DebVAder latents did
+    # not work without dropout: its effect is tested by the *_dropout ablations. The Rubin VAE stays frozen.
+    dropout: 0.0
+  # Direct matching in the latent space of the frozen Rubin decoder. mu_whitened (each direction divided by its
+  # spread, which can overweight nearly inactive dimensions) is the s1_latent_cross_whitened ablation.
+  latent_loss: mu_mse           # mu_mse | mu_whitened | gaussian_kl
   cross_loss: normalised_mse    # normalised_mse | gaussian_nll | chi2_physical
   cross_target: observation     # observation | reference_reconstruction
   band_weights: [1, 1, 1, 1, 1, 1]
@@ -131,6 +136,9 @@ stage1:
     temperature: 0.07
     learn_temperature: true
     space: mu                    # projections of the posterior means (the only option implemented)
+  # Main losses: latent matching and Rubin cross-reconstruction. InfoNCE is an optional term whose coefficient is
+  # lambda_NCE = weights.infonce (0: off, no projection heads are built). Whether it helps is tested, not assumed:
+  # the ablations s1_latent_cross and s1_latent_cross_nce differ by that term only.
   weights: {latent: 1.0, cross: 1.0, infonce: 0.0}
   # Random elliptical holes filled with sky from the same stamp, so that the encoder meets the masked inputs of D2.
   mask_augment_prob: 0.3
@@ -140,11 +148,23 @@ stage1:
   learning_rate: 0.0003
   clipnorm: 1.0
   early_stopping_patience: 30
-  # Ablations of section 6C: run names and the loss weights each one overrides.
+  # Ablations of section 6C: run names, the loss weights each one overrides, and optionally latent_loss and the
+  # Euclid encoder dropout.
+  #   s1_latent_cross              main losses only (reference)
+  #   s1_latent_cross_nce          the same plus InfoNCE, lambda_NCE = its infonce weight
+  #   s1_latent_cross_dropout      reference with dropout in E_E
+  #   s1_latent_cross_nce_dropout  InfoNCE and dropout (2 x 2 with the three above: each effect and their pairing)
+  #   s1_latent_cross_whitened     reference with the whitened latent loss
+  #   s1_latent                    latent matching alone (what the cross-reconstruction adds); not a priority
   ablations:
-    s1_latent: {latent: 1.0, cross: 0.0, infonce: 0.0}
     s1_latent_cross: {latent: 1.0, cross: 1.0, infonce: 0.0}
-    s1_latent_cross_clip: {latent: 1.0, cross: 1.0, infonce: 0.1}
+    s1_latent_cross_nce: {latent: 1.0, cross: 1.0, infonce: 0.1}
+    s1_latent_cross_dropout: {latent: 1.0, cross: 1.0, infonce: 0.0, dropout: 0.1}
+    s1_latent_cross_nce_dropout: {latent: 1.0, cross: 1.0, infonce: 0.1, dropout: 0.1}
+    s1_latent_cross_whitened: {latent: 1.0, cross: 1.0, infonce: 0.0, latent_loss: mu_whitened}
+    s1_latent: {latent: 1.0, cross: 0.0, infonce: 0.0}
+  # Launched by `submit_ml.sh stage1` when no run is named (any ablation can still be named explicitly).
+  default_runs: [s1_latent_cross, s1_latent_cross_nce, s1_latent_cross_dropout, s1_latent_cross_nce_dropout]
 
 stage1_acceptance:
   # Viability gate for moving to Stage 2. These numbers are proposals to be validated, not results: they compare
@@ -196,7 +216,7 @@ stage2:
   centering: euclid              # euclid (oracle: stamp centred on the Euclid target) | rubin (Rubin-only)
   init: stage1                   # warm start of the blend encoder: stage1 (reference encoder) | stage2 (DebVAder
                                  # deblender, only for a run that has one, e.g. paper_baseline) | random
-  latent_loss: mu_whitened
+  latent_loss: mu_mse            # direct matching to the teacher latent; mu_whitened: the s2_latent_whitened ablation
   contrastive:
     projection_dims: [256, 128]
     temperature: 0.07
@@ -207,16 +227,20 @@ stage2:
   scene:
     enabled: false
     weight: 1.0
+  # Main loss: latent matching to the frozen Euclid teacher. No InfoNCE for now (the code path stays, off at 0;
+  # to be reconsidered only if the Stage 1 ablation shows a benefit).
   weights: {latent: 1.0, infonce: 0.0}
   batch_size: 128
   epochs: 300
   learning_rate: 0.0001
   clipnorm: 1.0
   early_stopping_patience: 30
+  # s2_latent_scene: optional, not launched for now (first check that the scene consistency is physically defined).
   ablations:
     s2_latent: {latent: 1.0, infonce: 0.0, scene: 0.0}
-    s2_latent_clip: {latent: 1.0, infonce: 0.1, scene: 0.0}
+    s2_latent_whitened: {latent: 1.0, infonce: 0.0, scene: 0.0, latent_loss: mu_whitened}
     s2_latent_scene: {latent: 1.0, infonce: 0.0, scene: 1.0}
+  default_runs: [s2_latent]
 
 evaluation:
   bins:

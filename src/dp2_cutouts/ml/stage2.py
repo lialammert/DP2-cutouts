@@ -4,9 +4,11 @@
 # Stage 2: a Rubin blend encoder E_S (the DebVAder encoder architecture) trained so that, on a Rubin blend centred
 # on a target that Euclid resolves, it returns the latent the frozen Stage 1 teacher E_E gives from the Euclid view
 # of that target alone. The Rubin decoder stays frozen; E_E stays frozen.
-#   latent  L(mu_S, mu_T)                         mu_T = mu(E_E(x_E)), computed online on the same augmentation
+#   latent  L(mu_S, mu_T)                         mu_T = mu(E_E(x_E)), computed online on the same augmentation;
+#           the main loss
 #   infonce symmetric InfoNCE between projections of mu_S and mu_T; negatives whose teacher latents are closer than
-#           the negative_mask_quantile of the train-split distances are dropped (morphological twins)
+#           the negative_mask_quantile of the train-split distances are dropped (morphological twins). Not used for
+#           now (weights.infonce = 0, no ablation): kept for a later test if Stage 1 shows InfoNCE helps
 #   scene   for complete two-target scenes: D_R(mu_S) + D_R(mu_T of the partner), placed at its offset, must explain
 #           the observed Rubin blend (chi^2 in VAE flux units)
 # Warm start of E_S: "stage2" = the DebVAder deblender (paper_baseline stage 2), "stage1" = the reference encoder of
@@ -127,6 +129,8 @@ def settings(cfg, ablation=None):
         if ablation not in s2["ablations"]:
             raise KeyError(f"unknown Stage 2 ablation {ablation!r}; known: {sorted(s2['ablations'])}")
         w = dict(s2["ablations"][ablation])
+        if "latent_loss" in w:
+            s2["latent_loss"] = w.pop("latent_loss")
         s2["scene"]["enabled"] = w.get("scene", 0.0) > 0
         if s2["scene"]["enabled"]:
             s2["scene"]["weight"] = w["scene"]

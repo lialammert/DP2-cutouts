@@ -16,7 +16,7 @@
 #   scripts/jeanzay/ml/submit_ml.sh rubin-vae                      # 3b. DebVAder stage 1 trained on D1 (Rubin),
 #        DEBVADER_RUN = paper_baseline here (template of the architecture); afterwards DEBVADER_RUN is the new run
 #        ($EXPERIMENTS_DIR/<rubin_vae.run_name>) for every step below
-#   scripts/jeanzay/ml/submit_ml.sh stage1 [ablation ...]          # 4. Stage 1 runs (default: every ablation)
+#   scripts/jeanzay/ml/submit_ml.sh stage1 [ablation ...]          # 4. Stage 1 runs (default: stage1.default_runs)
 #   STAGE1_RUN=s1_latent_cross scripts/jeanzay/ml/submit_ml.sh stage2 [ablation ...]   # 5. Stage 2 runs
 #   scripts/jeanzay/ml/submit_ml.sh notebooks                      # 6. executed notebooks with the figures
 #   scripts/jeanzay/ml/submit_ml.sh all                            # 2 to 6 chained (STAGE1_RUN: teacher of 5),
@@ -63,9 +63,11 @@ from dp2_cutouts.pipeline.patches import load_patches
 print(len(load_patches(Config.load('$DP2_CONFIG'))))"
 }
 ablations() {
+    # The runs launched when none is named: <stage>.default_runs, or else every ablation.
     python -c "
 import yaml
-print(' '.join(yaml.safe_load(open('$DP2_ML_CONFIG'))['$1']['ablations']))"
+s = yaml.safe_load(open('$DP2_ML_CONFIG'))['$1']
+print(' '.join(s.get('default_runs') or s['ablations']))"
 }
 
 submit_mmu_mirror() {

@@ -50,10 +50,18 @@ as the architecture template of that run.
   their stamp and band, so the VAE never sees holes; stamps below `rubin_vae.min_valid_fraction` are left out. The
   VAE is trained on the D1 train split only, early-stopped on val: test patches stay unseen by every network.
 - **Stage 1**: Euclid encoder trained to land where the frozen DebVAder encoder puts the Rubin view
-  (latent loss), and so that the frozen decoder gives back the Rubin stamp (cross loss). Ablations in
-  `stage1.ablations`.
+  (latent loss, direct `mu_mse` matching in the frozen decoder's latent space), and so that the frozen decoder
+  gives back the Rubin stamp (cross loss): these two are the main losses. InfoNCE is optional, coefficient
+  λ_NCE = `stage1.weights.infonce` (0 by default), and the Euclid encoder can take dropout
+  (`stage1.euclid_encoder.dropout`, 0 by default; the Rubin VAE stays frozen). Both are measured, not assumed: a
+  2 × 2 of `s1_latent_cross`, `_nce`, `_dropout`, `_nce_dropout` (`stage1.default_runs`; notebook `ml/02_stage1`,
+  "Does InfoNCE help? Does dropout?"). `s1_latent_cross_whitened` and `s1_latent` exist but are not launched by
+  default. Ablations in `stage1.ablations`.
 - **Stage 2**: Rubin blend encoder (DebVAder encoder architecture, warm-started from the reference encoder,
-  `stage2.init`) trained to return the teacher latent of the target. Baselines in the evaluation: the
+  `stage2.init`) trained to return the teacher latent of the target (`mu_mse` latent matching to the frozen Euclid
+  teacher, the main loss; no InfoNCE for now). `s2_latent_whitened` and `s2_latent_scene` (to be launched only
+  once the scene consistency is checked to be physically sound) are not launched by default. Baselines in the
+  evaluation: the
   isolated-galaxy encoder fed the blend, and the untouched DebVAder deblender when the reference run has a stage 2
   (the D1-trained run has none).
 
@@ -123,7 +131,8 @@ To find the run folder: it holds `config.json` and `checkpoints/stage1_best.weig
    Read `datasets/rubin_vae/info.json` (counts per split, filled fraction) and
    `evaluations/phase0_<run>/phase0_report.json`: χ² per pixel near 1, no reconstructed plateau, flux and
    ellipticity residuals centred at every S/N. Then `export DEBVADER_RUN=$EXPERIMENTS_DIR/<run>`.
-4. **Stage 1** — `submit_ml.sh stage1` (every ablation) or `submit_ml.sh stage1 s1_latent_cross`.
+4. **Stage 1** — `submit_ml.sh stage1` (`stage1.default_runs`: the InfoNCE × dropout 2 × 2) or name runs, e.g.
+   `submit_ml.sh stage1 s1_latent_cross_whitened`.
    `evaluations/<run>/stage1_test_summary.json` holds the gate. **Go to Stage 2 only if it passes**, or after
    deciding explicitly which criterion is relaxed and why.
 5. **Stage 2** — `STAGE1_RUN=<chosen Stage 1 run> submit_ml.sh stage2`.
