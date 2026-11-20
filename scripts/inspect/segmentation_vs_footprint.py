@@ -118,6 +118,11 @@ def main():
     for g in args.seg_grow:
         methods[f"segmentation_grow{g}"] = case.derive(case.name, case.data_root, case.sky_box,
                                                        masking={"method": "segmentation", "seg_grow_px": g})
+    for g in args.seg_grow:
+        # Segmentation checked by the catalogues: segments shared between the catalogued objects they hold,
+        # uncatalogued pieces next to the target kept with it (stamps.companion_mask_segmentation_catalog).
+        methods[f"segmentation_catalog_grow{g}"] = case.derive(
+            case.name, case.data_root, case.sky_box, masking={"method": "segmentation_catalog", "seg_grow_px": g})
     ib = stamps.BANDS.index("i")
     n = cc["stamp_px"]
     res, pix = {}, {}
@@ -146,7 +151,9 @@ def main():
                             final_kept=int(R["final"].sum()),
                             median_masked_fraction=round(float(R["masked_fraction"].median()), 3),
                             median_companion_light=round(float(R["companion_light_ratio"].median()), 4),
-                            companion_light_above_0p1=int((R["companion_light_ratio"] > 0.1).sum())))
+                            companion_light_above_0p1=int((R["companion_light_ratio"] > 0.1).sum()),
+                            # What reaches D1: the pipeline's cuts, then D1's companion-light cut (<= 0.1, NaN passes).
+                            passes_both=int((R["final"] & ~(R["companion_light_ratio"] > 0.1)).sum())))
     summary = pd.DataFrame(summary)
     print(summary.to_string(index=False))
     summary.to_csv(out / "summary.csv", index=False)
@@ -155,7 +162,7 @@ def main():
             "companion_light_ratio", "final"]].to_csv(out / f"targets_{name}.csv", index=False)
 
     # Changes of fate, footprint -> main segmentation setting (the middle grow value).
-    main_name = f"segmentation_grow{args.seg_grow[len(args.seg_grow) // 2]}"
+    main_name = f"segmentation_catalog_grow{args.seg_grow[len(args.seg_grow) // 2]}"
     a = res["footprint"].set_index("object_id")
     b = res[main_name].set_index("object_id")
     lost, gained = a.index[a["final"] & ~b["final"]], a.index[~a["final"] & b["final"]]

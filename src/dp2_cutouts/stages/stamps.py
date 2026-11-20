@@ -195,6 +195,102 @@ def companion_mask_segmentation(detected, seg, shape, ox, oy, target, grow_px, s
     return m | neigh, info
 
 
+def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, comp, pad, grow_px, seg_grow_px,
+                                        counterpart=None, keep_k=2.0, dedup_px=2.0):
+    # "segmentation_catalog" method: the Euclid segmentation decides where the edges are, the catalogues decide who
+    # owns what. Every catalogued object (Rubin Object table, Euclid MER catalogue; a Euclid source within dedup_px
+    # of a Rubin object or of the target is the same object) is placed in the segment found at its position.
+    # - a segment holding several catalogued objects (the segmentation merged them, e.g. VIS + NIR combination) is
+    #   shared between them: each pixel goes to the object of smallest reduced radius (distance in units of its own
+    #   ellipse, so that a small source does not take a large galaxy's outskirts); the target keeps its share;
+    # - a segment holding no catalogued object (a clump or arm cut out by Euclid, or a faint uncatalogued source)
+    #   stays with the target when it reaches within keep_k target ellipses, and is masked otherwise;
+    # - a catalogued object with no segment at its position (missed by the segmentation) is masked over its
+    #   half-light ellipse;
+    # - Rubin footprints that do not contain the target are masked as in the footprint method.
+    # Neighbour pixels are grown by seg_grow_px (Rubin PSF), never into the target's pixels.
+    # target: (x, y, a, b, theta) in the box frame; comp: x, y (region frame), a, b, theta, survey.
+    h, w = shape
+    det = detected[oy:oy + h, ox:ox + w]
+    labels, _ = label(det, structure=np.ones((3, 3), int))
+    xt, yt, a, b, th = target[:5]
+    it, jt = int(np.floor(yt + 0.5)), int(np.floor(xt + 0.5))
+    lt = labels[it, jt] if (0 <= it < h and 0 <= jt < w) else 0
+    target_fp = labels == lt if lt > 0 else np.zeros(shape, bool)
+    m = det & ~target_fp
+    if grow_px > 0 and m.any():
+        m = binary_dilation(m, iterations=int(grow_px)) & ~target_fp
+
+    L = seg[:, oy:oy + h, ox:ox + w]
+    lab = L[0].copy()
+    for k in range(1, L.shape[0]):
+        lab = np.where(lab == 0, L[k], lab)
+
+    def label_at(x_, y_):
+        i_, j_ = int(np.floor(y_ + 0.5)), int(np.floor(x_ + 0.5))
+        if not (0 <= i_ < h and 0 <= j_ < w):
+            return None
+        v = L[:, i_, j_]
+        v = v[v != 0]
+        if not len(v):
+            return 0
+        vals, counts = np.unique(v, return_counts=True)       # the segment most of the pixel's points fall in
+        return int(vals[np.argmax(counts)])
+
+    # Catalogued objects: the target first (its counterpart position too), then the others, deduplicated.
+    objs = [dict(x=xt, y=yt, a=a, b=b, th=th, target=True)]
+    anchors = [(xt, yt)]
+    if counterpart is not None:
+        objs.append(dict(x=counterpart[0], y=counterpart[1], a=a, b=b, th=th, target=True))
+        anchors.append(tuple(counterpart))
+    sel = ((comp["x"] > ox - pad) & (comp["x"] < ox + w + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + h + pad))
+    near = comp[sel]
+    rub = near[near["survey"] == "rubin"]
+    rub_pts = np.array([[r.x - ox, r.y - oy] for r in rub.itertuples()] + list(anchors), float).reshape(-1, 2)
+    for r in near.itertuples():
+        x_, y_ = r.x - ox, r.y - oy
+        if r.survey == "euclid" and len(rub_pts) and np.min(np.hypot(rub_pts[:, 0] - x_, rub_pts[:, 1] - y_)) < dedup_px:
+            continue
+        objs.append(dict(x=x_, y=y_, a=r.a, b=r.b, th=r.theta, target=False))
+    for o in objs:
+        o["label"] = label_at(o["x"], o["y"])
+
+    target_pix = np.zeros(shape, bool)
+    neigh = np.zeros(shape, bool)
+    r_target = radius_map(shape, xt, yt, a, b, th)
+    n_split = n_kept_orphan = 0
+    for v in np.unique(lab[lab != 0]):
+        pix = lab == v
+        owners = [o for o in objs if o["label"] == v]
+        if not owners:
+            if (r_target[pix] <= keep_k).any():
+                target_pix |= pix
+                n_kept_orphan += 1
+            else:
+                neigh |= pix
+            continue
+        if all(o["target"] for o in owners):
+            target_pix |= pix
+            continue
+        if not any(o["target"] for o in owners):
+            neigh |= pix
+            continue
+        n_split += 1
+        rr = np.stack([radius_map(shape, o["x"], o["y"], o["a"], o["b"], o["th"]) for o in owners])
+        win = np.argmin(np.where(np.isfinite(rr), rr, np.inf), axis=0)
+        is_t = np.array([o["target"] for o in owners])[win]
+        target_pix |= pix & is_t
+        neigh |= pix & ~is_t
+    for o in objs:
+        if not o["target"] and o["label"] == 0:
+            neigh |= radius_map(shape, o["x"], o["y"], o["a"], o["b"], o["th"]) <= 1.0
+    if seg_grow_px > 0 and neigh.any():
+        neigh = binary_dilation(neigh, iterations=int(seg_grow_px))
+    neigh &= ~target_pix
+    return m | neigh, dict(n_split_segments=n_split, n_orphan_segments_kept=n_kept_orphan,
+                           target_px=int(target_pix.sum()))
+
+
 EXP_HALF_LIGHT = 1.678  # half-light radius of an exponential profile, in scale lengths
 
 
@@ -365,7 +461,19 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                                                     (x - bx, y - by, a, b, th), mc["grow_px"], mc["seg_grow_px"],
                                                     counterpart=cp)
             return need_s, None
-        raise ValueError('masking.method must be "ellipse", "footprint" or "segmentation"')
+        if mc["method"] == "segmentation_catalog":
+            if "seg" not in img:
+                raise RuntimeError('masking.method "segmentation_catalog" needs img["seg"] '
+                                   '(sources/euclid_seg.seg_on_grid)')
+            cp = None
+            if pd.notna(row.euclid_ra):
+                ex, ey = img["wcs"][ib].world_to_pixel_values(row.euclid_ra, row.euclid_dec)
+                cp = (float(ex) - bx, float(ey) - by)
+            need_s, _ = companion_mask_segmentation_catalog(img["detected"], img["seg"], (size, size), bx, by,
+                                                            (x - bx, y - by, a, b, th), comp, pad, mc["grow_px"],
+                                                            mc["seg_grow_px"], counterpart=cp)
+            return need_s, None
+        raise ValueError('masking.method must be "ellipse", "footprint", "segmentation" or "segmentation_catalog"')
 
     need, shared_info = make_need(n, ox, oy)
     out["masked_fraction"] = float(need.mean())

@@ -183,3 +183,29 @@ def test_overlapping_euclid_tiles_are_not_mixed(tmp_path):
     for order in ([pa, pb], [pb, pa]):
         out = seg_on_grid(order, wr, (100, 100))
         assert (out == 7).any() and not (out == 9).any()        # A's core wins everywhere around the galaxy
+
+
+def test_segmentation_checked_by_the_catalogue():
+    # Segment 1 holds the target and a catalogued source the segmentation merged with it: shared between them by
+    # reduced radius, the source's share masked. Segment 2, uncatalogued, touches the target: a piece of it, kept.
+    # Segment 3, uncatalogued and far: masked. A catalogued source in the sky (no segment): masked over its ellipse.
+    import pandas as pd
+
+    from dp2_cutouts.stages.stamps import companion_mask_segmentation_catalog
+
+    shape = (31, 31)
+    yy, xx = np.indices(shape)
+    lab = np.zeros(shape, np.int64)
+    lab[12:19, 6:24] = 1                                  # target (10, 15) + merged source (20, 15)
+    lab[(np.hypot(xx - 12, yy - 20) <= 1.5)] = 2          # uncatalogued clump next to the target
+    lab[(np.hypot(xx - 27, yy - 27) <= 1.5)] = 3          # uncatalogued, far
+    seg = np.broadcast_to(lab, (4,) + shape).copy()
+    comp = pd.DataFrame(dict(x=[20.0, 3.0], y=[15.0, 3.0], a=[1.5, 1.5], b=[1.5, 1.5], theta=[0.0, 0.0],
+                             survey=["rubin", "euclid"]))
+    target = (10.0, 15.0, 3.0, 3.0, 0.0)
+    need, info = companion_mask_segmentation_catalog(np.zeros(shape, bool), seg, shape, 0, 0, target, comp, 10.0,
+                                                     2, 0)
+    assert info["n_split_segments"] == 1 and info["n_orphan_segments_kept"] == 1
+    assert need[15, 20] and not need[15, 10] and not need[15, 13]   # merged source masked, target kept
+    assert not need[20, 12]                                         # the clump stays with the target
+    assert need[27, 27] and need[3, 3]                              # far orphan, catalogued source in the sky
