@@ -81,10 +81,14 @@ def seg_on_grid(seg_paths, wcs, shape, sub=2, rows_per_chunk=256):
     # Euclid segment numbers seen by each pixel of a Rubin grid (wcs, shape = (H, W)), sampled at sub x sub points
     # inside the pixel: a Rubin pixel (0.2") covers 2 x 2 Euclid pixels (0.1"), and a pixel touched by a
     # neighbour's segment at any of its points must be masked. Returns int64 (sub*sub, H, W); 0 = sky or no tile.
+    # Overlapping tiles are never mixed: the same galaxy has a different number and a slightly different segment in
+    # each tile, so mixing them made a ring of "other" numbers around it (masked as a neighbour). Each point takes
+    # its label from the tile where it lies farthest from the edge (the tile whose core it belongs to).
     H, W = shape
     offs = (np.arange(sub) + 0.5) / sub - 0.5
     dx, dy = [a.ravel() for a in np.meshgrid(offs, offs)]
     out = np.zeros((sub * sub, H, W), np.int64)
+    best = np.full((sub * sub, H, W), -np.inf)
     for path in seg_paths:
         with fits.open(path, memmap=True) as h:
             hdu = _image_hdu(h)
@@ -108,9 +112,13 @@ def seg_on_grid(seg_paths, wcs, shape, sub=2, rows_per_chunk=256):
                 ok = (ix >= 0) & (ix < x1 - x0) & (iy >= 0) & (iy < y1 - y0)
                 lab = np.zeros(ix.shape, np.int64)
                 lab[ok] = block[iy[ok], ix[ok]]
-                cur = out[k, r0:r1]
-                take = (cur == 0) & (lab != 0)  # overlapping tiles: first non-zero wins
+                # Distance to the nearest edge of this tile (pixels); points outside it never take its label.
+                edge = np.minimum(np.minimum(px, nx - 1 - px), np.minimum(py, ny - 1 - py))
+                edge = np.where(ok, edge, -np.inf)
+                cur, cur_best = out[k, r0:r1], best[k, r0:r1]
+                take = edge > cur_best
                 cur[take] = lab[take]
+                cur_best[take] = edge[take]
     return out
 
 

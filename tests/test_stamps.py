@@ -153,3 +153,33 @@ def test_segmentation_finds_a_tight_target_segment_off_centre():
     assert not need[10, 12] and need[10, 17]                  # nearest segment within 2 px is the target's
     need, info = companion_mask_segmentation(detected, seg, shape, 0, 0, target, 2, 0, counterpart=(12.2, 9.9))
     assert not need[10, 12] and need[10, 17] and info["n_target_segments"] == 1
+
+
+def test_overlapping_euclid_tiles_are_not_mixed(tmp_path):
+    # Two MER tiles cover the same galaxy with different segment numbers and sizes (7, 4 px radius, in tile A whose
+    # core holds the galaxy; 9, 6 px radius, in tile B where it sits near the edge). Mixing them pixel by pixel left a
+    # ring of 9 around 7, masked as a neighbour. Each point must take the tile where it is farthest from the edge.
+    from astropy.io import fits
+
+    from dp2_cutouts.sources.euclid_seg import seg_on_grid
+
+    def tan(scale, crpix):
+        w = WCS(naxis=2)
+        w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+        w.wcs.crval = [53.1, -27.8]
+        w.wcs.crpix = crpix
+        w.wcs.cd = [[-scale / 3600, 0.0], [0.0, scale / 3600]]
+        return w
+
+    yy, xx = np.indices((200, 200))
+    a = np.where(np.hypot(xx - 100, yy - 100) <= 4, 7, 0).astype(np.int64)       # galaxy at the centre of A
+    pa = tmp_path / "a.fits"
+    fits.PrimaryHDU(a, header=tan(0.1, [101.0, 101.0]).to_header()).writeto(pa)
+    # Tile B: the same sky shifted so that the galaxy sits 15 px from B's left edge, with a larger segment.
+    b = np.where(np.hypot(xx - 15, yy - 100) <= 6, 9, 0).astype(np.int64)
+    pb = tmp_path / "b.fits"
+    fits.PrimaryHDU(b, header=tan(0.1, [16.0, 101.0]).to_header()).writeto(pb)
+    wr = tan(0.2, [50.75, 50.75])
+    for order in ([pa, pb], [pb, pa]):
+        out = seg_on_grid(order, wr, (100, 100))
+        assert (out == 7).any() and not (out == 9).any()        # A's core wins everywhere around the galaxy
