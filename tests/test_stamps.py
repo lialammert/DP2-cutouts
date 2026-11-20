@@ -135,3 +135,21 @@ def test_euclid_segmentation_is_sampled_on_the_rubin_grid(tmp_path):
     assert (out == 7).sum() == 1
     nine = (out == 9).any(axis=0)
     assert nine[25, 75] and nine.sum() == 100
+
+
+def test_segmentation_finds_a_tight_target_segment_off_centre():
+    # A faint target whose VIS segment is tiny and one pixel off the Rubin centre, outside its small ellipse: the
+    # Euclid counterpart position (or the nearest segment) identifies it, so it is not masked as a neighbour.
+    from dp2_cutouts.stages.stamps import companion_mask_segmentation
+
+    shape = (21, 21)
+    lab = np.zeros(shape, np.int64)
+    lab[10, 12] = 4                       # target segment: one pixel, 2 px right of the centre (10, 10)
+    lab[10, 16:19] = 5                    # a real neighbour
+    seg = np.broadcast_to(lab, (4,) + shape).copy()
+    detected = np.zeros(shape, bool)
+    target = (10.0, 10.0, 1.0, 1.0, 0.0)  # small ellipse: the segment centroid (12, 10) is outside it
+    need, info = companion_mask_segmentation(detected, seg, shape, 0, 0, target, 2, 0)
+    assert not need[10, 12] and need[10, 17]                  # nearest segment within 2 px is the target's
+    need, info = companion_mask_segmentation(detected, seg, shape, 0, 0, target, 2, 0, counterpart=(12.2, 9.9))
+    assert not need[10, 12] and need[10, 17] and info["n_target_segments"] == 1

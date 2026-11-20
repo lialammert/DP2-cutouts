@@ -149,32 +149,43 @@ def main():
     lost, gained = a.index[a["final"] & ~b["final"]], a.index[~a["final"] & b["final"]]
     print(f"{main_name} vs footprint: {len(lost)} kept before and cut now, {len(gained)} cut before and kept now")
 
-    # Figure: raw | footprint | segmentation, red = filled pixels.
+    # Figures: raw | footprint | segmentation, red = filled pixels.
+    def draw(pick, path, title):
+        pick = [i for i in pick if ("footprint", int(i)) in pix and (main_name, int(i)) in pix]
+        if not pick:
+            return
+        fig, axes = plt.subplots(len(pick), 3, figsize=(6.3, 2.2 * len(pick)), squeeze=False)
+        for r_, oid in enumerate(pick):
+            raw, f_old, m_old = pix[("footprint", int(oid))]
+            _, f_new, m_new = pix[(main_name, int(oid))]
+            s = float(np.nanpercentile(np.abs(raw), 99.5)) or 1.0
+            for ax, im, m, t in ((axes[r_, 0], raw, None, "raw"),
+                                 (axes[r_, 1], f_old, m_old, "footprint (now)"),
+                                 (axes[r_, 2], f_new, m_new, main_name.replace("_", " "))):
+                ax.imshow(stretch(im, s), origin="lower", cmap="gray_r")
+                if m is not None and m.any():
+                    ax.contour(m, levels=[0.5], colors="tab:red", linewidths=0.6)
+                ax.set_xticks([])
+                ax.set_yticks([])
+                if r_ == 0:
+                    ax.set_title(t, fontsize=8)
+            fa, fb = ("kept" if a.loc[oid, "final"] else "cut"), ("kept" if b.loc[oid, "final"] else "cut")
+            axes[r_, 0].set_ylabel(f"S/N_i {a.loc[oid, 'cut6_value']:.0f}: {fa} -> {fb}\ndelta_e mask "
+                                   f"{a.loc[oid, 'delta_e_mask']:.3f} -> {b.loc[oid, 'delta_e_mask']:.3f}", fontsize=6)
+        fig.suptitle(title, fontsize=8)
+        fig.tight_layout()
+        fig.savefig(out / path, dpi=130)
+
     diff = (b["masked_fraction"] - a["masked_fraction"]).abs()
     pick = list(lost[:5]) + list(gained[:3])
     pick += [i for i in diff.sort_values(ascending=False).index if i not in pick][:max(0, 10 - len(pick))]
-    pick = [i for i in pick if ("footprint", int(i)) in pix and (main_name, int(i)) in pix]
-    fig, axes = plt.subplots(len(pick), 3, figsize=(6.3, 2.2 * len(pick)), squeeze=False)
-    for r_, oid in enumerate(pick):
-        raw, f_old, m_old = pix[("footprint", int(oid))]
-        _, f_new, m_new = pix[(main_name, int(oid))]
-        s = float(np.nanpercentile(np.abs(raw), 99.5)) or 1.0
-        for ax, im, m, title in ((axes[r_, 0], raw, None, "raw"),
-                                 (axes[r_, 1], f_old, m_old, "footprint (now)"),
-                                 (axes[r_, 2], f_new, m_new, main_name.replace("_", " "))):
-            ax.imshow(stretch(im, s), origin="lower", cmap="gray_r")
-            if m is not None and m.any():
-                ax.contour(m, levels=[0.5], colors="tab:red", linewidths=0.6)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            if r_ == 0:
-                ax.set_title(title, fontsize=8)
-        fa, fb = ("kept" if a.loc[oid, "final"] else "cut"), ("kept" if b.loc[oid, "final"] else "cut")
-        axes[r_, 0].set_ylabel(f"{fa} -> {fb}\ndelta_e mask {a.loc[oid, 'delta_e_mask']:.3f} -> "
-                               f"{b.loc[oid, 'delta_e_mask']:.3f}", fontsize=6)
-    fig.suptitle("i band, red: pixels replaced by sky", fontsize=8)
-    fig.tight_layout()
-    fig.savefig(out / "segmentation_vs_footprint.png", dpi=130)
+    draw(pick, "segmentation_vs_footprint.png", "i band, red: pixels replaced by sky (changes of fate first)")
+    # High S/N targets (catalogue i-band S/N), where the two maskings differ: the galaxy itself is visible.
+    differ = [i for i in a.index if ("footprint", int(i)) in pix and (main_name, int(i)) in pix
+              and (pix[("footprint", int(i))][2] != pix[(main_name, int(i))][2]).any()]
+    bright = a.loc[differ, "cut6_value"].astype(float).sort_values(ascending=False).index[:12]
+    draw(list(bright), "segmentation_vs_footprint_bright.png",
+         "highest catalogue S/N_i targets where the two maskings differ; red: pixels replaced by sky")
     (out / "run.json").write_text(json.dumps(dict(patch=args.patch, demo_px=args.demo_px, tiles=tiles,
                                                   seg_grow=args.seg_grow, main=main_name), indent=2))
     print(f"-> {out}  ({time.time() - t0:.0f} s)")

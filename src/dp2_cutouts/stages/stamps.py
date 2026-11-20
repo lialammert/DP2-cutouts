@@ -132,13 +132,18 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
     return m, dict(n_shared=n_shared, flux_ratio_max=ratio_max)
 
 
-def companion_mask_segmentation(detected, seg, shape, ox, oy, target, grow_px, seg_grow_px):
+def companion_mask_segmentation(detected, seg, shape, ox, oy, target, grow_px, seg_grow_px, counterpart=None,
+                                search_px=2):
     # "segmentation" method: the pixels Euclid assigns to each source (MER segmentation map, sampled on the Rubin
     # grid at sub-pixel points, see sources/euclid_seg.py) separate what the merged Rubin DETECTED plane cannot:
     # a companion touching the target is masked over its own pixels, however large, instead of a multiple of its
     # ellipse.
-    # - target segments: the one under the target centre, and any whose centroid lies inside the target's Rubin
-    #   ellipse (Euclid often cuts one galaxy into several segments: they stay);
+    # - target segments: the one at the catalogue position of the target's Euclid counterpart (counterpart: (x, y)
+    #   in the box frame; it lies in its own segment by construction), the one under the Rubin centre, and any
+    #   whose centroid lies inside the target's Rubin ellipse (Euclid often cuts one galaxy into several segments:
+    #   they stay). VIS segments are tight (a few Euclid pixels for a faint galaxy): when none of these points falls
+    #   in a segment, the nearest segment within search_px Rubin pixels of the counterpart (or centre) is the
+    #   target's. Without this, a faint target whose segment sat one pixel off the centre was masked as a neighbour;
     # - every other segment touching a pixel (at any of its sub-pixel points) is masked, grown by seg_grow_px
     #   Rubin pixels for the wider Rubin PSF (its light spreads past the VIS segment), never into the target's
     #   segments;
@@ -164,8 +169,20 @@ def companion_mask_segmentation(detected, seg, shape, ox, oy, target, grow_px, s
     cx = np.bincount(inv.ravel(), weights=np.broadcast_to(cols, L.shape).ravel(), minlength=len(ids)) / cnt
     cy = np.bincount(inv.ravel(), weights=np.broadcast_to(rows, L.shape).ravel(), minlength=len(ids)) / cnt
     is_target = (elliptical_radius(cx - xt, cy - yt, a, b, th) <= 1.0) & (ids != 0)
-    if 0 <= it < h and 0 <= jt < w:
-        is_target |= np.isin(ids, L[:, it, jt]) & (ids != 0)
+    anchors = [(xt, yt)] if counterpart is None else [tuple(counterpart), (xt, yt)]
+    found = False
+    for ax_, ay_ in anchors:
+        ia, ja = int(np.floor(ay_ + 0.5)), int(np.floor(ax_ + 0.5))
+        if 0 <= ia < h and 0 <= ja < w and (L[:, ia, ja] != 0).any():
+            is_target |= np.isin(ids, L[:, ia, ja]) & (ids != 0)
+            found = True
+    if not found:
+        ax_, ay_ = anchors[0]
+        d = np.hypot(cols - ax_, rows - ay_)
+        near = (d <= search_px)[None] & (L != 0)
+        if near.any():
+            dd = np.broadcast_to(d, L.shape)
+            is_target |= ids == L[near][np.argmin(dd[near])]
     t_pix = is_target[inv]
     n_pix = (L != 0) & ~t_pix
     target_core = t_pix.any(axis=0)
@@ -340,8 +357,13 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
             if "seg" not in img:
                 raise RuntimeError('masking.method "segmentation" needs the Euclid segmentation on the Rubin grid '
                                    '(img["seg"], sources/euclid_seg.seg_on_grid)')
+            cp = None
+            if pd.notna(row.euclid_ra):
+                ex, ey = img["wcs"][ib].world_to_pixel_values(row.euclid_ra, row.euclid_dec)
+                cp = (float(ex) - bx, float(ey) - by)
             need_s, _ = companion_mask_segmentation(img["detected"], img["seg"], (size, size), bx, by,
-                                                    (x - bx, y - by, a, b, th), mc["grow_px"], mc["seg_grow_px"])
+                                                    (x - bx, y - by, a, b, th), mc["grow_px"], mc["seg_grow_px"],
+                                                    counterpart=cp)
             return need_s, None
         raise ValueError('masking.method must be "ellipse", "footprint" or "segmentation"')
 
