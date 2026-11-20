@@ -161,6 +161,51 @@ def main():
     lost, gained = a.index[a["final"] & ~b["final"]], a.index[~a["final"] & b["final"]]
     print(f"{main_name} vs footprint: {len(lost)} kept before and cut now, {len(gained)} cut before and kept now")
 
+    # Catalogued objects that the MER segmentation puts inside the target's own segment: for every target, the
+    # segment numbers at its Euclid counterpart position (and at its Rubin centre) are the target's; any other
+    # catalogued object (Rubin Object table, Euclid MER catalogue, separately) in the stamp whose position carries
+    # one of these numbers is "merged" by the segmentation although a catalogue lists it apart.
+    H_, W_ = img["seg"].shape[1:]
+
+    def labels_at(x_, y_):
+        i_, j_ = int(np.floor(y_ + 0.5)), int(np.floor(x_ + 0.5))
+        return set(img["seg"][:, i_, j_].tolist()) - {0} if (0 <= i_ < H_ and 0 <= j_ < W_) else set()
+
+    merged = []
+    for t in targets.itertuples(index=False):
+        tx_, ty_ = (float(v) for v in w.world_to_pixel_values(t.ra, t.dec))
+        tl = labels_at(tx_, ty_)
+        has_cp = pd.notna(t.euclid_ra)
+        if has_cp:
+            cx_, cy_ = (float(v) for v in w.world_to_pixel_values(t.euclid_ra, t.euclid_dec))
+            tl |= labels_at(cx_, cy_)
+        if not tl:
+            continue
+        f_i = float(getattr(t, "i_cModelFlux", np.nan))
+        f_vis = 10.0 ** (-0.4 * (float(t.euclid_vis_mag) - stamps.NJY_ZEROPOINT)) if has_cp else np.nan
+        near_r = rubin[(np.abs(rubin["x"] - tx_) < half) & (np.abs(rubin["y"] - ty_) < half)
+                       & (rubin["id"] != t.object_id)]
+        near_e = euclid[(np.abs(euclid["x"] - tx_) < half) & (np.abs(euclid["y"] - ty_) < half)]
+        if has_cp:
+            near_e = near_e[~((near_e["ra"] == t.euclid_ra) & (near_e["dec"] == t.euclid_dec))]
+        for survey, near, fcol, fref in (("rubin", near_r, "flux_i", f_i), ("euclid", near_e, "flux_vis", f_vis)):
+            for r in near.itertuples(index=False):
+                if labels_at(r.x, r.y) & tl:
+                    merged.append(dict(object_id=int(t.object_id), survey=survey,
+                                       sep_arcsec=float(np.hypot(r.x - tx_, r.y - ty_) * 0.2),
+                                       flux_ratio=float(getattr(r, fcol)) / fref if fref and fref > 0 else np.nan))
+    merged = pd.DataFrame(merged, columns=["object_id", "survey", "sep_arcsec", "flux_ratio"])
+    merged.to_csv(out / "catalogued_inside_target_segment.csv", index=False)
+    n_merge = merged.groupby(["object_id", "survey"]).size().unstack(fill_value=0) if len(merged) else pd.DataFrame()
+    for s_ in ("rubin", "euclid"):
+        if s_ not in n_merge:
+            n_merge[s_] = 0
+    print(f"catalogued objects inside the target's own Euclid segment ({len(targets)} targets):")
+    for s_ in ("euclid", "rubin"):
+        m_ = merged[merged["survey"] == s_]
+        print(f"  {s_:6s} catalogue: {m_['object_id'].nunique()} targets, {len(m_)} objects; separation median "
+              f"{m_['sep_arcsec'].median():.2f}\" ; flux / target median {m_['flux_ratio'].median():.2f}")
+
     # Figures, one target per row: raw | after footprint masking | light it removed | after segmentation masking |
     # light it removed. Masked pixels are refilled with real sky, so they look like the background: the red outline
     # and the "removed" columns (raw - masked, same stretch as raw) show what was taken out.
@@ -229,7 +274,10 @@ def main():
                 if r_ == 0:
                     ax.set_title(heads[c_], fontsize=8)
             fa, fb = ("kept" if a.loc[oid, "final"] else "cut"), ("kept" if b.loc[oid, "final"] else "cut")
-            axes[r_, 0].set_ylabel(f"S/N_i {a.loc[oid, 'cut6_value']:.0f}: {fa} -> {fb}\ndelta_e mask "
+            ne = int(n_merge.loc[oid, "euclid"]) if oid in n_merge.index else 0
+            nr = int(n_merge.loc[oid, "rubin"]) if oid in n_merge.index else 0
+            axes[r_, 0].set_ylabel(f"{int(oid)}\ncatalogued inside target segment: Euclid {ne}, Rubin {nr}\n"
+                                   f"S/N_i {a.loc[oid, 'cut6_value']:.0f}: {fa} -> {fb}\ndelta_e mask "
                                    f"{a.loc[oid, 'delta_e_mask']:.3f} -> {b.loc[oid, 'delta_e_mask']:.3f}", fontsize=6)
         fig.suptitle(title + "\none target per row, i band; red outline: pixels replaced by sky", fontsize=8, y=1.0)
         fig.tight_layout(rect=(0, 0, 1, 0.98))
