@@ -58,8 +58,14 @@ def fetch_patch(cfg, patch):
     reused = meta is not None
     if not reused:
         meta = adapters.fetch_rubin_pixels(case, patch)
-    return "done", dict(reused=reused, patch_bbox=meta["patch_bbox"], source_ids=meta["source_ids"],
-                        sha256=meta["sha256"])
+    info = dict(reused=reused, patch_bbox=meta["patch_bbox"], source_ids=meta["source_ids"], sha256=meta["sha256"])
+    # Euclid MER segmentation tiles for the segmentation maskings (cached, shared by the patches).
+    from ..sources import euclid_seg
+    mc = case["masking"]
+    if mc["method"] in euclid_seg.SEG_METHODS:
+        paths = euclid_seg.fetch_for_sky_box(case.sky_box, euclid_seg.cache_dir(mc))
+        info["seg_tiles"] = [str(p) for p in paths]
+    return "done", info
 
 
 def process_patch(cfg, patch):

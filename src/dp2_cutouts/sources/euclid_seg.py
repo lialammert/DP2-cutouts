@@ -128,3 +128,31 @@ def fetch_for_box(ra, dec, radius_deg, cache_dir):
     for tile in find_tiles(ra, dec, radius_deg):
         paths.append(download(seg_url(tile), Path(cache_dir) / tile))
     return paths
+
+
+SEG_METHODS = ("segmentation", "segmentation_catalog")
+
+
+def cache_dir(masking):
+    # masking.seg_cache: "auto" (default) = $SCRATCH/euclid_mer_seg, else a path.
+    import os
+    c = masking.get("seg_cache", "auto")
+    if c in (None, "auto"):
+        root = os.environ.get("SCRATCH")
+        if not root:
+            raise RuntimeError("masking.seg_cache is auto but $SCRATCH is not set: give a path")
+        return Path(root) / "euclid_mer_seg"
+    return Path(os.path.expandvars(str(c))).expanduser()
+
+
+def fetch_for_sky_box(sky_box, cache):
+    # Tiles touching a sky box [ra0, ra1, dec0, dec1] (circle through its corners), downloaded into the cache.
+    ra0, ra1, dec0, dec1 = (float(v) for v in sky_box)
+    ra_c, dec_c = 0.5 * (ra0 + ra1), 0.5 * (dec0 + dec1)
+    radius = 0.5 * float(np.hypot((ra1 - ra0) * np.cos(np.radians(dec_c)), dec1 - dec0))
+    return fetch_for_box(ra_c, dec_c, radius, cache)
+
+
+def cached_tiles(cache):
+    # Every segmentation map in the cache (tiles that miss a grid are skipped by seg_on_grid).
+    return sorted(Path(cache).glob("*/EUC_MER_FINAL-SEGMAP_TILE*.fits"))

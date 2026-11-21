@@ -20,7 +20,8 @@ PHASES = ("plan", "fetch", "process")
 PHASE_SECTIONS = {
     "plan": ("sources.rubin_catalog", "sources.euclid_catalog", "rubin", "euclid", "copaings", "cuts.snr_min",
              "patches.catalog_margin_arcsec"),
-    "fetch": ("sources.rubin_pixels",),
+    # The masking method decides whether fetch also downloads the Euclid MER segmentation tiles (network).
+    "fetch": ("sources.rubin_pixels", "masking.method", "masking.seg_cache"),
     "process": ("cuts", "masking"),
 }
 

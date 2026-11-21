@@ -308,6 +308,24 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
                            target_px=int(target_pix.sum()))
 
 
+def halo_ring(flux, var, need, usable, r_target, r_out=4, k_target=2.0):
+    # Light left just outside the masked regions, measured on the raw image (not predicted): the pixels 1 to r_out
+    # pixels outside the mask, usable, and away from the target (reduced radius > k_target, so that its own wings do
+    # not count). Each pixel in units of its noise (flux / sqrt(variance)); a neighbour's wing left past its mask
+    # makes the ring brighter than the sky. Returns (mean in sigma, number of ring pixels, significance
+    # sum / sqrt(n)); NaN without a mask or a ring. The coadd noise is somewhat correlated: the significance is for
+    # comparing maskings and setting a cut, not a calibrated probability.
+    if not need.any():
+        return np.nan, 0, np.nan
+    ring = binary_dilation(need, iterations=int(r_out)) & ~need & usable & (r_target > k_target)
+    ring &= np.isfinite(flux) & np.isfinite(var) & (var > 0)
+    n = int(ring.sum())
+    if n == 0:
+        return np.nan, 0, np.nan
+    s = flux[ring] / np.sqrt(var[ring])
+    return float(s.mean()), n, float(s.sum() / np.sqrt(n))
+
+
 EXP_HALF_LIGHT = 1.678  # half-light radius of an exponential profile, in scale lengths
 
 
@@ -527,6 +545,10 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     out["companion_light_ratio"] = companion_light_ratio(
         (n, n), (xc, yc, a, b, th, f_target), near.assign(x=near["x"] - ox, y=near["y"] - oy),
         ~need & ~np.any(nod, axis=0), float(mc.get("light_region_k", 3.0)))
+    # Measured counterpart of companion_light_ratio: excess light in a ring just outside the masks (shape band).
+    out["halo_ring_mean_sigma"], out["halo_ring_npix"], out["halo_ring_z"] = halo_ring(
+        img["flux"][box][ib], img["var"][box][ib], need, ~np.any(nod, axis=0), rmap,
+        int(mc.get("halo_ring_px", 4)), float(mc.get("halo_target_k", 2.0)))
 
     window, nbad = banks[n].find(need, rng, cc["sky_tries"]) if need.any() else (None, 0)
     flux, var, mbits = fill(img, ox, oy, n, need, window)
@@ -593,6 +615,17 @@ def run(cfg):
     targets = cat[cat["cut1_pass"] & cat["cut2_pass"] & (cat["tract"] == meta["tract"])
                   & (cat["patch"] == meta["patch"])]
     rubin, euclid = companions(cfg, img, cat)
+    mc = cfg["masking"]
+    if mc["method"] in ("segmentation", "segmentation_catalog"):
+        # Euclid segmentation sampled on the Rubin grid of the region (tiles downloaded by fetch).
+        from ..sources import euclid_seg
+        tiles = euclid_seg.cached_tiles(euclid_seg.cache_dir(mc))
+        if not tiles:
+            raise RuntimeError(f"masking.method {mc['method']!r}: no segmentation tile in "
+                               f"{euclid_seg.cache_dir(mc)} (run fetch with this configuration)")
+        img["seg"] = euclid_seg.seg_on_grid(tiles, img["wcs"][BANDS.index("i")], img["flux"].shape[1:])
+        if not (img["seg"] != 0).any():
+            raise RuntimeError("the Euclid segmentation tiles in the cache do not cover this region")
 
     unusable = masks.bitmask(img["bits"], ["DETECTED", "NO_DATA"] + list(cc["bad_planes"]))
     banks = {n: SkyBank(img, unusable, n) for n in (cc["stamp_px"], cc["diag_px"])}

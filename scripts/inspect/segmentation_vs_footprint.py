@@ -168,7 +168,14 @@ def main():
                             # What reaches D1: the pipeline's cuts, then D1's companion-light cut (<= 0.1, NaN passes).
                             passes_both=int((R["final"] & ~(R["companion_light_ratio"] > 0.1)).sum()),
                             euclid_below_depth_per_stamp=round(float(R["n_euclid_below_depth"].mean()), 2)
-                            if "n_euclid_below_depth" in R else np.nan))
+                            if "n_euclid_below_depth" in R else np.nan,
+                            # Measured halo (raw image, ring 1-4 px outside the masks, away from the target), on
+                            # the targets the pipeline keeps: median significance, share above 3 and 5, and what
+                            # would reach D1 with the measured cut (halo_ring_z <= 5) instead of the predicted one.
+                            halo_z_median=round(float(R.loc[R["final"], "halo_ring_z"].median()), 2),
+                            halo_z_above_3=round(float((R.loc[R["final"], "halo_ring_z"] > 3).mean()), 3),
+                            halo_z_above_5=round(float((R.loc[R["final"], "halo_ring_z"] > 5).mean()), 3),
+                            passes_halo_cut=int((R["final"] & ~(R["halo_ring_z"] > 5)).sum())))
     summary = pd.DataFrame(summary)
     summary["gain_vs_footprint"] = summary["passes_both"] - int(summary.loc[summary["method"] == "footprint",
                                                                              "passes_both"].iloc[0])
@@ -176,7 +183,8 @@ def main():
     summary.to_csv(out / "summary.csv", index=False)
     for name, df in res.items():
         df[["object_id", "in_region", "mask_pass", "delta_e_mask", "cut8_pass", "cut8_value", "masked_fraction",
-            "companion_light_ratio", "final"]].to_csv(out / f"targets_{name}.csv", index=False)
+            "companion_light_ratio", "halo_ring_z", "halo_ring_mean_sigma", "final"]].to_csv(
+            out / f"targets_{name}.csv", index=False)
 
     # Changes of fate, footprint -> main segmentation setting (the middle grow value).
     main_name = f"segmentation_catalog_grow{g_mid}"

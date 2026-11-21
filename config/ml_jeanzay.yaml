@@ -91,6 +91,10 @@ dataset1:
   # the whole target footprint: noise and far-away pixels made faint isolated targets look contaminated (>50 %).
   # null: no cut. Provisional value; tune it on the distribution in the D1 quality report (D1 rebuild only).
   max_companion_light_ratio: 0.1
+  # Measured alternative (raw image): significance of the light left in a ring 1-4 px outside the masks, away
+  # from the target (stamp column halo_ring_z). Unlike the predicted ratio it does not penalise tight masks.
+  # null: off. To replace the predicted cut, set this and max_companion_light_ratio: null.
+  max_halo_ring_z: null
   contamination_radius_arcsec: 3.0     # other Euclid sources inside this radius are counted per pair
   contamination_delta_mag: 2.5         # ... if brighter than target VIS mag + this
   # Conditioning features of the Euclid encoder: Rubin PSF of the stamp (known at inference, Rubin-side metadata).

@@ -47,20 +47,33 @@ def contamination(neigh, tree, ra, dec, vis_mag, radius_arcsec, dmag):
     return int(bright.sum()), (float(d.min()) if d.size else np.inf)
 
 
+# D1 cuts on the companion light left after masking: (config key, stamp column, rejection reason).
+#   max_companion_light_ratio  companions' light PREDICTED from catalogue ellipses and fluxes (exponential profiles)
+#                              on the kept pixels within 3 target ellipses, over the target's; it penalises tight
+#                              masks by construction (the model always extends wings past them);
+#   max_halo_ring_z            light MEASURED on the raw image in a ring 1-4 px outside the masks, away from the
+#                              target: significance of its excess over the sky (stamps.halo_ring).
+COMPANION_CUTS = (("max_companion_light_ratio", "companion_light_ratio", "companion_light"),
+                  ("max_halo_ring_z", "halo_ring_z", "halo_ring"))
+
+
 def clean_of_companions(meta, d1):
-    # The one selection D1 adds to the pipeline's: masking leaves the wings of companions (beyond shared_k times
-    # the ellipse of one sharing the target footprint, beyond the half-light ellipse of a Euclid-only one), so a
-    # target next to a bright neighbour sits in its halo. companion_light_ratio (stamp stage) is the companions'
-    # predicted light over the target's, on the kept pixels where the target's shape is measured; above
-    # max_companion_light_ratio the pair is rejected. NaN (no target flux) passes.
-    limit = d1.get("max_companion_light_ratio")
-    if limit is None:
-        return np.ones(len(meta), bool)
-    if "companion_light_ratio" not in meta.columns:
-        raise RuntimeError("dataset1.max_companion_light_ratio is set but the stamp pipeline products have no "
-                           "companion_light_ratio column: rerun the pipeline (process and assemble) first")
-    f = meta["companion_light_ratio"].astype(float).to_numpy()
-    return ~(f > float(limit))
+    # The one selection D1 adds to the pipeline's: masking can leave the wings of companions, so a target next to a
+    # bright neighbour sits in its halo. Each cut of COMPANION_CUTS whose key is set (null: off) rejects the pairs
+    # above its limit; NaN passes. Returns the kept mask and, per row, the reason of the first cut failed (or None).
+    keep = np.ones(len(meta), bool)
+    reason = np.full(len(meta), None, dtype=object)
+    for key, column, why in COMPANION_CUTS:
+        limit = d1.get(key)
+        if limit is None:
+            continue
+        if column not in meta.columns:
+            raise RuntimeError(f"dataset1.{key} is set but the stamp pipeline products have no {column} column: "
+                               "rerun the pipeline (process and assemble) first")
+        bad = meta[column].astype(float).to_numpy() > float(limit)
+        reason[bad & keep] = why
+        keep &= ~bad
+    return keep, reason
 
 
 def build_patch(cfg, patch):
@@ -83,10 +96,11 @@ def build_patch(cfg, patch):
     for i in np.flatnonzero(~has):
         rejected.append(dict(object_id=int(meta["object_id"].iloc[i]), reason="no_euclid_counterpart"))
     meta, flux_r, ivar_r, mask_r = meta[has].reset_index(drop=True), flux_r[has], ivar_r[has], mask_r[has]
-    alone = clean_of_companions(meta, d1)
+    alone, why = clean_of_companions(meta, d1)
+    columns = {r: c for _, c, r in COMPANION_CUTS}
     for i in np.flatnonzero(~alone):
-        rejected.append(dict(object_id=int(meta["object_id"].iloc[i]), reason="companion_light",
-                             detail=f"{float(meta['companion_light_ratio'].iloc[i]):.3f}"))
+        rejected.append(dict(object_id=int(meta["object_id"].iloc[i]), reason=why[i],
+                             detail=f"{float(meta[columns[why[i]]].iloc[i]):.3f}"))
     meta, flux_r, ivar_r, mask_r = meta[alone].reset_index(drop=True), flux_r[alone], ivar_r[alone], mask_r[alone]
     if len(meta) == 0:
         # Patch without final stamps (no target, not processed): an empty shard records that it was looked at.

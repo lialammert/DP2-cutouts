@@ -59,9 +59,17 @@ cuts:
   seed: 12345
 
 masking:
+  # footprint: Rubin detection footprints (current). segmentation_catalog: Euclid MER segmentation sampled on the
+  # Rubin grid, each segment owned by the catalogued objects it holds (fetch then downloads the MER tiles into
+  # seg_cache, ~3 GB each). Compared on 5063_34 by scripts/inspect/segmentation_vs_footprint.py.
   method: footprint
   grow_px: 2
   shared_k: 2.0
+  seg_grow_px: 2               # segmentation maskings: neighbour pixels grown for the wider Rubin PSF
+  seg_cache: auto              # auto = $SCRATCH/euclid_mer_seg
+  # Depth rule: a source seen by Euclid only is masked only if brighter than the local Rubin 5-sigma depth in i of
+  # the stamp + this margin (mag). null = off (every Euclid source masked, Rubin cannot see the faintest).
+  euclid_depth_margin: null
 
 package:
   apply: [cut1, cut2, in_region, cut3, cut4, cut5, cut6, cut7, cut8, mask]

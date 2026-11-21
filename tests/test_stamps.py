@@ -256,3 +256,28 @@ def test_shared_segment_is_split_by_predicted_brightness():
     assert not faint[15, 16] and not faint[15, 18] and not faint[15, 10]
     comparable = run(3.0e3)
     assert comparable[15, 16] and not comparable[15, 10] and not comparable[15, 12]
+
+
+def test_halo_ring_sees_the_wing_left_past_a_mask():
+    # A companion masked over its core only: its wing in the ring just outside the mask makes the ring brighter
+    # than the sky; masked far enough, the ring is plain sky. The target's own region never counts.
+    from scipy.ndimage import binary_dilation
+
+    from dp2_cutouts.stages.stamps import halo_ring
+
+    rng = np.random.default_rng(0)
+    shape = (41, 41)
+    yy, xx = np.indices(shape)
+    r_comp = np.hypot(xx - 30, yy - 20)
+    flux = rng.normal(0.0, 1.0, shape) + 40.0 * np.exp(-r_comp / 3.0)
+    var = np.ones(shape)
+    usable = np.ones(shape, bool)
+    r_target = np.hypot(xx - 10, yy - 20) / 3.0
+    tight = r_comp <= 3
+    loose = r_comp <= 14
+    mean_t, n_t, z_t = halo_ring(flux, var, tight, usable, r_target)
+    mean_l, n_l, z_l = halo_ring(flux, var, loose, usable, r_target)
+    assert n_t > 0 and n_l > 0 and z_t > 10 and abs(z_l) < 4 and mean_t > mean_l
+    assert np.isnan(halo_ring(flux, var, np.zeros(shape, bool), usable, r_target)[0])
+    near_target = binary_dilation(np.hypot(xx - 10, yy - 20) <= 1, iterations=1)
+    assert halo_ring(flux, var, near_target, usable, r_target)[1] == 0      # ring inside 2 target ellipses only

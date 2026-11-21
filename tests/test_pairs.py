@@ -373,9 +373,15 @@ def test_rubin_to_euclid_px_follows_the_pixel_scales():
 def test_d1_rejects_targets_in_companion_light():
     from dp2_cutouts.pairs.dataset1 import clean_of_companions
 
-    meta = pd.DataFrame(dict(companion_light_ratio=[0.0, 0.05, 0.5, np.nan]))
-    assert clean_of_companions(meta, dict(max_companion_light_ratio=0.1)).tolist() == [True, True, False, True]
-    assert clean_of_companions(meta, dict(max_companion_light_ratio=None)).all()
+    meta = pd.DataFrame(dict(companion_light_ratio=[0.0, 0.05, 0.5, np.nan], halo_ring_z=[0.0, 9.0, 1.0, np.nan]))
+    keep, why = clean_of_companions(meta, dict(max_companion_light_ratio=0.1))
+    assert keep.tolist() == [True, True, False, True] and why[2] == "companion_light"
+    assert clean_of_companions(meta, dict(max_companion_light_ratio=None))[0].all()
+    # The measured cut alone, then both (each row keeps the reason of the first cut it fails).
+    keep, why = clean_of_companions(meta, dict(max_halo_ring_z=5.0))
+    assert keep.tolist() == [True, False, True, True] and why[1] == "halo_ring"
+    keep, why = clean_of_companions(meta, dict(max_companion_light_ratio=0.1, max_halo_ring_z=5.0))
+    assert keep.tolist() == [True, False, False, True] and list(why[1:3]) == ["halo_ring", "companion_light"]
     with pytest.raises(RuntimeError, match="rerun the pipeline"):
         clean_of_companions(meta.drop(columns="companion_light_ratio"), dict(max_companion_light_ratio=0.1))
 
