@@ -201,8 +201,10 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
     # owns what. Every catalogued object (Rubin Object table, Euclid MER catalogue; a Euclid source within dedup_px
     # of a Rubin object or of the target is the same object) is placed in the segment found at its position.
     # - a segment holding several catalogued objects (the segmentation merged them, e.g. VIS + NIR combination) is
-    #   shared between them: each pixel goes to the object of smallest reduced radius (distance in units of its own
-    #   ellipse, so that a small source does not take a large galaxy's outskirts); the target keeps its share;
+    #   shared between them: each pixel goes to the object predicted brightest there (exponential profile from its
+    #   catalogue ellipse and flux, as companion_light_ratio), so that a faint source next to a bright galaxy takes
+    #   only its own surroundings, not the galaxy's wings; without a flux for every owner, to the object of smallest
+    #   reduced radius; the target keeps its share;
     # - a segment holding no catalogued object (a clump or arm cut out by Euclid, or a faint uncatalogued source)
     #   stays with the target when it reaches within keep_k target ellipses, and is masked otherwise;
     # - a catalogued object with no segment at its position (missed by the segmentation) is masked over its
@@ -211,7 +213,8 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
     # Neighbour pixels are grown by seg_grow_px (Rubin PSF), never into the target's pixels.
     # Objects too faint for Rubin (comp column visible = False, the depth rule) are not masked: a segment owned only
     # by such objects is left as it is, and they take no share of a segment they share with visible objects.
-    # target: (x, y, a, b, theta) in the box frame; comp: x, y (region frame), a, b, theta, survey[, visible].
+    # target: (x, y, a, b, theta[, flux]) in the box frame; comp: x, y (region frame), a, b, theta, survey[, visible,
+    # flux], fluxes in the same unit.
     h, w = shape
     det = detected[oy:oy + h, ox:ox + w]
     labels, _ = label(det, structure=np.ones((3, 3), int))
@@ -240,10 +243,11 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
         return int(vals[np.argmax(counts)])
 
     # Catalogued objects: the target first (its counterpart position too), then the others, deduplicated.
-    objs = [dict(x=xt, y=yt, a=a, b=b, th=th, target=True, visible=True)]
+    f_t = float(target[5]) if len(target) > 5 else np.nan
+    objs = [dict(x=xt, y=yt, a=a, b=b, th=th, target=True, visible=True, flux=f_t)]
     anchors = [(xt, yt)]
     if counterpart is not None:
-        objs.append(dict(x=counterpart[0], y=counterpart[1], a=a, b=b, th=th, target=True, visible=True))
+        objs.append(dict(x=counterpart[0], y=counterpart[1], a=a, b=b, th=th, target=True, visible=True, flux=f_t))
         anchors.append(tuple(counterpart))
     sel = ((comp["x"] > ox - pad) & (comp["x"] < ox + w + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + h + pad))
     near = comp[sel]
@@ -254,7 +258,7 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
         if r.survey == "euclid" and len(rub_pts) and np.min(np.hypot(rub_pts[:, 0] - x_, rub_pts[:, 1] - y_)) < dedup_px:
             continue
         objs.append(dict(x=x_, y=y_, a=r.a, b=r.b, th=r.theta, target=False,
-                         visible=bool(getattr(r, "visible", True))))
+                         visible=bool(getattr(r, "visible", True)), flux=float(getattr(r, "flux", np.nan))))
     for o in objs:
         o["label"] = label_at(o["x"], o["y"])
 
@@ -283,7 +287,14 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
             continue
         n_split += 1
         rr = np.stack([radius_map(shape, o["x"], o["y"], o["a"], o["b"], o["th"]) for o in owners])
-        win = np.argmin(np.where(np.isfinite(rr), rr, np.inf), axis=0)
+        fl = np.array([o["flux"] for o in owners], float)
+        ab = np.array([o["a"] * o["b"] for o in owners], float)
+        if np.all(np.isfinite(fl) & (fl > 0) & (ab > 0)):
+            # log surface brightness of each owner's exponential profile (see exp_profile)
+            lsb = (np.log(fl * EXP_HALF_LIGHT ** 2 / (2.0 * np.pi * ab)))[:, None, None] - EXP_HALF_LIGHT * rr
+            win = np.argmax(np.where(np.isfinite(lsb), lsb, -np.inf), axis=0)
+        else:
+            win = np.argmin(np.where(np.isfinite(rr), rr, np.inf), axis=0)
         is_t = np.array([o["target"] for o in owners])[win]
         target_pix |= pix & is_t
         neigh |= pix & ~is_t
@@ -497,7 +508,8 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                 ex, ey = img["wcs"][ib].world_to_pixel_values(row.euclid_ra, row.euclid_dec)
                 cp = (float(ex) - bx, float(ey) - by)
             need_s, _ = companion_mask_segmentation_catalog(img["detected"], img["seg"], (size, size), bx, by,
-                                                            (x - bx, y - by, a, b, th), comp, pad, mc["grow_px"],
+                                                            (x - bx, y - by, a, b, th, f_target), comp, pad,
+                                                            mc["grow_px"],
                                                             mc["seg_grow_px"], counterpart=cp)
             return need_s, None
         raise ValueError('masking.method must be "ellipse", "footprint", "segmentation" or "segmentation_catalog"')

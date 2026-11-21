@@ -231,3 +231,28 @@ def test_segmentation_catalog_leaves_sources_rubin_cannot_see():
                                                   comp, 10.0, 2, 0)
     assert not need[24, 24] and need[6, 24]              # faint segment left, bright segment masked
     assert not need[4, 4] and need[26, 4]                # faint source in the sky left, bright one masked
+
+
+def test_shared_segment_is_split_by_predicted_brightness():
+    # A segment holding a bright target and a catalogued neighbour near its edge. Split by reduced radius, a faint
+    # neighbour took a band of the target's wings; split by predicted brightness it takes nothing (the target is
+    # brighter everywhere, even at the neighbour's centre), while a neighbour of comparable flux keeps its core.
+    import pandas as pd
+
+    from dp2_cutouts.stages.stamps import companion_mask_segmentation_catalog
+
+    shape = (31, 31)
+    lab = np.zeros(shape, np.int64)
+    lab[10:21, 4:20] = 1
+    seg = np.broadcast_to(lab, (4,) + shape).copy()
+    target = (10.0, 15.0, 3.0, 3.0, 0.0, 1.0e4)
+
+    def run(flux):
+        comp = pd.DataFrame(dict(x=[16.0], y=[15.0], a=[1.5], b=[1.5], theta=[0.0], survey=["rubin"], flux=[flux]))
+        need, _ = companion_mask_segmentation_catalog(np.zeros(shape, bool), seg, shape, 0, 0, target, comp, 10.0, 2, 0)
+        return need
+
+    faint = run(10.0)
+    assert not faint[15, 16] and not faint[15, 18] and not faint[15, 10]
+    comparable = run(3.0e3)
+    assert comparable[15, 16] and not comparable[15, 10] and not comparable[15, 12]
