@@ -209,7 +209,9 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
     #   half-light ellipse;
     # - Rubin footprints that do not contain the target are masked as in the footprint method.
     # Neighbour pixels are grown by seg_grow_px (Rubin PSF), never into the target's pixels.
-    # target: (x, y, a, b, theta) in the box frame; comp: x, y (region frame), a, b, theta, survey.
+    # Objects too faint for Rubin (comp column visible = False, the depth rule) are not masked: a segment owned only
+    # by such objects is left as it is, and they take no share of a segment they share with visible objects.
+    # target: (x, y, a, b, theta) in the box frame; comp: x, y (region frame), a, b, theta, survey[, visible].
     h, w = shape
     det = detected[oy:oy + h, ox:ox + w]
     labels, _ = label(det, structure=np.ones((3, 3), int))
@@ -238,10 +240,10 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
         return int(vals[np.argmax(counts)])
 
     # Catalogued objects: the target first (its counterpart position too), then the others, deduplicated.
-    objs = [dict(x=xt, y=yt, a=a, b=b, th=th, target=True)]
+    objs = [dict(x=xt, y=yt, a=a, b=b, th=th, target=True, visible=True)]
     anchors = [(xt, yt)]
     if counterpart is not None:
-        objs.append(dict(x=counterpart[0], y=counterpart[1], a=a, b=b, th=th, target=True))
+        objs.append(dict(x=counterpart[0], y=counterpart[1], a=a, b=b, th=th, target=True, visible=True))
         anchors.append(tuple(counterpart))
     sel = ((comp["x"] > ox - pad) & (comp["x"] < ox + w + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + h + pad))
     near = comp[sel]
@@ -251,7 +253,8 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
         x_, y_ = r.x - ox, r.y - oy
         if r.survey == "euclid" and len(rub_pts) and np.min(np.hypot(rub_pts[:, 0] - x_, rub_pts[:, 1] - y_)) < dedup_px:
             continue
-        objs.append(dict(x=x_, y=y_, a=r.a, b=r.b, th=r.theta, target=False))
+        objs.append(dict(x=x_, y=y_, a=r.a, b=r.b, th=r.theta, target=False,
+                         visible=bool(getattr(r, "visible", True))))
     for o in objs:
         o["label"] = label_at(o["x"], o["y"])
 
@@ -262,6 +265,9 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
     for v in np.unique(lab[lab != 0]):
         pix = lab == v
         owners = [o for o in objs if o["label"] == v]
+        if owners and not any(o["target"] or o["visible"] for o in owners):
+            continue                                        # only sources Rubin cannot see: left untouched
+        owners = [o for o in owners if o["target"] or o["visible"]]
         if not owners:
             if (r_target[pix] <= keep_k).any():
                 target_pix |= pix
@@ -282,7 +288,7 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
         target_pix |= pix & is_t
         neigh |= pix & ~is_t
     for o in objs:
-        if not o["target"] and o["label"] == 0:
+        if not o["target"] and o["visible"] and o["label"] == 0:
             neigh |= radius_map(shape, o["x"], o["y"], o["a"], o["b"], o["th"]) <= 1.0
     if seg_grow_px > 0 and neigh.any():
         neigh = binary_dilation(neigh, iterations=int(seg_grow_px))
@@ -441,13 +447,34 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
     pad = min(pad, 50.0)
     mc = cfg["masking"]
 
+    # Depth rule (masking.euclid_depth_margin, magnitudes; null = off): a source seen by Euclid only is masked in the
+    # Rubin stamp only if Rubin could see it, i.e. its magnitude (VIS brought to i with the target's colour, as for
+    # companion_light_ratio) is brighter than the local Rubin 5-sigma depth in i of this stamp + the margin. Euclid
+    # is deeper: masking what Rubin cannot see only replaces Rubin noise, sometimes right next to the target.
+    # Rubin companions are detected by Rubin by definition and are always masked.
+    det_nd = masks.bitmask(bits, ["DETECTED", "NO_DATA"])
+    i_band = BANDS.index("i")
+    sky_i = (mbox[i_band] & det_nd) == 0
+    v_i = float(np.median(img["var"][box][i_band][sky_i])) if sky_i.any() else np.nan
+    with np.errstate(divide="ignore", invalid="ignore"):
+        depth_i = NJY_ZEROPOINT - 2.5 * np.log10(5.0 * np.sqrt(4 * np.pi * (float(row.psf_sigma_i) / 0.2) ** 2 * v_i))
+        mag_c = NJY_ZEROPOINT - 2.5 * np.log10(comp["flux"].to_numpy(float))
+    margin = mc.get("euclid_depth_margin")
+    below = np.zeros(len(comp), bool)
+    if margin is not None and np.isfinite(depth_i):
+        below = (comp["survey"].to_numpy() == "euclid") & np.isfinite(mag_c) & (mag_c > depth_i + float(margin))
+    comp = comp.assign(visible=~below)
+    comp_mask = comp[~below]
+    in_box_c = ((comp["x"] - ox + 0.5).between(0, n) & (comp["y"] - oy + 0.5).between(0, n)).to_numpy()
+    out["n_euclid_below_depth"] = int((below & in_box_c).sum())
+
     def make_need(size, bx, by):
         # Pixels to fill, and the shared-footprint diagnostics (None for the ellipse method).
         if mc["method"] == "ellipse":
-            return companion_mask((size, size), bx, by, comp, pad), None
+            return companion_mask((size, size), bx, by, comp_mask, pad), None
         if mc["method"] == "footprint":
             return companion_mask_footprint(img["detected"], (size, size), bx, by,
-                                            (x - bx, y - by, a, b, th, f_target), comp, pad, mc["grow_px"],
+                                            (x - bx, y - by, a, b, th, f_target), comp_mask, pad, mc["grow_px"],
                                             mc["shared_k"])
         if mc["method"] == "segmentation":
             if "seg" not in img:

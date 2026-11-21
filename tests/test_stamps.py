@@ -209,3 +209,25 @@ def test_segmentation_checked_by_the_catalogue():
     assert need[15, 20] and not need[15, 10] and not need[15, 13]   # merged source masked, target kept
     assert not need[20, 12]                                         # the clump stays with the target
     assert need[27, 27] and need[3, 3]                              # far orphan, catalogued source in the sky
+
+
+def test_segmentation_catalog_leaves_sources_rubin_cannot_see():
+    # Depth rule: a segment owned only by a Euclid source too faint for Rubin (visible = False) is left as it is,
+    # and such a source in the sky is not masked over its ellipse; a visible one still is.
+    import pandas as pd
+
+    from dp2_cutouts.stages.stamps import companion_mask_segmentation_catalog
+
+    shape = (31, 31)
+    yy, xx = np.indices(shape)
+    lab = np.zeros(shape, np.int64)
+    lab[(np.hypot(xx - 10, yy - 15) <= 3)] = 1            # target
+    lab[(np.hypot(xx - 24, yy - 24) <= 2)] = 2            # faint Euclid source, segmented
+    lab[(np.hypot(xx - 24, yy - 6) <= 2)] = 3             # bright Euclid source, segmented
+    seg = np.broadcast_to(lab, (4,) + shape).copy()
+    comp = pd.DataFrame(dict(x=[24.0, 24.0, 4.0, 4.0], y=[24.0, 6.0, 4.0, 26.0], a=1.5, b=1.5, theta=0.0,
+                             survey="euclid", visible=[False, True, False, True]))
+    need, _ = companion_mask_segmentation_catalog(np.zeros(shape, bool), seg, shape, 0, 0, (10.0, 15.0, 3.0, 3.0, 0.0),
+                                                  comp, 10.0, 2, 0)
+    assert not need[24, 24] and need[6, 24]              # faint segment left, bright segment masked
+    assert not need[4, 4] and need[26, 4]                # faint source in the sky left, bright one masked

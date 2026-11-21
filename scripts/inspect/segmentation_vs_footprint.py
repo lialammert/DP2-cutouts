@@ -45,6 +45,9 @@ def main():
     ap.add_argument("--demo-px", type=int, default=1000)
     ap.add_argument("--cache", default=os.path.join(os.environ.get("SCRATCH", "."), "euclid_mer_seg"))
     ap.add_argument("--offline", action="store_true", help="use the tiles already in --cache, no network")
+    ap.add_argument("--methods", nargs="+", help="run only these methods (footprint is always run); default: all")
+    ap.add_argument("--depth-margin", type=float, default=0.0,
+                    help="masking.euclid_depth_margin of the *_depth methods (magnitudes)")
     ap.add_argument("--d1", help="D1 dataset for the Euclid VIS view of the targets (default: datasets/d1 or "
                                  "datasets_v0/d1 under DP2_ML_ROOT)")
     args = ap.parse_args()
@@ -123,6 +126,16 @@ def main():
         # uncatalogued pieces next to the target kept with it (stamps.companion_mask_segmentation_catalog).
         methods[f"segmentation_catalog_grow{g}"] = case.derive(
             case.name, case.data_root, case.sky_box, masking={"method": "segmentation_catalog", "seg_grow_px": g})
+    # Depth rule: sources seen by Euclid only are masked only when brighter than the local Rubin depth (+ margin).
+    g_mid = args.seg_grow[len(args.seg_grow) // 2]
+    methods["footprint_depth"] = case.derive(case.name, case.data_root, case.sky_box,
+                                             masking={"euclid_depth_margin": args.depth_margin})
+    methods[f"segmentation_catalog_grow{g_mid}_depth"] = case.derive(
+        case.name, case.data_root, case.sky_box,
+        masking={"method": "segmentation_catalog", "seg_grow_px": g_mid, "euclid_depth_margin": args.depth_margin})
+    if args.methods:
+        methods = {k: v for k, v in methods.items() if k == "footprint" or k in args.methods}
+    print("methods:", list(methods))
     ib = stamps.BANDS.index("i")
     n = cc["stamp_px"]
     res, pix = {}, {}
@@ -153,8 +166,12 @@ def main():
                             median_companion_light=round(float(R["companion_light_ratio"].median()), 4),
                             companion_light_above_0p1=int((R["companion_light_ratio"] > 0.1).sum()),
                             # What reaches D1: the pipeline's cuts, then D1's companion-light cut (<= 0.1, NaN passes).
-                            passes_both=int((R["final"] & ~(R["companion_light_ratio"] > 0.1)).sum())))
+                            passes_both=int((R["final"] & ~(R["companion_light_ratio"] > 0.1)).sum()),
+                            euclid_below_depth_per_stamp=round(float(R["n_euclid_below_depth"].mean()), 2)
+                            if "n_euclid_below_depth" in R else np.nan))
     summary = pd.DataFrame(summary)
+    summary["gain_vs_footprint"] = summary["passes_both"] - int(summary.loc[summary["method"] == "footprint",
+                                                                             "passes_both"].iloc[0])
     print(summary.to_string(index=False))
     summary.to_csv(out / "summary.csv", index=False)
     for name, df in res.items():
@@ -162,11 +179,20 @@ def main():
             "companion_light_ratio", "final"]].to_csv(out / f"targets_{name}.csv", index=False)
 
     # Changes of fate, footprint -> main segmentation setting (the middle grow value).
-    main_name = f"segmentation_catalog_grow{args.seg_grow[len(args.seg_grow) // 2]}"
+    main_name = f"segmentation_catalog_grow{g_mid}"
+    if main_name not in res:
+        main_name = next((k for k in res if k != "footprint"), "footprint")
     a = res["footprint"].set_index("object_id")
     b = res[main_name].set_index("object_id")
     lost, gained = a.index[a["final"] & ~b["final"]], a.index[~a["final"] & b["final"]]
     print(f"{main_name} vs footprint: {len(lost)} kept before and cut now, {len(gained)} cut before and kept now")
+    for name in res:
+        if name.endswith("_depth"):
+            d = res[name].set_index("object_id")
+            ok_a = a["final"] & ~(a["companion_light_ratio"] > 0.1)
+            ok_d = d["final"] & ~(d["companion_light_ratio"] > 0.1)
+            print(f"{name} vs footprint (both controls): {int((ok_d & ~ok_a).sum())} recovered, "
+                  f"{int((ok_a & ~ok_d).sum())} lost")
 
     # Catalogued objects that the MER segmentation puts inside the target's own segment: for every target, the
     # segment numbers at its Euclid counterpart position (and at its Rubin centre) are the target's; any other
@@ -247,17 +273,20 @@ def main():
             rgb[lab == v] = (1.0, 0.55, 0.0) if int(v) in tgt else cmap(int(v) % 20)[:3]
         return rgb
 
-    def draw(pick, path, title):
-        pick = [i for i in pick if ("footprint", int(i)) in pix and (main_name, int(i)) in pix]
+    def draw(pick, path, title, ref="footprint", alt=None):
+        alt = alt or main_name
+        a = res[ref].set_index("object_id")
+        b = res[alt].set_index("object_id")
+        pick = [i for i in pick if (ref, int(i)) in pix and (alt, int(i)) in pix]
         if not pick:
             return
         fig, axes = plt.subplots(len(pick), 7, figsize=(14.7, 2.2 * len(pick)), squeeze=False)
         heads = ["Rubin i raw (before masking)", "Euclid VIS (D1)", "Euclid segmentation (orange: target)",
-                 "footprint masking (now)", "removed by footprint",
-                 main_name.replace("_", " ") + " masking", "removed by segmentation"]
+                 ref.replace("_", " ") + " masking", "removed by " + ref.replace("_", " "),
+                 alt.replace("_", " ") + " masking", "removed by " + alt.replace("_", " ")]
         for r_, oid in enumerate(pick):
-            raw, f_old, m_old = pix[("footprint", int(oid))]
-            _, f_new, m_new = pix[(main_name, int(oid))]
+            raw, f_old, m_old = pix[(ref, int(oid))]
+            _, f_new, m_new = pix[(alt, int(oid))]
             s = float(np.nanpercentile(np.abs(raw), 99.5)) or 1.0
             ev = euclid_vis(oid)
             panels = ((raw, None), ("vis", None), ("seg", m_new), (f_old, m_old), (raw - f_old, m_old),
@@ -300,6 +329,15 @@ def main():
     bright = a.loc[differ, "cut6_value"].astype(float).sort_values(ascending=False).index[:12]
     draw(list(bright), "segmentation_vs_footprint_bright.png",
          "highest catalogue S/N_i targets where the two maskings differ; red: pixels replaced by sky")
+    # What the depth rule changes on the current masking: targets recovered (cut before, kept now) first.
+    if "footprint_depth" in res:
+        d = res["footprint_depth"].set_index("object_id")
+        rec = list(a.index[~a["final"] & d["final"]])
+        changed = [i for i in a.index if ("footprint", int(i)) in pix and ("footprint_depth", int(i)) in pix
+                   and (pix[("footprint", int(i))][2] != pix[("footprint_depth", int(i))][2]).any() and i not in rec]
+        draw(rec[:8] + changed[:max(0, 12 - len(rec[:8]))], "depth_rule_footprint.png",
+             "depth rule on the current masking: recovered targets first, then other changed masks",
+             ref="footprint", alt="footprint_depth")
     (out / "run.json").write_text(json.dumps(dict(patch=args.patch, demo_px=args.demo_px, tiles=tiles,
                                                   seg_grow=args.seg_grow, main=main_name), indent=2))
     print(f"-> {out}  ({time.time() - t0:.0f} s)")
