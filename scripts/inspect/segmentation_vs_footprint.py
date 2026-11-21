@@ -133,6 +133,10 @@ def main():
     methods[f"segmentation_catalog_grow{g_mid}_depth"] = case.derive(
         case.name, case.data_root, case.sky_box,
         masking={"method": "segmentation_catalog", "seg_grow_px": g_mid, "euclid_depth_margin": args.depth_margin})
+    # Hybrid: footprint masking, plus the Euclid segments of the neighbours inside the target's own footprint.
+    methods[f"hybrid_grow{g_mid}_depth"] = case.derive(
+        case.name, case.data_root, case.sky_box,
+        masking={"method": "hybrid", "seg_grow_px": g_mid, "euclid_depth_margin": args.depth_margin})
     if args.methods:
         methods = {k: v for k, v in methods.items() if k == "footprint" or k in args.methods}
     print("methods:", list(methods))
@@ -381,6 +385,7 @@ def main():
         fig.savefig(out / path, dpi=130, bbox_inches="tight")
 
     draw_halo("footprint_depth", f"segmentation_catalog_grow{g_mid}_depth", "halo_ring_comparison.png")
+    draw_halo("footprint_depth", f"hybrid_grow{g_mid}_depth", "halo_ring_hybrid.png")
 
     # What the depth rule changes on the current masking: targets recovered (cut before, kept now) first.
     if "footprint_depth" in res:

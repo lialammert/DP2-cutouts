@@ -129,7 +129,7 @@ def companion_mask_footprint(detected, shape, ox, oy, target, comp, pad, grow_px
                 ratio_max = max(ratio_max, float(r.flux) / float(target[5]))
         elif not (inside and det[iy, ix]):
             m |= radius_map(shape, x, y, r.a, r.b, r.theta) <= 1.0
-    return m, dict(n_shared=n_shared, flux_ratio_max=ratio_max)
+    return m, dict(n_shared=n_shared, flux_ratio_max=ratio_max, target_fp=target_fp)
 
 
 def companion_mask_segmentation(detected, seg, shape, ox, oy, target, grow_px, seg_grow_px, counterpart=None,
@@ -517,10 +517,9 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                                                     (x - bx, y - by, a, b, th), mc["grow_px"], mc["seg_grow_px"],
                                                     counterpart=cp)
             return need_s, None
-        if mc["method"] == "segmentation_catalog":
+        if mc["method"] in ("segmentation_catalog", "hybrid"):
             if "seg" not in img:
-                raise RuntimeError('masking.method "segmentation_catalog" needs img["seg"] '
-                                   '(sources/euclid_seg.seg_on_grid)')
+                raise RuntimeError(f'masking.method "{mc["method"]}" needs img["seg"] (sources/euclid_seg.seg_on_grid)')
             cp = None
             if pd.notna(row.euclid_ra):
                 ex, ey = img["wcs"][ib].world_to_pixel_values(row.euclid_ra, row.euclid_dec)
@@ -529,8 +528,19 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                                                             (x - bx, y - by, a, b, th, f_target), comp, pad,
                                                             mc["grow_px"],
                                                             mc["seg_grow_px"], counterpart=cp)
-            return need_s, None
-        raise ValueError('masking.method must be "ellipse", "footprint", "segmentation" or "segmentation_catalog"')
+            if mc["method"] == "segmentation_catalog":
+                return need_s, None
+            # "hybrid": the footprint masking (wide: whole Rubin footprints of separate neighbours, no ring of
+            # left-over wings), plus, inside the target's own footprint only, the neighbours' share of the Euclid
+            # segments (instead of shared_k times their ellipse, which left the halos of bright neighbours that
+            # share the target footprint). Measured on 5063_34: tight Euclid masks alone left rings around
+            # separate neighbours, footprint masks alone left large halos of bright shared neighbours.
+            need_f, info_f = companion_mask_footprint(img["detected"], (size, size), bx, by,
+                                                      (x - bx, y - by, a, b, th, f_target), comp_mask, pad,
+                                                      mc["grow_px"], mc["shared_k"])
+            return need_f | (need_s & info_f["target_fp"]), info_f
+        raise ValueError('masking.method must be "ellipse", "footprint", "segmentation", "segmentation_catalog" or '
+                         '"hybrid"')
 
     need, shared_info = make_need(n, ox, oy)
     out["masked_fraction"] = float(need.mean())
@@ -616,7 +626,7 @@ def run(cfg):
                   & (cat["patch"] == meta["patch"])]
     rubin, euclid = companions(cfg, img, cat)
     mc = cfg["masking"]
-    if mc["method"] in ("segmentation", "segmentation_catalog"):
+    if mc["method"] in ("segmentation", "segmentation_catalog", "hybrid"):
         # Euclid segmentation sampled on the Rubin grid of the region (tiles downloaded by fetch).
         from ..sources import euclid_seg
         tiles = euclid_seg.cached_tiles(euclid_seg.cache_dir(mc))
