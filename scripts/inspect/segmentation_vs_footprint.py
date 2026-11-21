@@ -46,6 +46,8 @@ def main():
     ap.add_argument("--cache", default=os.path.join(os.environ.get("SCRATCH", "."), "euclid_mer_seg"))
     ap.add_argument("--offline", action="store_true", help="use the tiles already in --cache, no network")
     ap.add_argument("--methods", nargs="+", help="run only these methods (footprint is always run); default: all")
+    ap.add_argument("--psf-k", type=float, nargs="+", default=[1.0, 2.0, 3.0],
+                    help="pipeline method: segment growth in units of the Rubin i-band PSF sigma")
     ap.add_argument("--depth-margin", type=float, default=0.0,
                     help="masking.euclid_depth_margin of the *_depth methods (magnitudes)")
     ap.add_argument("--d1", help="D1 dataset for the Euclid VIS view of the targets (default: datasets/d1 or "
@@ -137,6 +139,11 @@ def main():
     methods[f"hybrid_grow{g_mid}_depth"] = case.derive(
         case.name, case.data_root, case.sky_box,
         masking={"method": "hybrid", "seg_grow_px": g_mid, "euclid_depth_margin": args.depth_margin})
+    # "pipeline": Rubin footprints + MER segments, no ellipse multiple, segments grown by k x the Rubin PSF sigma.
+    for k_ in args.psf_k:
+        methods[f"pipeline_k{k_:g}_depth"] = case.derive(
+            case.name, case.data_root, case.sky_box,
+            masking={"method": "pipeline", "seg_grow_psf_k": k_, "euclid_depth_margin": args.depth_margin})
     if args.methods:
         methods = {k: v for k, v in methods.items() if k == "footprint" or k in args.methods}
     print("methods:", list(methods))
@@ -386,6 +393,8 @@ def main():
 
     draw_halo("footprint_depth", f"segmentation_catalog_grow{g_mid}_depth", "halo_ring_comparison.png")
     draw_halo("footprint_depth", f"hybrid_grow{g_mid}_depth", "halo_ring_hybrid.png")
+    for k_ in args.psf_k:
+        draw_halo("footprint_depth", f"pipeline_k{k_:g}_depth", f"halo_ring_pipeline_k{k_:g}.png")
 
     # What the depth rule changes on the current masking: targets recovered (cut before, kept now) first.
     if "footprint_depth" in res:

@@ -130,7 +130,7 @@ def fetch_for_box(ra, dec, radius_deg, cache_dir):
     return paths
 
 
-SEG_METHODS = ("segmentation", "segmentation_catalog", "hybrid")
+SEG_METHODS = ("segmentation", "segmentation_catalog", "hybrid", "pipeline")
 
 
 def cache_dir(masking):

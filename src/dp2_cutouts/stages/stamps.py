@@ -517,18 +517,27 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                                                     (x - bx, y - by, a, b, th), mc["grow_px"], mc["seg_grow_px"],
                                                     counterpart=cp)
             return need_s, None
-        if mc["method"] in ("segmentation_catalog", "hybrid"):
+        if mc["method"] in ("segmentation_catalog", "hybrid", "pipeline"):
+            # "pipeline": the products of the two pipelines and no catalogue ellipse multiple: Rubin detection
+            # footprints for the neighbours Rubin separates, Euclid MER segments (owned by the catalogued objects
+            # they hold) for those it does not (sharing the target footprint, or seen by Euclid only), grown for
+            # the Rubin PSF: seg_grow_psf_k times the stamp's i-band PSF sigma. Same function as
+            # segmentation_catalog, whose fixed 2 px growth left rings of wings in Rubin (measured on 5063_34).
             if "seg" not in img:
                 raise RuntimeError(f'masking.method "{mc["method"]}" needs img["seg"] (sources/euclid_seg.seg_on_grid)')
             cp = None
             if pd.notna(row.euclid_ra):
                 ex, ey = img["wcs"][ib].world_to_pixel_values(row.euclid_ra, row.euclid_dec)
                 cp = (float(ex) - bx, float(ey) - by)
+            k_psf = mc.get("seg_grow_psf_k")
+            if mc["method"] == "pipeline" and k_psf is None:
+                raise ValueError('masking.method "pipeline" needs masking.seg_grow_psf_k')
+            grow_s = (int(np.ceil(float(k_psf) * float(row.psf_sigma_i) / 0.2)) if k_psf is not None
+                      else int(mc["seg_grow_px"]))
             need_s, _ = companion_mask_segmentation_catalog(img["detected"], img["seg"], (size, size), bx, by,
                                                             (x - bx, y - by, a, b, th, f_target), comp, pad,
-                                                            mc["grow_px"],
-                                                            mc["seg_grow_px"], counterpart=cp)
-            if mc["method"] == "segmentation_catalog":
+                                                            mc["grow_px"], grow_s, counterpart=cp)
+            if mc["method"] in ("segmentation_catalog", "pipeline"):
                 return need_s, None
             # "hybrid": the footprint masking (wide: whole Rubin footprints of separate neighbours, no ring of
             # left-over wings), plus, inside the target's own footprint only, the neighbours' share of the Euclid
@@ -539,8 +548,8 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                                                       (x - bx, y - by, a, b, th, f_target), comp_mask, pad,
                                                       mc["grow_px"], mc["shared_k"])
             return need_f | (need_s & info_f["target_fp"]), info_f
-        raise ValueError('masking.method must be "ellipse", "footprint", "segmentation", "segmentation_catalog" or '
-                         '"hybrid"')
+        raise ValueError('masking.method must be "ellipse", "footprint", "segmentation", "segmentation_catalog", '
+                         '"hybrid" or "pipeline"')
 
     need, shared_info = make_need(n, ox, oy)
     out["masked_fraction"] = float(need.mean())
@@ -626,7 +635,7 @@ def run(cfg):
                   & (cat["patch"] == meta["patch"])]
     rubin, euclid = companions(cfg, img, cat)
     mc = cfg["masking"]
-    if mc["method"] in ("segmentation", "segmentation_catalog", "hybrid"):
+    if mc["method"] in ("segmentation", "segmentation_catalog", "hybrid", "pipeline"):
         # Euclid segmentation sampled on the Rubin grid of the region (tiles downloaded by fetch).
         from ..sources import euclid_seg
         tiles = euclid_seg.cached_tiles(euclid_seg.cache_dir(mc))
