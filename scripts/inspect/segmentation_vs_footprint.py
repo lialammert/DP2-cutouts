@@ -337,6 +337,51 @@ def main():
     bright = a.loc[differ, "cut6_value"].astype(float).sort_values(ascending=False).index[:12]
     draw(list(bright), "segmentation_vs_footprint_bright.png",
          "highest catalogue S/N_i targets where the two maskings differ; red: pixels replaced by sky")
+    # The measured halo, drawn: for two maskings, the masked stamp with the mask (red) and the ring where the left-over
+    # light is measured (cyan: 1-4 px outside the mask, away from the target), and halo_ring_z in the title. Targets
+    # kept by both, those where the two values differ most first.
+    from scipy.ndimage import binary_dilation
+
+    def draw_halo(ref, alt, path, n_rows=10):
+        if ref not in res or alt not in res:
+            return
+        A_, B_ = res[ref].set_index("object_id"), res[alt].set_index("object_id")
+        both = A_.index[A_["final"] & B_["final"]]
+        both = [i for i in both if (ref, int(i)) in pix and (alt, int(i)) in pix]
+        if not both:
+            return
+        d_ = (B_.loc[both, "halo_ring_z"] - A_.loc[both, "halo_ring_z"]).dropna()
+        order = list(d_.sort_values(ascending=False).index[:n_rows - 3]) + list(d_.sort_values().index[:3])
+        rows_ = list(dict.fromkeys(order))
+        yy_, xx_ = np.indices((n, n))
+        fig, axes = plt.subplots(len(rows_), 3, figsize=(7.2, 2.4 * len(rows_)), squeeze=False)
+        for r_, oid in enumerate(rows_):
+            raw = pix[(ref, int(oid))][0]
+            s = float(np.nanpercentile(np.abs(raw), 99.5)) or 1.0
+            t_ = A_.loc[oid]
+            r_t = np.hypot(xx_ - half, yy_ - half) / max(float(np.sqrt(t_["ellipse_a"] * t_["ellipse_b"])), 1.0)
+            axes[r_, 0].imshow(stretch(raw, s), origin="lower", cmap="gray_r")
+            axes[r_, 0].set_ylabel(f"{int(oid)}", fontsize=6)
+            for c_, (name, R_) in enumerate(((ref, A_), (alt, B_)), start=1):
+                _, filled, need_ = pix[(name, int(oid))]
+                ring = binary_dilation(need_, iterations=4) & ~need_ & (r_t > 2.0)
+                ax = axes[r_, c_]
+                ax.imshow(stretch(filled, s), origin="lower", cmap="gray_r")
+                if need_.any():
+                    ax.contour(need_, levels=[0.5], colors="tab:red", linewidths=0.6)
+                if ring.any():
+                    ax.contour(ring, levels=[0.5], colors="tab:cyan", linewidths=0.5)
+                ax.set_title(f"{name.replace('_', ' ')}\nhalo_ring_z = {R_.loc[oid, 'halo_ring_z']:.1f}", fontsize=7)
+            for ax in axes[r_]:
+                ax.set_xticks([])
+                ax.set_yticks([])
+        fig.suptitle("measured halo: red = masked, cyan = ring where the left-over light is measured\n"
+                     "(kept by both maskings; largest differences first, then the 3 opposite cases)", fontsize=8, y=1.0)
+        fig.tight_layout(rect=(0, 0, 1, 0.98))
+        fig.savefig(out / path, dpi=130, bbox_inches="tight")
+
+    draw_halo("footprint_depth", f"segmentation_catalog_grow{g_mid}_depth", "halo_ring_comparison.png")
+
     # What the depth rule changes on the current masking: targets recovered (cut before, kept now) first.
     if "footprint_depth" in res:
         d = res["footprint_depth"].set_index("object_id")
