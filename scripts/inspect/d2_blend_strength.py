@@ -26,13 +26,17 @@ from dp2_cutouts.pairs.store import Store  # noqa: E402
 from dp2_cutouts.pipeline.patches import load_patches, patch_case  # noqa: E402
 
 COLS = ("sb_rubin", "partner_sep_arcsec", "euclid_vis_mag", "euclid_overlap_frac")
+# Measurements of the Euclid separation test, kept for D2 targets and rejected candidates alike.
+SEP = ("snr_vis", "halo_ring_z", "flux_ratio_catalog", "euclid_masked_fraction_in_target", "sep_delta_e")
 
 
 def outcome_table(cfg, d2):
     st = Store(d2)
-    kept = st.meta[["euclid_object_id", "group_id"]].assign(outcome="kept", detail="")
+    keep_cols = ["euclid_object_id", "group_id"] + [c for c in SEP if c in st.meta]
+    kept = st.meta[keep_cols].assign(outcome="kept", detail="")
     rej = st.rejected()
-    rej = rej[rej["group_id"].notna()][["euclid_object_id", "group_id", "reason", "detail"]]
+    rej = rej[rej["group_id"].notna()]
+    rej = rej[["euclid_object_id", "group_id", "reason", "detail"] + [c for c in SEP if c in rej]]
     rej = rej.rename(columns={"reason": "outcome"})
     out = pd.concat([kept, rej], ignore_index=True)
     out["patch_name"] = out["group_id"].str.split(":").str[0]
@@ -59,18 +63,22 @@ def main():
             tabs.append(cand)
         print(f"{p['name']}: {len(cand)} candidates", flush=True)
     cand = pd.concat(tabs, ignore_index=True)
-    t = cand.merge(status[["euclid_object_id", "group_id", "outcome", "detail"]], on=["euclid_object_id", "group_id"],
-                   how="left")
+    sep = [c for c in SEP if c in status]
+    t = cand.merge(status[["euclid_object_id", "group_id", "outcome", "detail"] + sep],
+                   on=["euclid_object_id", "group_id"], how="left")
     t["outcome"] = t["outcome"].fillna("unknown")
     t.to_csv(out / "d2_blend_strength.csv", index=False)
 
     sb_min = float(cfg["dataset2"]["sb_rubin_min"])
-    print(f"\n{len(t)} candidates; sb_rubin_min = {sb_min}")
+    print(f"\n{len(t)} candidates; sb_rubin_min = {sb_min}; separation_test = "
+          f"{cfg['dataset2'].get('separation_test', 'moments')}")
     print(t["outcome"].value_counts().to_string())
-    for c in COLS:
-        q = t.groupby("outcome")[c].quantile([0.1, 0.25, 0.5, 0.75, 0.9]).unstack().round(3)
+    details = t.loc[t["outcome"] == "euclid_separation", "detail"].value_counts()
+    print(f"\neuclid_separation details\n{details.to_string()}")
+    for c in COLS + tuple(sep):
+        q = t.groupby("outcome")[c].quantile([0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]).unstack().round(3)
         q.insert(0, "n_finite", t.groupby("outcome")[c].count())
-        print(f"\n{c} (quantiles 10/25/50/75/90 %)\n{q.to_string()}")
+        print(f"\n{c} (quantiles 10/25/50/75/90/95/99 %)\n{q.to_string()}")
     # Fraction kept per sb_rubin bin, among the Rubin-blended candidates.
     b = t[t["sb_rubin"] > sb_min].copy()
     edges = np.array([0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 1.0, np.inf])
