@@ -61,20 +61,42 @@ def label(r):
         except (TypeError, ValueError):
             return str(v)
     why = f"  fails: {r['recomputed_reasons']}" if r.get("recomputed_reasons") else ""
+    if "partner_masked" in r:
+        why += f"  partner {g('partner_sep_arcsec', '{:.2f}')}\" masked={r['partner_masked']}"
     return (f"{int(r['euclid_object_id'])}  VIS={g('euclid_vis_mag', '{:.1f}')}  Sb={g('sb_rubin', '{:.2f}')}{why}\n"
             f"de={g('sep_delta_e', '{:.3f}')} dc={g('sep_centroid_shift_arcsec', '{:.3f}')}\" "
             f"ds={g('sep_rel_size_change', '{:.3f}')} df={g('sep_rel_flux_change', '{:.3f}')} "
             f"mask_t={g('euclid_masked_fraction_in_target', '{:.2f}')}")
 
 
-def draw_pages(pdf, items, title):
-    # items: list of (row dict, rubin_i or None, rubin_ivar_i or None, vis_raw, vis_masked, vis_ivar, need).
+def draw_marks(ax, marks):
+    # Catalogue positions on a VIS panel: target (green +), its copaings group partners (blue x), other Euclid
+    # catalogue objects (orange dots).
+    if not marks:
+        return
+    n = ax.get_images()[0].get_array().shape[0]
+    for key, kw in (("others", dict(marker=".", s=10, c="tab:orange")), ("partners", dict(marker="x", s=28, c="blue")),
+                    ("target", dict(marker="+", s=40, c="lime"))):
+        xy = np.asarray(marks.get(key, []), float).reshape(-1, 2)
+        xy = xy[(xy[:, 0] > -0.5) & (xy[:, 0] < n - 0.5) & (xy[:, 1] > -0.5) & (xy[:, 1] < n - 0.5)]
+        if len(xy):
+            ax.scatter(xy[:, 0], xy[:, 1], linewidths=0.8, **kw)
+    ax.set_xlim(-0.5, n - 0.5)
+    ax.set_ylim(-0.5, n - 0.5)
+
+
+def draw_pages(pdf, items, title, start=0, total=None):
+    # items: list of (row dict, rubin_i or None, rubin_ivar_i or None, vis_raw, vis_masked, vis_ivar, need[, marks]);
+    # start / total: position of items in the whole list, for the page titles.
     per_page = 2 * ROWS
+    total = len(items) if total is None else total
     for p0 in range(0, len(items), per_page):
         fig, axes = plt.subplots(ROWS, 6, figsize=(8.27, 11.0))
         for ax in axes.ravel():
             ax.axis("off")
-        for k, (r, ri, riv, raw, masked, eiv, need) in enumerate(items[p0:p0 + per_page]):
+        for k, it in enumerate(items[p0:p0 + per_page]):
+            r, ri, riv, raw, masked, eiv, need = it[:7]
+            marks = it[7] if len(it) > 7 else None
             row, col = divmod(k, 2)
             a = axes[row, 3 * col:3 * col + 3]
             for x in a:
@@ -83,9 +105,10 @@ def draw_pages(pdf, items, title):
                 show(a[0], ri, noise_sigma(ri, riv), "Rubin i (blend)")
             s = noise_sigma(raw, eiv)
             show(a[1], raw, s, "VIS before")
+            draw_marks(a[1], marks)
             show(a[2], masked, s, "VIS after masking", contour=need)
             a[0].text(0.0, -0.08, label(r), transform=a[0].transAxes, fontsize=5, va="top", ha="left")
-        fig.suptitle(f"{title}  ({p0 + 1}-{min(p0 + per_page, len(items))} of {len(items)})", fontsize=9)
+        fig.suptitle(f"{title}  ({start + p0 + 1}-{start + min(p0 + per_page, len(items))} of {total})", fontsize=9)
         fig.subplots_adjust(left=0.01, right=0.99, top=0.95, bottom=0.04, wspace=0.04, hspace=0.42)
         pdf.savefig(fig, dpi=150)
         plt.close(fig)
@@ -127,7 +150,7 @@ def kept(cfg, d2, out):
             raw, need = st.take("euclid_flux_unmasked", idx), st.take("euclid_fill", idx)
             items = [(meta.iloc[i].to_dict(), rf[j, ..., I_BAND], riv[j, ..., I_BAND], raw[j, ..., vis],
                       ef[j, ..., vis], eiv[j, ..., vis], need[j]) for j, i in enumerate(idx)]
-            draw_pages(pdf, items, "D2 kept")
+            draw_pages(pdf, items, "D2 kept", start=c0, total=len(order))
             print(f"kept: {c0 + len(idx)} / {len(order)}", flush=True)
     print(f"-> {path}")
 
@@ -148,13 +171,18 @@ def rejected(cfg, d2, out, per_cat, n_patches, seed):
     from dp2_cutouts.sources.rubin_soda import BANDS
     from dp2_cutouts.stages import stamps as stamp_stage
 
-    rej = Store(d2).rejected()
+    st = Store(d2)
+    rej = st.rejected()
     rej = rej[rej["reason"] == "euclid_separation"].copy()
     rej["category"] = rej["detail"].map(category)
     rej["patch"] = rej["group_id"].str.split(":").str[0]
     # Sample drawn from the patches with the most rejections only: each patch costs a load of its Rubin images.
     top = rej["patch"].value_counts().index[:n_patches]
-    pool = rej[rej["patch"].isin(top)]
+    # Kept targets of the same patches go through the same recomputation, to compare with the catalogue marks.
+    kp = st.meta[["euclid_object_id", "group_id"]].copy()
+    kp["patch"] = kp["group_id"].str.split(":").str[0]
+    kp = kp[kp["patch"].isin(top)].assign(category="kept", detail="")
+    pool = pd.concat([rej[rej["patch"].isin(top)], kp], ignore_index=True)
     rng = np.random.default_rng(seed)
     pick = []
     for cat_, g in pool.groupby("category"):
@@ -198,6 +226,21 @@ def rejected(cfg, d2, out, per_cat, n_patches, seed):
             sep, reasons, (ef, eiv, em, ep, need, f_raw) = dataset2.euclid_separation(cut, tgt, others, cfg, rg, tiles)
             row.update(sep)
             row["recomputed_reasons"] = "+".join(reasons)
+            # Catalogue positions on the cutout; is the group partner (the source that blends the target in
+            # Rubin) under the mask?
+            cw = cut["wcs"]
+            grp = [int(v) for v in r.group_euclid_rows.split(",") if int(v) != int(r.euclid_row)]
+            pe = e.loc[grp]
+            px, py = cw.world_to_pixel_values(pe["ra"].to_numpy(float), pe["dec"].to_numpy(float))
+            oo = others.drop(index=grp, errors="ignore")
+            qx, qy = cw.world_to_pixel_values(oo["ra"].to_numpy(float), oo["dec"].to_numpy(float))
+            tx, ty = cw.world_to_pixel_values(r.euclid_ra, r.euclid_dec)
+            marks = dict(target=[(float(tx), float(ty))], partners=list(zip(np.atleast_1d(px), np.atleast_1d(py))),
+                         others=list(zip(np.atleast_1d(qx), np.atleast_1d(qy))))
+            n = need.shape[0]
+            hit = [bool(need[int(round(y_)), int(round(x_))]) for x_, y_ in zip(np.atleast_1d(px), np.atleast_1d(py))
+                   if 0 <= round(x_) < n and 0 <= round(y_) < n]
+            row["partner_masked"] = ("yes" if all(hit) else "no" if not any(hit) else "part") if hit else "off"
             w = img["wcs"][BANDS.index("i")]
             x, y = w.world_to_pixel_values(r.euclid_ra, r.euclid_dec)
             st = dataset2.rubin_stamp(img, float(x), float(y), n_r)
@@ -208,7 +251,7 @@ def rejected(cfg, d2, out, per_cat, n_patches, seed):
             c = cat_of.loc[int(r.euclid_object_id)]
             if row["recomputed_reasons"] != detail_of.loc[int(r.euclid_object_id)]:
                 n_diff += 1
-            items[c].append((row, ri, riv, f_raw[..., vis], ef[..., vis], eiv[..., vis], need))
+            items[c].append((row, ri, riv, f_raw[..., vis], ef[..., vis], eiv[..., vis], need, marks))
         print(f"rejected: patch {pname} done", flush=True)
     if tiles is not None:
         tiles.__exit__(None, None, None)
@@ -228,12 +271,21 @@ def rejected(cfg, d2, out, per_cat, n_patches, seed):
                  "  all_four     = delta_e + centroid_shift + size_change + flux_change",
                  "  hsm_failed   = the adaptive moments failed before or after masking",
                  "  delta_e_only = only the ellipticity change is above its limit",
-                 "  other        = any other combination (incl. target_masked)"]
+                 "  other        = any other combination (incl. target_masked)",
+                 "  kept         = D2 targets of the same patches, for comparison", "",
+                 "VIS before: green + target, blue x its copaings group partners (the sources that blend it in",
+                 "  Rubin), orange dots the other Euclid catalogue objects. Label: partner separation and whether",
+                 "  the partner position is masked (yes / no / part for several partners / off the cutout).", "",
+                 "partner masked, per category:"]
+        for c, its in items.items():
+            pm = pd.Series([t[0]["partner_masked"] for t in its]).value_counts().to_dict()
+            lines.append(f"  {c:13s} {pm}")
         summary_page(pdf, lines)
-        for c in ("all_four", "hsm_failed", "delta_e_only", "other"):
+        for c in ("kept", "all_four", "hsm_failed", "delta_e_only", "other"):
             if items.get(c):
+                n_c = len(st.meta) if c == "kept" else counts.get(c, 0)
                 draw_pages(pdf, sorted(items[c], key=lambda t: t[0].get("euclid_vis_mag", 99)),
-                           f"rejected: {c} (of {counts.get(c, 0)})")
+                           f"{'D2 kept' if c == 'kept' else 'rejected: ' + c} (sample, of {n_c})")
     print(f"-> {path}")
 
 
