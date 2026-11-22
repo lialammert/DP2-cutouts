@@ -156,15 +156,25 @@ def test_fixed_splits_override_the_draw():
         splits.split_table(meta, cfg)
 
 
-def test_repo_split_of_the_first_scale_run_has_every_split(monkeypatch):
-    # The 9 patches of the first Jean Zay scale run must give train, val and test with the repository config.
+def test_repo_splits_give_four_splits_and_keep_the_three_split_draw(monkeypatch):
+    # The repository config (EDF-F + EDF-S run, a few hundred patches) gives train / val / test / holdout in its
+    # proportions; without holdout in the fractions the draw is the former three-split one (holdout comes last).
     from pathlib import Path
     from dp2_cutouts.mlconfig import MLConfig
     monkeypatch.setenv("DP2_CONFIG", "x.yaml")
     monkeypatch.setenv("DP2_ML_ROOT", "/tmp/ml")
     cfg = MLConfig.load(Path(__file__).parents[1] / "config" / "ml_jeanzay.yaml")
-    meta = pd.DataFrame(dict(tract=[5063] * 9, patch=[23, 24, 25, 33, 34, 35, 43, 44, 45]))
-    assert set(splits.split_table(meta, cfg)) == set(splits.SPLITS)
+    fr = cfg["splits"]["fractions"]
+    assert set(fr) == set(splits.SPLITS) and np.isclose(sum(fr.values()), 1.0)
+    meta = pd.DataFrame(dict(tract=np.repeat([5063, 5064, 2393, 2394], 100), patch=np.tile(np.arange(100), 4)))
+    s = splits.split_table(meta, cfg)
+    assert set(s) == set(splits.SPLITS)
+    for name, f in fr.items():
+        assert abs((s == name).mean() - f) < 0.06
+    t, p = meta["tract"].to_numpy(), meta["patch"].to_numpy()
+    three = splits.assign(t, p, dict(train=0.8, val=0.1, test=0.1), seed=1)
+    four = splits.assign(t, p, dict(train=0.8, val=0.1, test=0.1, holdout=0.0), seed=1)
+    assert np.array_equal(three, four) and "holdout" not in set(three)
 
 
 def test_fill_masked_replaces_only_bad_pixels():

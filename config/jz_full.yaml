@@ -25,7 +25,9 @@ patches:
   search:
     - {ra: 52.93, dec: -28.09, radius_deg: 2.0}    # EDF-F
     - {ra: 61.24, dec: -48.42, radius_deg: 3.0}    # EDF-S
-  names_file: /lustre/fsn1/projects/rech/fqn/ury73vm/dp2-data/area_census.csv
+  # The patch list of the current wave (rows of area_census.csv): a first wave to measure the cost per patch, then
+  # the whole census. Not part of the configuration fingerprint: patches already done are skipped.
+  names_file: /lustre/fsn1/projects/rech/fqn/ury73vm/dp2-data/patch_list.csv
   euclid_cover_min: 1.0
   catalog_margin_arcsec: 10.0   # added to the outer polygon of the patch (which already extends 30" past its inner part)
 

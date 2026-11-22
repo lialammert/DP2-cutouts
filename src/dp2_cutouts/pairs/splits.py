@@ -1,7 +1,9 @@
 # splits.py
 # Anna Preto
 # AstroDeep Project
-# Train / validation / test assignment by Rubin patch (tract, patch), shared by every dataset of the project.
+# Train / validation / test / holdout assignment by Rubin patch (tract, patch), shared by every dataset of the project.
+# train fits the networks, val chooses (early stopping, settings), test validates each stage before the next one
+# (Rubin VAE, Stage 1, Stage 2), holdout is read by no training nor choice: the final evaluation only.
 # A patch is a contiguous 0.2 deg area with its own seeing, depth and sky: splitting by galaxy would put neighbours,
 # which share all three, on both sides. The draw is a hash of (seed, tract, patch), so it does not depend on the
 # order or the number of patches processed so far: adding patches never moves an existing one to another split.
@@ -12,7 +14,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
-SPLITS = ("train", "val", "test")
+SPLITS = ("train", "val", "test", "holdout")
 
 
 def patch_uniform(seed, tract, patch):
@@ -21,11 +23,13 @@ def patch_uniform(seed, tract, patch):
 
 
 def assign(tracts, patches, fractions, seed):
-    edges = np.cumsum([fractions[s] for s in SPLITS])
+    # A split missing from the fractions has none (holdout appended last: without it, the former three-split
+    # assignment is unchanged).
+    edges = np.cumsum([float(fractions.get(s, 0.0)) for s in SPLITS])
     if not np.isclose(edges[-1], 1.0):
         raise ValueError(f"split fractions must sum to 1, got {fractions}")
     u = np.array([patch_uniform(seed, t, p) for t, p in zip(tracts, patches)])
-    return np.array(SPLITS, dtype=object)[np.searchsorted(edges, u, side="right").clip(0, 2)]
+    return np.array(SPLITS, dtype=object)[np.searchsorted(edges, u, side="right").clip(0, len(SPLITS) - 1)]
 
 
 def unit_vectors(ra, dec):

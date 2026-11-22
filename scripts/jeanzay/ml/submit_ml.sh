@@ -142,15 +142,30 @@ submit_rubin_vae() {
     echo "$tr"
 }
 
+gpu_chain() {
+    # One training as DP2_GPU_CHAIN (default 1) jobs in a row (afterany), for short QoS such as qos_gpu_a100-dev
+    # (2 h): each job resumes from <run>/backup and a finished run (DONE) returns at once; only the last job runs
+    # the evaluation ($2). $1: job(s) the first one waits for; $3: job name; then the dp2-ml command. Prints the
+    # last job id.
+    local after="$1" ev="$2" name="$3"; shift 3
+    local n="${DP2_GPU_CHAIN:-1}" k id="" d ex
+    for ((k = 1; k <= n; k++)); do
+        if [[ -z "$id" ]]; then d=$(dep "$after"); else d="--dependency=afterany:$id"; fi
+        ex="--export=ALL,AFTER_TRAIN="
+        [[ $k -eq $n ]] && ex="--export=ALL,AFTER_TRAIN=$ev"
+        id=$(gpu --job-name="$name" $d "$ex" "$DP2_ML_SCRIPTS/gpu.slurm" "$@")
+    done
+    echo "$id"
+}
+
 submit_stage1() {
     local after="${1:-}"; shift || true
     local names=("$@") ids=()
     [[ ${#names[@]} -eq 0 ]] && read -r -a names <<< "$(ablations stage1)"
     for a in "${names[@]}"; do
-        ids+=("$(gpu --job-name="dp2-$a" $(dep "$after") --export=ALL,AFTER_TRAIN=eval-stage1 \
-                 "$DP2_ML_SCRIPTS/gpu.slurm" train-stage1 --ablation "$a")")
+        ids+=("$(gpu_chain "$after" eval-stage1 "dp2-$a" train-stage1 --ablation "$a")")
     done
-    echo "stage 1: ${names[*]} -> ${ids[*]}" >&2
+    echo "stage 1: ${names[*]} -> ${ids[*]} (last job of each chain of ${DP2_GPU_CHAIN:-1})" >&2
     (IFS=:; echo "${ids[*]}")
 }
 
@@ -160,10 +175,9 @@ submit_stage2() {
     local names=("$@") ids=()
     [[ ${#names[@]} -eq 0 ]] && read -r -a names <<< "$(ablations stage2)"
     for a in "${names[@]}"; do
-        ids+=("$(gpu --job-name="dp2-$a" $(dep "$after") --export=ALL,AFTER_TRAIN=eval-stage2 \
-                 "$DP2_ML_SCRIPTS/gpu.slurm" train-stage2 --ablation "$a" --stage1-run "$STAGE1_RUN")")
+        ids+=("$(gpu_chain "$after" eval-stage2 "dp2-$a" train-stage2 --ablation "$a" --stage1-run "$STAGE1_RUN")")
     done
-    echo "stage 2 (teacher $STAGE1_RUN): ${names[*]} -> ${ids[*]}" >&2
+    echo "stage 2 (teacher $STAGE1_RUN): ${names[*]} -> ${ids[*]} (last job of each chain of ${DP2_GPU_CHAIN:-1})" >&2
     (IFS=:; echo "${ids[*]}")
 }
 

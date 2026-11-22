@@ -69,14 +69,16 @@ euclid:
 splits:
   # Splits are drawn by Rubin (tract, patch), the same assignment for every dataset, so that no patch feeds two
   # splits and no Stage 2 test patch has been seen by the Stage 1 teacher.
-  fractions: {train: 0.8, val: 0.1, test: 0.1}
+  # train fits the networks, val chooses (early stopping, settings), test validates each stage (Rubin VAE, Stage 1,
+  # Stage 2) before the next one, holdout is read by no training nor choice: the final evaluation only.
+  fractions: {train: 0.7, val: 0.1, test: 0.1, holdout: 0.1}
   # Pairs of objects closer than this but in different splits are counted in the quality report (border leakage).
   leakage_radius_arcsec: 12.0
-  # Patches whose split is set by hand, overriding the draw ("tract_patch": train | val | test). The 9 patches of
-  # the first scale run (tract 5063, patches 23-25, 33-35, 43-45) drew 8 train, 1 val (5063_33), 0 test: the
-  # opposite corner of the block is taken as test. Set before D1 is built: changing it means rebuilding D1, D2,
-  # the blends and the Rubin VAE training set (--force).
-  fixed: {"5063_45": test}
+  # Patches whose split is set by hand, overriding the draw ("tract_patch": train | val | test | holdout). Empty for
+  # the EDF-F + EDF-S run (hundreds of patches). The 9-patch scale run of 2026-11 was built with
+  # fractions {train: 0.8, val: 0.1, test: 0.1} and fixed {"5063_45": test} (the hash left it without a test
+  # patch). Set before D1 is built: changing it means rebuilding D1, D2, the blends and the Rubin VAE training set.
+  fixed: {}
 
 dataset1:
   # D1 = final dataset of the stamp pipeline (every cut of the recipe applied, masking included) with a Euclid image.
@@ -232,7 +234,7 @@ dataset2:
   scene_complete_delta_mag: 3.0
 
 controlled_blends:
-  n_per_split: {val: 2000, test: 4000}
+  n_per_split: {val: 2000, test: 4000, holdout: 4000}
   separation_px: [2.0, 12.0]     # integer shifts drawn in this range of radius
   flux_ratio: [0.1, 1.0]         # i-band flux companion / target; the companion stamp is scaled down to it
                                  # (companions fainter than that are not drawn; noise scaled with it, recorded)
