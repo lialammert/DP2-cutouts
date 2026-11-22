@@ -140,6 +140,9 @@ def main():
     fig, axes = plt.subplots(2, 4, figsize=(16, 7))
     for ax, c in zip(axes.ravel(), PROPS):
         v = pd.concat([pops[s][c] for s in SETS]).dropna()
+        if v.empty:                                     # column empty in the catalogue (e.g. extended_prob in Q1)
+            ax.set_title(f"{c}: no value", fontsize=8)
+            continue
         lo, hi = np.nanquantile(v, [0.005, 0.995])
         edges = np.linspace(lo, hi, 40)
         for s in SETS:
