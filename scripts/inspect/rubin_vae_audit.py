@@ -38,28 +38,43 @@ SPLITS = {"train": 0, "val": 1, "test": 2}
 BANDS = list("ugrizy")
 
 
+def output_activations(vae):
+    # (mean, scale) activations of the decoder output: relu / relu for the original architecture, else the
+    # ModelConfig.output_*_activation of debvader-keras.
+    return tuple(getattr(vae.decoder, "output_activations", ("relu", "relu")))
+
+
 def infer(vae, x_norm, batch=128):
-    # Decoder output after the final ReLU, and the same with the final activation switched off (pre-activations).
+    # Decoder output, and the same with the output activations switched off (pre-activations).
     import keras
     from keras import ops
-    fc = vae.decoder.final_conv
+    dec = vae.decoder
+    fc = dec.final_conv
     act = fc.activation
+    saved = (getattr(dec, "_mean_act", None), getattr(dec, "_scale_act", None))
     outs, pres = [], []
     for s in range(0, len(x_norm), batch):
         xb = ops.convert_to_tensor(x_norm[s:s + batch])
         mu = vae.mu(vae.encode_params(xb))
-        outs.append(ops.convert_to_numpy(vae.decoder(mu, training=False)))
+        outs.append(ops.convert_to_numpy(dec(mu, training=False)))
         try:
             fc.activation = keras.activations.linear
-            pres.append(ops.convert_to_numpy(vae.decoder(mu, training=False)))
+            if hasattr(dec, "_mean_act"):
+                dec._mean_act = dec._scale_act = None
+            pres.append(ops.convert_to_numpy(dec(mu, training=False)))
         finally:
             fc.activation = act
+            if hasattr(dec, "_mean_act"):
+                dec._mean_act, dec._scale_act = saved
     out, pre = np.concatenate(outs), np.concatenate(pres)
-    gap = float(np.abs(np.maximum(pre, 0) - out).max())
-    if gap > 1e-4:
-        raise RuntimeError(f"ReLU(pre-activation) differs from the decoder output by {gap}: the final activation "
-                           "is not the ReLU this audit assumes")
     C = vae.n_bands
+    acts = output_activations(vae)
+    fns = {"relu": lambda v: np.maximum(v, 0), "linear": lambda v: v, "softplus": lambda v: np.logaddexp(0, v)}
+    expect = np.concatenate([fns[acts[0]](pre[..., :C]), fns[acts[1]](pre[..., C:])], axis=-1)
+    gap = float(np.abs(expect - out).max())
+    if gap > 1e-3:
+        raise RuntimeError(f"activation(pre-activation) differs from the decoder output by {gap}: the output "
+                           f"activations are not {acts}")
     return out[..., :C], 1e-4 + out[..., C:], pre[..., :C], pre[..., C:]
 
 
@@ -135,11 +150,14 @@ def main():
     summary = dict(run=str(run), weights=str(vae.weights_path), data=str(data), split=args.split,
                    n_sample=int(len(samp)), n_bright=int(len(bright)), scale_per_band=vae.scale_per_band.tolist(),
                    bands=BANDS)
+    acts = output_activations(vae)
+    relu_m, relu_s = acts[0] == "relu", acts[1] == "relu"
+    summary["output_activations"] = list(acts)
     for name, R in (("sample", S), ("bright_y", B)):
         summary[name] = dict(galaxy=dict(zip(BANDS, A.band_stats(R["x"], R["mu"], R["sigma"], R["pre_mu"],
-                                                                 R["pre_sc"], R["gal"]))),
+                                                                 R["pre_sc"], R["gal"], relu_m, relu_s))),
                              sky=dict(zip(BANDS, A.band_stats(R["x"], R["mu"], R["sigma"], R["pre_mu"],
-                                                              R["pre_sc"], R["sky"]))))
+                                                              R["pre_sc"], R["sky"], relu_m, relu_s))))
         ratio = R["flux_rec"] / np.where(R["flux_obs"] != 0, R["flux_obs"], np.nan)
         data_snr = R["flux_obs"] / (R["sky_sigma"] * np.sqrt(R["npix"])[:, None])
         summary[name]["aperture"] = {b: dict(median_flux_ratio_rec_obs=float(np.nanmedian(ratio[:, c])),

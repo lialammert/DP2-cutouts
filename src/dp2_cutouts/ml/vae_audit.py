@@ -20,11 +20,14 @@ def gaussian_nll(x, mu, sigma):
     return 0.5 * ((x - mu) / sigma) ** 2 + np.log(sigma) + 0.5 * LOG_2PI
 
 
-def output_gradients(x, mu, sigma, pre_mu, pre_scale):
-    # dL/dmu and dL/dsigma of the per-pixel NLL, and what passes the final ReLU: dL/da = dL/d(out) * 1[a > 0].
+def output_gradients(x, mu, sigma, pre_mu, pre_scale, relu_mean=True, relu_scale=True):
+    # dL/dmu and dL/dsigma of the per-pixel NLL, and what passes the output activation: through a ReLU,
+    # dL/da = dL/d(out) * 1[a > 0]; a linear mean passes it all; a softplus scale too (times its slope, > 0).
     d_mu = (mu - x) / sigma ** 2
     d_sigma = 1.0 / sigma - (x - mu) ** 2 / sigma ** 3
-    return d_mu, d_mu * (pre_mu > 0), d_sigma, d_sigma * (pre_scale > 0)
+    g_mu = d_mu * (pre_mu > 0) if relu_mean else d_mu
+    g_sig = d_sigma * (pre_scale > 0) if relu_scale else d_sigma
+    return d_mu, g_mu, d_sigma, g_sig
 
 
 def regions(shape, centres, ellipses, k_galaxy=2.0, k_sky=4.0):
@@ -42,11 +45,11 @@ def regions(shape, centres, ellipses, k_galaxy=2.0, k_sky=4.0):
     return gal, sky
 
 
-def band_stats(x, mu, sigma, pre_mu, pre_scale, region):
+def band_stats(x, mu, sigma, pre_mu, pre_scale, region, relu_mean=True, relu_scale=True):
     # Per band, over the pixels of region (N, H, W): what the decoder does there and what gradient reaches it.
     # x, mu, sigma, pre_*: (N, H, W, C), normalised units.
     C = x.shape[-1]
-    d_mu, g_mu, d_sig, g_sig = output_gradients(x, mu, sigma, pre_mu, pre_scale)
+    d_mu, g_mu, d_sig, g_sig = output_gradients(x, mu, sigma, pre_mu, pre_scale, relu_mean, relu_scale)
     nll = gaussian_nll(x, mu, sigma)
     out = []
     for c in range(C):
@@ -55,7 +58,7 @@ def band_stats(x, mu, sigma, pre_mu, pre_scale, region):
         out.append(dict(
             frac_pre_mu_negative=float((pre_mu[..., c][m] <= 0).mean()),
             pre_mu_quantiles={str(q): float(np.quantile(pre_mu[..., c][m], q)) for q in (0.01, 0.5, 0.99)},
-            frac_mu_zero=float((mu[..., c][m] <= 0).mean()),
+            frac_mu_zero=float((mu[..., c][m] == 0).mean()),
             frac_pre_scale_negative=float((pre_scale[..., c][m] <= 0).mean()),
             median_sigma=float(np.median(sigma[..., c][m])),
             median_abs_residual=float(np.median(np.abs(x[..., c][m] - mu[..., c][m]))),
