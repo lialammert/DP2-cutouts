@@ -1,0 +1,76 @@
+# jz_full.yaml
+# Anna Preto
+# AstroDeep Project
+# Patch-by-patch pipeline on Jean Zay over the two Euclid Q1 deep fields that DP2 covers, EDF-F and EDF-S: every
+# DP2 deep_coadd patch of the search areas that the Euclid MER tiles cover entirely (patch list of
+# scripts/inspect/area_census.py, run on prepost because IRSA is not reachable from the login nodes). Same science
+# parameters as jz_scale.yaml (the 3 x 3 patch run); only the area and data_root differ.
+# Everything it writes goes to $SCRATCH (no new data on $WORK, whose quota is shared by the lab); the MMU and MER
+# caches (euclid.mmu_cache / masking.seg_cache: auto) are already there. $SCRATCH purges files left unread for
+# 30 days: archive the products to keep on $STORE.
+
+name: jz_full
+data_root: /lustre/fsn1/projects/rech/fqn/ury73vm/dp2-data/full
+
+# Where the data come from. rubin_pixels: "soda" (off-site, with the token) or
+# {kind: butler, repo: dp2, collections: [dp2]} (Rubin Science Platform / Rubin data facility).
+sources:
+  rubin_catalog: tap
+  euclid_catalog: hf
+  rubin_pixels: soda
+
+# Patches to process: every deep_coadd patch that SIA finds in the search areas, kept if it is in names_file with
+# euclid_cover_frac >= euclid_cover_min (centre and four corners inside a MER tile).
+patches:
+  search:
+    - {ra: 52.93, dec: -28.09, radius_deg: 2.0}    # EDF-F
+    - {ra: 61.24, dec: -48.42, radius_deg: 3.0}    # EDF-S
+  names_file: /lustre/fsn1/projects/rech/fqn/ury73vm/dp2-data/area_census.csv
+  euclid_cover_min: 1.0
+  catalog_margin_arcsec: 10.0   # added to the outer polygon of the patch (which already extends 30" past its inner part)
+
+rubin:
+  tap_url: https://data.lsst.cloud/api/tap
+  token_file: ~/.rsp_token
+  table: dp2.Object
+  margin_deg: 0.01   # TAP read margin; the exact box is applied afterwards
+
+euclid:
+  hats_url: hf://datasets/hugging-science/mmu_euclid_q1/euclid
+  margin_deg: 0.01
+  pa_convention: measured
+
+copaings:
+  friendly_path: /lustre/fswork/projects/rech/fqn/ury73vm/src/friendly
+  linking_length: 3.0
+  mag_cut: 35
+  euclid_region: auto
+  eot_dense_max: 0
+  n_eot_tasks: 4
+  n_sb_tasks: 4
+
+cuts:
+  margin_px: 29
+  stamp_px: 59
+  diag_px: 117
+  bad_planes: [SATURATED, COSMIC_RAY, INTERPOLATED, DETECTION_EDGE]
+  k_ellipse: 3.0
+  snr_min: 5.0
+  aperture_radii: [29, 58]
+  delta_e_max: 0.02
+  shape_band: i
+  sky_tries: 5000
+  seed: 12345
+
+masking:
+  method: pipeline
+  grow_px: 2
+  shared_k: 2.0
+  seg_grow_psf_k: 2.0
+  seg_cache: auto
+  euclid_depth_margin: 0.0
+
+package:
+  apply: [cut1, cut2, in_region, cut3, cut4, cut5, cut6, cut7, cut8, mask]
+  mmu_mask_planes: [NO_DATA, SATURATED, COSMIC_RAY, INTERPOLATED, DETECTION_EDGE]
+  max_rows_per_file: 500

@@ -5,6 +5,8 @@
 # outer polygon on the sky, its size in pixels, the bands present and the identifiers of its six images.
 # Each patch then becomes a case of the existing stages, with a sky box = outer polygon + catalogue margin.
 
+import os
+
 import numpy as np
 import pandas as pd
 from pyvo.dal.sia2 import SIA2Service
@@ -41,6 +43,14 @@ def list_patches(cfg):
         bands = bands[bands["tract"].isin(pc["tracts"])]
     if pc.get("include"):
         bands = bands[bands["patch"].isin(pc["include"])]
+    if pc.get("names_file"):
+        # Patch list of scripts/inspect/area_census.py (column name = tract_patch), kept where Euclid covers at least
+        # euclid_cover_min of the patch (centre and four corners); the census needs IRSA, the plan does not.
+        sel = pd.read_csv(os.path.expanduser(pc["names_file"]))
+        if "euclid_cover_frac" in sel:
+            sel = sel[sel["euclid_cover_frac"] >= float(pc.get("euclid_cover_min", 1.0))]
+        names = set(sel["name"].astype(str))
+        bands = bands[[patch_name(t, p) in names for t, p in zip(bands["tract"], bands["patch"])]]
     geo = ["s_ra", "s_dec", "s_xel1", "s_xel2", "ra_min", "ra_max", "dec_min", "dec_max"]
     patches = (bands.groupby(["tract", "patch"])
                .agg(**{c: (c, "first") for c in geo}, bands=("band", lambda b: "".join(x for x in BANDS if x in set(b))))

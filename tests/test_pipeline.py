@@ -74,3 +74,30 @@ def test_manifest_records_failure(cfg):
     assert not manifest.is_done(cfg, manifest.load(cfg, PATCH), "fetch")
     with pytest.raises(RuntimeError):                       # process refuses to run before fetch is done
         manifest.run_phase(cfg, PATCH, "process", lambda c, p: ("done", {}))
+
+
+def test_plan_keeps_only_the_census_patches_covered_by_euclid(cfg, tmp_path, monkeypatch):
+    # patches.names_file (area_census.py output): only the patches Euclid covers at euclid_cover_min are planned.
+    from dp2_cutouts.pipeline import patches as P
+
+    rows = [dict(dataproduct_subtype="lsst.deep_coadd", lsst_tract=t, lsst_patch=p, lsst_band=b,
+                 obs_publisher_did=f"{t}{p}{b}", s_ra=53.0, s_dec=-28.0, s_xel1=4000, s_xel2=4000,
+                 s_region="POLYGON ICRS 52.9 -28.1 53.1 -28.1 53.1 -27.9 52.9 -27.9")
+            for t, p in ((5063, 1), (5063, 2), (5064, 1)) for b in "ugrizy"]
+
+    class FakeSIA:
+        def __init__(self, *a, **k):
+            pass
+
+        def search(self, **k):
+            return type("R", (), {"to_table": lambda self: rows})()
+
+    monkeypatch.setattr(P, "SIA2Service", FakeSIA)
+    monkeypatch.setattr(P, "session", lambda token_file: None)
+    census = tmp_path / "census.csv"
+    pd.DataFrame(dict(name=["5063_1", "5063_2", "5064_1"], euclid_cover_frac=[1.0, 0.6, 1.0])).to_csv(census)
+    cfg.raw["patches"] = dict(search=[dict(ra=53.0, dec=-28.0, radius_deg=1.0)], names_file=str(census),
+                              euclid_cover_min=1.0)
+    cfg.raw["rubin"] = dict(token_file="unused")
+    got = P.list_patches(cfg)
+    assert sorted(got["name"]) == ["5063_1", "5064_1"] and got["complete"].all()
