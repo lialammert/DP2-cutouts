@@ -58,9 +58,14 @@ NET=("${NOGPU_ENV[@]}" sbatch --parsable --account="$DP2_CPU_ACCOUNT" --partitio
 DEV_QOS=()
 [[ "$DP2_CPU_PARTITION" == cpu_p1 ]] && DEV_QOS=(--qos=qos_cpu-dev)
 gpu() {
+    # DP2_GPU_EXTRA: sbatch options added to (and overriding) the A100 headers of the GPU jobs, e.g. on the V100
+    # when the A100 allocation is over-consumed: DP2_GPU_ACCOUNT=<projet>@v100
+    # DP2_GPU_EXTRA="-C v100-32g --qos=qos_gpu-t3" (env.sh loads arch/a100 only on the AMD A100 nodes).
     : "${DP2_GPU_ACCOUNT:?set DP2_GPU_ACCOUNT=<projet>@a100}"
     : "${DEBVADER_RUN:?set DEBVADER_RUN to the paper_baseline run folder}"
-    sbatch --parsable --account="$DP2_GPU_ACCOUNT" "$@"
+    local extra=()
+    [[ -n "${DP2_GPU_EXTRA:-}" ]] && read -r -a extra <<< "$DP2_GPU_EXTRA"
+    sbatch --parsable --account="$DP2_GPU_ACCOUNT" ${extra[@]+"${extra[@]}"} "$@"
 }
 dep() { [[ -n "${1:-}" ]] && echo "--dependency=afterok:$1" || true; }
 
