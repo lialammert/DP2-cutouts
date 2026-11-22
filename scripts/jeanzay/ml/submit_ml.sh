@@ -48,8 +48,12 @@ shift || true
 
 DP2_CPU_PARTITION="${DP2_CPU_PARTITION:-cpu_p1}"
 DP2_CPU_CPUS="${DP2_CPU_CPUS:-10}"
-CPU=(sbatch --parsable --account="$DP2_CPU_ACCOUNT" --partition="$DP2_CPU_PARTITION" --cpus-per-task="$DP2_CPU_CPUS")
-NET=(sbatch --parsable --account="$DP2_CPU_ACCOUNT" --partition=prepost)
+# SBATCH_QOS / SBATCH_TIMELIMIT / SBATCH_ACCOUNT set for GPU work in the shell would override the CPU jobs' own
+# headers (a GPU QoS is invalid on cpu_p1): the CPU and prepost jobs are submitted without them.
+NOGPU_ENV=(env -u SBATCH_QOS -u SBATCH_TIMELIMIT -u SBATCH_ACCOUNT)
+CPU=("${NOGPU_ENV[@]}" sbatch --parsable --account="$DP2_CPU_ACCOUNT" --partition="$DP2_CPU_PARTITION"
+     --cpus-per-task="$DP2_CPU_CPUS")
+NET=("${NOGPU_ENV[@]}" sbatch --parsable --account="$DP2_CPU_ACCOUNT" --partition=prepost)
 # qos_cpu-dev (2 h, high priority) for the short probe, where the partition offers it.
 DEV_QOS=()
 [[ "$DP2_CPU_PARTITION" == cpu_p1 ]] && DEV_QOS=(--qos=qos_cpu-dev)
@@ -115,8 +119,10 @@ submit_d2() {
     # D2 alone (D1 and its statistics already built): shards, merge, quality report.
     local after="${1:-}" n last d2 d2m q2
     n=$(n_patches); last=$((n - 1))
-    d2=$("${CPU[@]}" --job-name=dp2-d2 $(dep "$after") --array=0-"$last"%"$FETCH_MAX" "$DP2_ML_SCRIPTS/cpu.slurm"          d2 --index '$SLURM_ARRAY_TASK_ID')
-    d2m=$("${CPU[@]}" --job-name=dp2-d2-merge --dependency=afterany:"$d2" --time=10:00:00           "$DP2_ML_SCRIPTS/cpu.slurm" d2-merge)
+    d2=$("${CPU[@]}" --job-name=dp2-d2 $(dep "$after") --array=0-"$last"%"$FETCH_MAX" "$DP2_ML_SCRIPTS/cpu.slurm" \
+         d2 --index '$SLURM_ARRAY_TASK_ID')
+    d2m=$("${CPU[@]}" --job-name=dp2-d2-merge --dependency=afterany:"$d2" --time=10:00:00 \
+          "$DP2_ML_SCRIPTS/cpu.slurm" d2-merge)
     q2=$("${CPU[@]}" --job-name=dp2-q2 --dependency=afterok:"$d2m" "$DP2_ML_SCRIPTS/cpu.slurm" quality d2)
     echo "d2 $d2, d2-merge $d2m, quality-d2 $q2" >&2
 }
@@ -158,7 +164,7 @@ submit_stage2() {
 
 submit_notebooks() {
     local after="${1:-}"
-    sbatch --parsable --account="$DP2_CPU_ACCOUNT" $(dep "$after") \
+    "${NOGPU_ENV[@]}" sbatch --parsable --account="$DP2_CPU_ACCOUNT" $(dep "$after") \
         --export=ALL,NB_STAGE1_RUN="${STAGE1_RUN:-s1_latent_cross}",NB_STAGE2_RUN="${STAGE2_RUN:-s2_latent}" \
         "$DP2_ML_SCRIPTS/notebooks.slurm"
 }
