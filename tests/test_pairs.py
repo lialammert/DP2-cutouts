@@ -460,3 +460,24 @@ def test_vae_audit_gradient_through_relu_and_regions():
     assert A.catalogue_snr(24.0, 24.0) == pytest.approx(5.0) and A.catalogue_snr(21.5, 24.0) == pytest.approx(50.0)
     f = A.aperture_flux(x, gal)
     assert f.shape == (N, C) and np.all(f > 2.0)
+
+
+def test_d2_masks_other_euclid_sources_over_their_segments():
+    # On a VIS cutout: the partner's MER segment is masked (grown by 2 px), the target's kept, an uncatalogued piece
+    # touching the target kept with it, a catalogued source outside any segment masked over its ellipse.
+    from dp2_cutouts.pairs.dataset2 import segmentation_need
+
+    n = 41
+    yy, xx = np.indices((n, n))
+    lab = np.zeros((n, n), np.int64)
+    lab[np.hypot(xx - 20, yy - 20) <= 4] = 1        # target
+    lab[np.hypot(xx - 31, yy - 20) <= 3] = 2        # partner, resolved by Euclid
+    lab[np.hypot(xx - 20, yy - 26) <= 1.5] = 3      # uncatalogued piece touching the target
+    labels = lab[None]
+    target = dict(a_e=4.0, b_e=4.0, theta=0.0, flux=100.0)
+    others = pd.DataFrame(dict(x=[31.0, 6.0], y=[20.0, 6.0], a=[3.0, 2.0], b=[3.0, 2.0], theta=[0.0, 0.0],
+                               flux=[50.0, 5.0]))
+    need = segmentation_need(labels, (20.0, 20.0), target, others, 2)
+    assert need[20, 31] and need[20, 26]            # partner and its 2-px growth (edge at x = 34 -> 36)
+    assert not need[20, 20] and not need[26, 20]    # target and its uncatalogued piece kept
+    assert need[6, 6]                               # catalogued source with no segment: its ellipse

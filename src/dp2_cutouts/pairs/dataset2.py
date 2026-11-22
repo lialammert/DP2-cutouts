@@ -6,8 +6,11 @@
 #     side is blended (max blending entropy S_b of the Rubin members > sb_rubin_min);
 #   - at Euclid resolution the target is alone: no other Euclid ellipse (VIS PSF) overlaps its own
 #     (overlap fraction <= sb_euclid_max);
-#   - on the Euclid image, masking every other source (k times its ellipse, holes filled with empty sky of the same
-#     cutout) barely changes the target: shape, centroid, size and flux before / after within the accept limits.
+#   - on the Euclid image, masking every other source barely changes the target: shape, centroid, size and flux
+#     before / after within the accept limits. The other sources are masked over their Euclid MER segments
+#     (dataset2.euclid_masking = segmentation: the pipeline's own product, on the VIS grid it was made for), or over
+#     k times their catalogue ellipse (= ellipse, or where no segmentation tile covers the cutout); holes are
+#     filled with empty sky of the same cutout.
 # x_R is the Rubin blend stamp (never masked) centred on the Euclid target ("euclid" centering) and, for the
 # Rubin-only setting, centred on the Rubin object of the group; x_E is the masked Euclid stamp of the target.
 # Every quantity behind a decision is stored; failed targets go to rejected.parquet with their reason.
@@ -94,8 +97,27 @@ def fill_with_sky(flux, ivar, need, sky, rng):
     return f, iv
 
 
-def euclid_separation(cut, target, others, cfg, rng):
+def segmentation_need(labels, target_xy, target, others_px, grow_px):
+    # Other Euclid sources on a Euclid cutout from the MER segmentation sampled on its grid (labels (1, n, n)): the
+    # rules of stamps.companion_mask_segmentation_catalog with no Rubin footprint (segments owned by the catalogued
+    # objects they hold, shared by predicted brightness when merged, uncatalogued pieces next to the target kept
+    # with it, catalogued sources without a segment masked over their ellipse), grown by grow_px Euclid pixels.
+    # target: dict a_e, b_e, theta, flux; others_px: DataFrame x, y (cutout pixels), a, b, theta, flux.
+    from ..stages.stamps import companion_mask_segmentation_catalog
+    n = labels.shape[-1]
+    comp = others_px.assign(survey="euclid", visible=True)
+    tx, ty = target_xy
+    pad = float(np.nanmax(others_px["a"])) if len(others_px) else 0.0
+    need, _ = companion_mask_segmentation_catalog(
+        np.zeros((n, n), bool), labels, (n, n), 0, 0,
+        (float(tx), float(ty), target["a_e"], target["b_e"], target["theta"], float(target.get("flux", np.nan))),
+        comp, pad, 0, int(grow_px))
+    return need
+
+
+def euclid_separation(cut, target, others, cfg, rng, tiles=None):
     # Masks the other Euclid sources on the target cutout and measures the target before / after (VIS).
+    # tiles: an open euclid_seg.TileSet for the segmentation masking (None: ellipses).
     d2 = cfg["dataset2"]
     eb = list(cfg["euclid"]["bands"])
     f, iv, m, present = euclid_images.to_band_array(cut, eb)
@@ -103,25 +125,38 @@ def euclid_separation(cut, target, others, cfg, rng):
     vis = eb.index("VIS")
     w = cut["wcs"]
     k = float(d2["mask_k"])
-    need = np.zeros((n, n), bool)
-    src = np.zeros((n, n), bool)
-    for o in others.itertuples(index=False):
-        ox, oy = w.world_to_pixel_values(o.ra, o.dec)
-        if not (-o.a_e * k <= ox <= n + o.a_e * k and -o.a_e * k <= oy <= n + o.a_e * k):
-            continue
-        rm = radius_map((n, n), float(ox), float(oy), o.a_e, o.b_e, o.theta)
-        need |= rm <= k
-        src |= rm <= 3.0
     tx, ty = w.world_to_pixel_values(target["ra"], target["dec"])
     rt = radius_map((n, n), float(tx), float(ty), target["a_e"], target["b_e"], target["theta"])
-    src |= rt <= 3.0
+    labels = tiles.grid(w, (n, n), sub=1) if tiles is not None else None
+    use_seg = labels is not None and bool((labels != 0).any())
+    if use_seg:
+        ox, oy = w.world_to_pixel_values(others["ra"].to_numpy(float), others["dec"].to_numpy(float))
+        others_px = pd.DataFrame(dict(x=np.asarray(ox, float), y=np.asarray(oy, float),
+                                      a=others["a_e"].to_numpy(float), b=others["b_e"].to_numpy(float),
+                                      theta=others["theta"].to_numpy(float),
+                                      flux=others["vis_flux"].to_numpy(float)))
+        others_px = others_px[(others_px["x"] > -n) & (others_px["x"] < 2 * n)
+                              & (others_px["y"] > -n) & (others_px["y"] < 2 * n)]
+        need = segmentation_need(labels, (tx, ty), target, others_px, int(d2.get("seg_grow_px", 2)))
+        src = (labels[0] != 0) | need | (rt <= 3.0)          # sky pool: pixels in no segment
+    else:
+        need = np.zeros((n, n), bool)
+        src = np.zeros((n, n), bool)
+        for o in others.itertuples(index=False):
+            ox, oy = w.world_to_pixel_values(o.ra, o.dec)
+            if not (-o.a_e * k <= ox <= n + o.a_e * k and -o.a_e * k <= oy <= n + o.a_e * k):
+                continue
+            rm = radius_map((n, n), float(ox), float(oy), o.a_e, o.b_e, o.theta)
+            need |= rm <= k
+            src |= rm <= 3.0
+        src |= rt <= 3.0
     sky = (~src[..., None]) & ~m
     ff, ivf = fill_with_sky(f, iv, need, sky, rng)
     weight = (~m[..., vis]).astype(np.int32)
     m0 = common.moments(f[..., vis], weight, (float(tx), float(ty)))
     m1 = common.moments(ff[..., vis], weight, (float(tx), float(ty)))
     s = float(cfg["euclid"]["pixel_scale"])
-    out = dict(euclid_masked_fraction=float(need.mean()),
+    out = dict(euclid_masking="segmentation" if use_seg else "ellipse", euclid_masked_fraction=float(need.mean()),
                euclid_masked_fraction_in_target=float(need[rt <= 1.0].mean()) if (rt <= 1.0).any() else np.nan,
                sep_e1_before=m0["e1"], sep_e2_before=m0["e2"], e1_vis=m1["e1"], e2_vis=m1["e2"],
                sigma_vis_px=m1["sigma"], hsm_vis_ok=bool(m0["ok"] and m1["ok"]))
@@ -276,6 +311,15 @@ def build_patch(cfg, patch):
         object_id=cand["euclid_object_id"], ra=cand["euclid_ra"], dec=cand["euclid_dec"])), case.sky_box) \
         if len(cand) else {}
 
+    # Euclid MER segmentation tiles (downloaded by the pipeline's fetch), opened once for the patch.
+    tiles = None
+    if d2.get("euclid_masking", "ellipse") == "segmentation" and len(cand):
+        from ..sources import euclid_seg
+        paths = euclid_seg.cached_tiles(euclid_seg.cache_dir(d2 if "seg_cache" in d2 else pcfg["masking"]))
+        if not paths:
+            raise RuntimeError("dataset2.euclid_masking = segmentation but no MER segmentation tile in the cache: "
+                               "run the pipeline's fetch with a segmentation masking (or set dataset2.seg_cache)")
+        tiles = euclid_seg.TileSet(paths).__enter__()
     keep_meta, A = [], {k: [] for k in ("rubin_flux", "rubin_ivar", "rubin_mask", "rubin_flux_rc", "rubin_ivar_rc",
                                         "rubin_mask_rc", "euclid_flux", "euclid_ivar", "euclid_mask",
                                         "euclid_present", "euclid_flux_unmasked", "euclid_fill")}
@@ -291,11 +335,11 @@ def build_patch(cfg, patch):
             continue
         rng = np.random.default_rng([int(cfg["seed"]), int(r.euclid_object_id) & 0x7FFFFFFF])
         tgt = dict(ra=r.euclid_ra, dec=r.euclid_dec, a_e=e.loc[r.euclid_row, "a_e"], b_e=e.loc[r.euclid_row, "b_e"],
-                   theta=e.loc[r.euclid_row, "theta"])
+                   theta=e.loc[r.euclid_row, "theta"], flux=float(e.loc[r.euclid_row, "vis_flux"]))
         others = e.drop(index=r.euclid_row)
         dra = np.abs(((others["ra"] - r.euclid_ra + 180) % 360) - 180) * np.cos(np.radians(r.euclid_dec)) * 3600
         others = others[(dra < 15) & (np.abs(others["dec"] - r.euclid_dec) * 3600 < 15)]
-        sep, reasons, (ef, eiv, em, ep, need, f_raw) = euclid_separation(cut, tgt, others, cfg, rng)
+        sep, reasons, (ef, eiv, em, ep, need, f_raw) = euclid_separation(cut, tgt, others, cfg, rng, tiles)
         row.update(sep)
         row["euclid_theta_cat"] = float(tgt["theta"])
         if reasons:
@@ -356,6 +400,8 @@ def build_patch(cfg, patch):
             A[k].append(v)
         keep_meta.append(row)
 
+    if tiles is not None:
+        tiles.__exit__(None, None, None)
     meta = pd.DataFrame(keep_meta)
     if len(meta):
         # Partner of a two-target group: integer shift between the two stamp centres (Rubin pixels), filled below

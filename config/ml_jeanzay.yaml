@@ -193,8 +193,13 @@ dataset2:
   sb_euclid_max: 0.0             # Euclid target alone at Euclid resolution: Euclid-side S_b <= this
   max_euclid_in_group: 2         # start with two-component groups
   overlap_grid_px: 0.05          # grid step (Rubin px) of the ellipse overlap fraction
-  # Separation test on the Euclid image: other Euclid sources masked over k times their Euclid-resolution ellipse,
-  # holes filled with empty sky of the same cutout, target measured before and after (HSM, VIS).
+  # Separation test on the Euclid image: other Euclid sources masked, holes filled with empty sky of the same
+  # cutout, target measured before and after (HSM, VIS). euclid_masking: segmentation = their Euclid MER segments
+  # (the pipeline's product, on its own VIS grid; tiles downloaded by the pipeline's fetch, masking.seg_cache),
+  # grown by seg_grow_px VIS pixels; ellipse = mask_k times their Euclid-resolution ellipse (also the fallback where
+  # no tile covers a cutout, recorded in the column euclid_masking).
+  euclid_masking: segmentation
+  seg_grow_px: 2
   mask_k: 2.0
   accept:
     max_delta_e: 0.02

@@ -77,49 +77,71 @@ def _image_hdu(h):
     raise ValueError("no 2-D image in the segmentation file")
 
 
-def seg_on_grid(seg_paths, wcs, shape, sub=2, rows_per_chunk=256):
-    # Euclid segment numbers seen by each pixel of a Rubin grid (wcs, shape = (H, W)), sampled at sub x sub points
-    # inside the pixel: a Rubin pixel (0.2") covers 2 x 2 Euclid pixels (0.1"), and a pixel touched by a
-    # neighbour's segment at any of its points must be masked. Returns int64 (sub*sub, H, W); 0 = sky or no tile.
-    # Overlapping tiles are never mixed: the same galaxy has a different number and a slightly different segment in
-    # each tile, so mixing them made a ring of "other" numbers around it (masked as a neighbour). Each point takes
-    # its label from the tile where it lies farthest from the edge (the tile whose core it belongs to).
-    H, W = shape
-    offs = (np.arange(sub) + 0.5) / sub - 0.5
-    dx, dy = [a.ravel() for a in np.meshgrid(offs, offs)]
-    out = np.zeros((sub * sub, H, W), np.int64)
-    best = np.full((sub * sub, H, W), -np.inf)
-    for path in seg_paths:
-        with fits.open(path, memmap=True) as h:
+class TileSet:
+    # The MER segmentation tiles, opened once (memory-mapped) and sampled on any grid: many stamps (D2 cutouts)
+    # read small pieces of the same few files. Use as a context manager.
+    def __init__(self, paths):
+        self.paths = [Path(p) for p in paths]
+        self._open = []
+
+    def __enter__(self):
+        for path in self.paths:
+            h = fits.open(path, memmap=True)
             hdu = _image_hdu(h)
-            we = WCS(hdu.header)
-            ny, nx = hdu.header["NAXIS2"], hdu.header["NAXIS1"]
+            self._open.append((h, hdu, WCS(hdu.header), hdu.header["NAXIS2"], hdu.header["NAXIS1"]))
+        return self
+
+    def __exit__(self, *exc):
+        for h, *_ in self._open:
+            h.close()
+        self._open = []
+
+    def grid(self, wcs, shape, sub=2, rows_per_chunk=256):
+        # Euclid segment numbers seen by each pixel of a grid (wcs, shape = (H, W)), sampled at sub x sub points
+        # inside the pixel: a Rubin pixel (0.2") covers 2 x 2 Euclid pixels (0.1"), and a pixel touched by a
+        # neighbour's segment at any of its points must be masked (sub = 1 for a grid at the Euclid scale).
+        # Returns int64 (sub*sub, H, W); 0 = sky or no tile.
+        # Overlapping tiles are never mixed: the same galaxy has a different number and a slightly different
+        # segment in each tile, so mixing them made a ring of "other" numbers around it (masked as a neighbour).
+        # Each point takes its label from the tile where it lies farthest from the edge (whose core it belongs to).
+        H, W = shape
+        offs = (np.arange(sub) + 0.5) / sub - 0.5
+        dx, dy = [a.ravel() for a in np.meshgrid(offs, offs)]
+        out = np.zeros((sub * sub, H, W), np.int64)
+        best = np.full((sub * sub, H, W), -np.inf)
+        for _, hdu, we, ny, nx in self._open:
             # Bounding box of the grid in the tile, read once.
             cy, cx = np.array([0, 0, H - 1, H - 1]), np.array([0, W - 1, 0, W - 1])
             ex, ey = we.world_to_pixel_values(*wcs.pixel_to_world_values(cx, cy))
-            x0, x1 = max(int(np.floor(ex.min())) - 4, 0), min(int(np.ceil(ex.max())) + 5, nx)
-            y0, y1 = max(int(np.floor(ey.min())) - 4, 0), min(int(np.ceil(ey.max())) + 5, ny)
+            x0, x1 = max(int(np.floor(np.min(ex))) - 4, 0), min(int(np.ceil(np.max(ex))) + 5, nx)
+            y0, y1 = max(int(np.floor(np.min(ey))) - 4, 0), min(int(np.ceil(np.max(ey))) + 5, ny)
             if x0 >= x1 or y0 >= y1:
                 continue
             block = np.asarray(hdu.section[y0:y1, x0:x1]).astype(np.int64)
-        for r0 in range(0, H, rows_per_chunk):
-            r1 = min(r0 + rows_per_chunk, H)
-            yy, xx = np.mgrid[r0:r1, 0:W]
-            for k in range(sub * sub):
-                ra, dec = wcs.pixel_to_world_values(xx + dx[k], yy + dy[k])
-                px, py = we.world_to_pixel_values(ra, dec)
-                ix, iy = np.floor(px + 0.5).astype(np.int64) - x0, np.floor(py + 0.5).astype(np.int64) - y0
-                ok = (ix >= 0) & (ix < x1 - x0) & (iy >= 0) & (iy < y1 - y0)
-                lab = np.zeros(ix.shape, np.int64)
-                lab[ok] = block[iy[ok], ix[ok]]
-                # Distance to the nearest edge of this tile (pixels); points outside it never take its label.
-                edge = np.minimum(np.minimum(px, nx - 1 - px), np.minimum(py, ny - 1 - py))
-                edge = np.where(ok, edge, -np.inf)
-                cur, cur_best = out[k, r0:r1], best[k, r0:r1]
-                take = edge > cur_best
-                cur[take] = lab[take]
-                cur_best[take] = edge[take]
-    return out
+            for r0 in range(0, H, rows_per_chunk):
+                r1 = min(r0 + rows_per_chunk, H)
+                yy, xx = np.mgrid[r0:r1, 0:W]
+                for k in range(sub * sub):
+                    ra, dec = wcs.pixel_to_world_values(xx + dx[k], yy + dy[k])
+                    px, py = we.world_to_pixel_values(ra, dec)
+                    ix, iy = np.floor(px + 0.5).astype(np.int64) - x0, np.floor(py + 0.5).astype(np.int64) - y0
+                    ok = (ix >= 0) & (ix < x1 - x0) & (iy >= 0) & (iy < y1 - y0)
+                    lab = np.zeros(ix.shape, np.int64)
+                    lab[ok] = block[iy[ok], ix[ok]]
+                    # Distance to the nearest edge of this tile (pixels); points outside it never take its label.
+                    edge = np.minimum(np.minimum(px, nx - 1 - px), np.minimum(py, ny - 1 - py))
+                    edge = np.where(ok, edge, -np.inf)
+                    cur, cur_best = out[k, r0:r1], best[k, r0:r1]
+                    take = edge > cur_best
+                    cur[take] = lab[take]
+                    cur_best[take] = edge[take]
+        return out
+
+
+def seg_on_grid(seg_paths, wcs, shape, sub=2, rows_per_chunk=256):
+    # One grid: see TileSet.grid.
+    with TileSet(seg_paths) as ts:
+        return ts.grid(wcs, shape, sub, rows_per_chunk)
 
 
 def fetch_for_box(ra, dec, radius_deg, cache_dir):
