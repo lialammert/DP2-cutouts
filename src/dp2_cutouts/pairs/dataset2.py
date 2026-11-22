@@ -6,8 +6,12 @@
 #     side is blended (max blending entropy S_b of the Rubin members > sb_rubin_min);
 #   - at Euclid resolution the target is alone: no other Euclid ellipse (VIS PSF) overlaps its own
 #     (overlap fraction <= sb_euclid_max);
-#   - on the Euclid image, masking every other source barely changes the target: shape, centroid, size and flux
-#     before / after within the accept limits. The other sources are masked over their Euclid MER segments
+#   - on the Euclid image, the other sources masked leave a usable view of the target alone
+#     (dataset2.separation_test = mask_quality: target barely masked, VIS S/N of the target on the masked stamp,
+#     no neighbour light left around the masks, optionally flux against the catalogue), or (= moments) masking them
+#     barely changes the target: shape, centroid, size and flux before / after within the accept limits; the
+#     moments test rejects any target whose raw measurement a brighter partner pulls, which is most real blends.
+#     The other sources are masked over their Euclid MER segments
 #     (dataset2.euclid_masking = segmentation: the pipeline's own product, on the VIS grid it was made for), or over
 #     k times their catalogue ellipse (= ellipse, or where no segmentation tile covers the cutout); holes are
 #     filled with empty sky of the same cutout.
@@ -34,7 +38,8 @@ def rubin_to_euclid_px(cfg):
 
 
 SEPARATION_METRICS = ("euclid_masked_fraction", "euclid_masked_fraction_in_target", "sep_delta_e",
-                      "sep_centroid_shift_arcsec", "sep_rel_size_change", "sep_rel_flux_change", "sigma_vis_px")
+                      "sep_centroid_shift_arcsec", "sep_rel_size_change", "sep_rel_flux_change", "sigma_vis_px",
+                      "snr_vis", "halo_ring_z", "flux_ratio_catalog")
 
 
 def shard_dir(cfg, name):
@@ -169,18 +174,48 @@ def euclid_separation(cut, target, others, cfg, rng, tiles=None):
         out.update(sep_delta_e=np.nan, sep_centroid_shift_arcsec=np.nan, sep_rel_size_change=np.nan,
                    sep_rel_flux_change=np.nan)
     acc = d2["accept"]
+    # Quality of the masked stamp: S/N of the target in an elliptical aperture (reduced radius <= snr_aperture_k)
+    # on the masked stamp; light of the neighbours left just outside their masks (stamps.halo_ring on the raw image,
+    # ring of halo_ring_px VIS pixels, away from the target); aperture flux over the catalogue VIS flux.
+    var_f = np.where(ivf[..., vis] > 0, 1.0 / np.maximum(ivf[..., vis], 1e-30), 0.0)
+    ap = (rt <= float(acc.get("snr_aperture_k", 1.5))) & (ivf[..., vis] > 0)
+    fa, va = float(ff[..., vis][ap].sum()), float(var_f[ap].sum())
+    out["snr_vis"] = fa / np.sqrt(va) if va > 0 else np.nan
+    ft = float(target.get("flux", np.nan))
+    out["flux_ratio_catalog"] = fa / ft if np.isfinite(ft) and ft > 0 else np.nan
+    var_raw = np.where(iv[..., vis] > 0, 1.0 / np.maximum(iv[..., vis], 1e-30), np.nan)
+    _, out["halo_ring_npix"], out["halo_ring_z"] = stamp_stage.halo_ring(
+        f[..., vis], var_raw, need, ~m[..., vis], rt, r_out=int(acc.get("halo_ring_px", 4)))
     reasons = []
-    if not out["hsm_vis_ok"]:
-        reasons.append("hsm_failed")
+    test = d2.get("separation_test", "moments")
+    if test == "moments":
+        # Target measured before / after masking (HSM): rejects any target whose raw measurement a neighbour
+        # pulls, i.e. most real blends with a brighter partner (kept as an option, for comparison).
+        if not out["hsm_vis_ok"]:
+            reasons.append("hsm_failed")
+        else:
+            if out["sep_delta_e"] > acc["max_delta_e"]:
+                reasons.append("delta_e")
+            if out["sep_centroid_shift_arcsec"] > acc["max_centroid_shift_arcsec"]:
+                reasons.append("centroid_shift")
+            if out["sep_rel_size_change"] > acc["max_rel_size_change"]:
+                reasons.append("size_change")
+            if not np.isfinite(out["sep_rel_flux_change"]) or out["sep_rel_flux_change"] > acc["max_rel_flux_change"]:
+                reasons.append("flux_change")
+    elif test == "mask_quality":
+        # The masked stamp is a usable view of the target alone: target measurable, no neighbour light left around
+        # the masks, flux consistent with the catalogue (each limit null = recorded, not applied).
+        if not np.isfinite(out["snr_vis"]) or out["snr_vis"] < float(acc["min_snr_vis"]):
+            reasons.append("low_snr")
+        mz = acc.get("max_halo_ring_z")
+        if mz is not None and np.isfinite(out["halo_ring_z"]) and out["halo_ring_z"] > float(mz):
+            reasons.append("halo_ring")
+        mr = acc.get("max_rel_flux_vs_catalog")
+        if mr is not None and not (np.isfinite(out["flux_ratio_catalog"])
+                                   and abs(out["flux_ratio_catalog"] - 1.0) <= float(mr)):
+            reasons.append("flux_vs_catalog")
     else:
-        if out["sep_delta_e"] > acc["max_delta_e"]:
-            reasons.append("delta_e")
-        if out["sep_centroid_shift_arcsec"] > acc["max_centroid_shift_arcsec"]:
-            reasons.append("centroid_shift")
-        if out["sep_rel_size_change"] > acc["max_rel_size_change"]:
-            reasons.append("size_change")
-        if not np.isfinite(out["sep_rel_flux_change"]) or out["sep_rel_flux_change"] > acc["max_rel_flux_change"]:
-            reasons.append("flux_change")
+        raise ValueError(f"dataset2.separation_test must be moments or mask_quality, not {test!r}")
     if not np.isfinite(out["euclid_masked_fraction_in_target"]) or \
             out["euclid_masked_fraction_in_target"] > acc["max_masked_fraction_in_target"]:
         reasons.append("target_masked")

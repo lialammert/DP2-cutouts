@@ -481,3 +481,45 @@ def test_d2_masks_other_euclid_sources_over_their_segments():
     assert need[20, 31] and need[20, 26]            # partner and its 2-px growth (edge at x = 34 -> 36)
     assert not need[20, 20] and not need[26, 20]    # target and its uncatalogued piece kept
     assert need[6, 6]                               # catalogued source with no segment: its ellipse
+
+
+def _d2_cut(amp_target, amp_partner, d, seed=0):
+    # VIS cutout (0.1"/px): exponential target at the centre, partner d px to the right, unit noise.
+    from dp2_cutouts.sources.euclid_images import tan_wcs
+    n = 81
+    yy, xx = np.indices((n, n))
+    w = tan_wcs(150.0, 2.0, n, 0.1, (n - 1) / 2, (n - 1) / 2)
+    img = (amp_target * np.exp(-np.hypot(xx - 40, yy - 40) / 2.5)
+           + amp_partner * np.exp(-np.hypot(xx - 40 - d, yy - 40) / 2.5))
+    f = (img + np.random.default_rng(seed).normal(0, 1, (n, n)))[..., None].astype(np.float32)
+    cut = dict(flux=f, ivar=np.ones_like(f), mask=np.zeros_like(f, bool), bands=["VIS"], wcs=w)
+    ra, dec = w.pixel_to_world_values(40, 40)
+    ro, do = w.pixel_to_world_values(40 + d, 40)
+    tgt = dict(ra=float(ra), dec=float(dec), a_e=3.0, b_e=3.0, theta=0.0, flux=np.nan)
+    others = pd.DataFrame(dict(ra=[float(ro)], dec=[float(do)], a_e=[2.5], b_e=[2.5], theta=[0.0], vis_flux=[1.0]))
+    return cut, tgt, others
+
+
+def _d2_cfg(test, mask_k=4.0):
+    return {"dataset2": dict(mask_k=mask_k, separation_test=test, accept=dict(
+        max_masked_fraction_in_target=0.1, min_snr_vis=10.0, snr_aperture_k=1.5, halo_ring_px=4,
+        max_halo_ring_z=None, max_rel_flux_vs_catalog=None, max_delta_e=0.02, max_centroid_shift_arcsec=0.05,
+        max_rel_size_change=0.05, max_rel_flux_change=0.05)),
+        "euclid": dict(bands=["VIS"], pixel_scale=0.1)}
+
+
+def test_d2_mask_quality_keeps_a_blend_the_moments_test_rejects():
+    # Target next to a brighter partner 1.4" away, resolved by VIS: the raw HSM measurement is pulled by the
+    # partner (moments test fails), the masked stamp is a clean, measurable view of the target (mask_quality passes);
+    # a target too faint for VIS is rejected by mask_quality for its S/N.
+    from dp2_cutouts.pairs.dataset2 import euclid_separation
+    cut, tgt, others = _d2_cut(8.0, 30.0, 14)
+    _, r_mom, _ = euclid_separation(cut, tgt, others, _d2_cfg("moments"), np.random.default_rng(1))
+    out, r_mq, _ = euclid_separation(cut, tgt, others, _d2_cfg("mask_quality"), np.random.default_rng(1))
+    assert r_mom and r_mq == [], (r_mom, r_mq)
+    assert out["snr_vis"] > 10 and np.isfinite(out["halo_ring_z"])
+    cut, tgt, others = _d2_cut(0.3, 30.0, 14)
+    out, r_faint, _ = euclid_separation(cut, tgt, others, _d2_cfg("mask_quality"), np.random.default_rng(1))
+    assert r_faint == ["low_snr"], (r_faint, out["snr_vis"])
+    with pytest.raises(ValueError):
+        euclid_separation(cut, tgt, others, _d2_cfg("nope"), np.random.default_rng(1))

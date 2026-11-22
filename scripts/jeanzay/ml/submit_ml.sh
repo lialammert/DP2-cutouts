@@ -16,7 +16,9 @@
 #   scripts/jeanzay/ml/submit_ml.sh rubin-vae                      # 3b. DebVAder stage 1 trained on D1 (Rubin),
 #        DEBVADER_RUN = paper_baseline here (template of the architecture); afterwards DEBVADER_RUN is the new run
 #        ($EXPERIMENTS_DIR/<rubin_vae.run_name>) for every step below
-#   scripts/jeanzay/ml/submit_ml.sh stage1 [ablation ...]          # 4. Stage 1 runs (default: stage1.default_runs)
+#   scripts/jeanzay/ml/submit_ml.sh d2                             # 3c. D2 alone, rebuilt (old one moved aside)
+#   scripts/jeanzay/ml/submit_ml.sh stage1 [ablation ...]          # 4. Stage 1 runs (default: stage1.default_runs);
+#        AFTER_JOB=<job id> makes them wait for that job (e.g. the reference VAE still training), also for stage2
 #   STAGE1_RUN=s1_latent_cross scripts/jeanzay/ml/submit_ml.sh stage2 [ablation ...]   # 5. Stage 2 runs
 #   scripts/jeanzay/ml/submit_ml.sh notebooks                      # 6. executed notebooks with the figures
 #   AFTER=afterok:<assemble>,afterany:<job> scripts/jeanzay/ml/submit_ml.sh rebuild   # 3 + 3b after the given
@@ -41,7 +43,7 @@ export DP2_REPO="$(cd "$DP2_ML_SCRIPTS/../../.." && pwd)"
 export DEBVADER_RUN="${DEBVADER_RUN:-}" DEBVADER_STATS="${DEBVADER_STATS:-}"
 FETCH_MAX="${FETCH_MAX:-4}"
 mkdir -p logs
-STEP="${1:?step: mmu-mirror | probe | phase0 | datasets | rubin-vae | stage1 | stage2 | notebooks | all}"
+STEP="${1:?step: mmu-mirror | probe | phase0 | datasets | rebuild | d2 | rubin-vae | stage1 | stage2 | notebooks | all}"
 shift || true
 
 DP2_CPU_PARTITION="${DP2_CPU_PARTITION:-cpu_p1}"
@@ -109,6 +111,16 @@ submit_datasets() {
     AFTER_STAGE2="$q1:$bl:$q2"
 }
 
+submit_d2() {
+    # D2 alone (D1 and its statistics already built): shards, merge, quality report.
+    local after="${1:-}" n last d2 d2m q2
+    n=$(n_patches); last=$((n - 1))
+    d2=$("${CPU[@]}" --job-name=dp2-d2 $(dep "$after") --array=0-"$last"%"$FETCH_MAX" "$DP2_ML_SCRIPTS/cpu.slurm"          d2 --index '$SLURM_ARRAY_TASK_ID')
+    d2m=$("${CPU[@]}" --job-name=dp2-d2-merge --dependency=afterany:"$d2" --time=10:00:00           "$DP2_ML_SCRIPTS/cpu.slurm" d2-merge)
+    q2=$("${CPU[@]}" --job-name=dp2-q2 --dependency=afterok:"$d2m" "$DP2_ML_SCRIPTS/cpu.slurm" quality d2)
+    echo "d2 $d2, d2-merge $d2m, quality-d2 $q2" >&2
+}
+
 submit_rubin_vae() {
     # Export D1's Rubin stamps (CPU), then train DebVAder stage 1 on them and run phase 0 on the result (GPU).
     local after="${1:-}" ex tr
@@ -166,9 +178,15 @@ case "$STEP" in
         submit_datasets "$mv_job"
         submit_rubin_vae "$AFTER_STAGE1" >/dev/null
         ;;
+    d2)
+        # D2 rebuilt alone (e.g. new dataset2 settings): datasets/d2 moved aside (d2_v1, d2_v2, ...), then built.
+        mv_job=$("${CPU[@]}" --job-name=dp2-d2-aside --time=00:20:00 "$DP2_ML_SCRIPTS/datasets_aside.sh" d2)
+        echo "d2 aside: $mv_job" >&2
+        submit_d2 "$mv_job"
+        ;;
     rubin-vae) submit_rubin_vae "" >/dev/null ;;
-    stage1) submit_stage1 "" "$@" >/dev/null ;;
-    stage2) submit_stage2 "" "$@" >/dev/null ;;
+    stage1) submit_stage1 "${AFTER_JOB:-}" "$@" >/dev/null ;;
+    stage2) submit_stage2 "${AFTER_JOB:-}" "$@" >/dev/null ;;
     notebooks) submit_notebooks "" ;;
     all)
         export STAGE1_RUN="${STAGE1_RUN:-s1_latent_cross}"
