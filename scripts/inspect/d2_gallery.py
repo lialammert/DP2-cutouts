@@ -243,11 +243,11 @@ def rejected(cfg, d2, out, per_cat, n_patches, seed):
             row["partner_masked"] = ("yes" if all(hit) else "no" if not any(hit) else "part") if hit else "off"
             w = img["wcs"][BANDS.index("i")]
             x, y = w.world_to_pixel_values(r.euclid_ra, r.euclid_dec)
-            st = dataset2.rubin_stamp(img, float(x), float(y), n_r)
+            rs = dataset2.rubin_stamp(img, float(x), float(y), n_r)
             ri = riv = None
-            if st is not None:
-                var = st["var"][I_BAND]
-                ri, riv = st["flux"][I_BAND], np.where(var > 0, 1.0 / np.maximum(var, 1e-30), 0.0)
+            if rs is not None:
+                var = rs["var"][I_BAND]
+                ri, riv = rs["flux"][I_BAND], np.where(var > 0, 1.0 / np.maximum(var, 1e-30), 0.0)
             c = cat_of.loc[int(r.euclid_object_id)]
             if row["recomputed_reasons"] != detail_of.loc[int(r.euclid_object_id)]:
                 n_diff += 1
