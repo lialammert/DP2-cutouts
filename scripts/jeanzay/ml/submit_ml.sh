@@ -19,6 +19,9 @@
 #   scripts/jeanzay/ml/submit_ml.sh stage1 [ablation ...]          # 4. Stage 1 runs (default: stage1.default_runs)
 #   STAGE1_RUN=s1_latent_cross scripts/jeanzay/ml/submit_ml.sh stage2 [ablation ...]   # 5. Stage 2 runs
 #   scripts/jeanzay/ml/submit_ml.sh notebooks                      # 6. executed notebooks with the figures
+#   AFTER=afterok:<assemble>,afterany:<job> scripts/jeanzay/ml/submit_ml.sh rebuild   # 3 + 3b after the given
+#        Slurm dependencies: the current datasets folder is moved aside (datasets_v1, _v2, ...), D1, D2, quality,
+#        blends are built, then the reference Rubin VAE is trained once the D1 quality report passes
 #   scripts/jeanzay/ml/submit_ml.sh all                            # 2 to 6 chained (STAGE1_RUN: teacher of 5),
 #        with DEBVADER_RUN already the reference VAE (3b done)
 # FETCH_MAX (default 4) caps the simultaneous D1 / D2 tasks. Reruns skip shards and runs already done.
@@ -84,15 +87,16 @@ submit_phase0() {
 }
 
 submit_datasets() {
-    local n last d1 d1m q1 bl d2 d2m q2
+    # $1: job(s) the shard builders wait for (optional).
+    local after="${1:-}" n last d1 d1m q1 bl d2 d2m q2
     n=$(n_patches); last=$((n - 1))
-    d1=$("${CPU[@]}" --job-name=dp2-d1 --array=0-"$last"%"$FETCH_MAX" "$DP2_ML_SCRIPTS/cpu.slurm" \
+    d1=$("${CPU[@]}" --job-name=dp2-d1 $(dep "$after") --array=0-"$last"%"$FETCH_MAX" "$DP2_ML_SCRIPTS/cpu.slurm" \
          d1 --index '$SLURM_ARRAY_TASK_ID')
     d1m=$("${CPU[@]}" --job-name=dp2-d1-merge --dependency=afterany:"$d1" --time=10:00:00 \
           "$DP2_ML_SCRIPTS/cpu.slurm" d1-merge)
     q1=$("${CPU[@]}" --job-name=dp2-q1 --dependency=afterok:"$d1m" "$DP2_ML_SCRIPTS/cpu.slurm" quality d1)
     bl=$("${CPU[@]}" --job-name=dp2-blends --dependency=afterok:"$d1m" "$DP2_ML_SCRIPTS/cpu.slurm" blends)
-    d2=$("${CPU[@]}" --job-name=dp2-d2 --array=0-"$last"%"$FETCH_MAX" "$DP2_ML_SCRIPTS/cpu.slurm" \
+    d2=$("${CPU[@]}" --job-name=dp2-d2 $(dep "$after") --array=0-"$last"%"$FETCH_MAX" "$DP2_ML_SCRIPTS/cpu.slurm" \
          d2 --index '$SLURM_ARRAY_TASK_ID')
     # D2 takes its normalisation statistics from D1: merged after both.
     d2m=$("${CPU[@]}" --job-name=dp2-d2-merge --dependency=afterany:"$d2",afterok:"$d1m" --time=10:00:00 \
@@ -152,6 +156,16 @@ case "$STEP" in
     probe) submit_probe "$@" ;;
     phase0) submit_phase0 ;;
     datasets) submit_datasets ;;
+    rebuild)
+        # Move the current datasets aside once the AFTER jobs are over (whatever their outcome: a test still reading
+        # them only has to be finished), then rebuild everything and train the reference VAE on the new D1.
+        # AFTER is a Slurm dependency list, e.g. afterok:<assemble>,afterany:<test reading the old datasets>.
+        mv_job=$("${CPU[@]}" --job-name=dp2-datasets-aside --time=00:20:00 \
+                 ${AFTER:+--dependency=$AFTER} "$DP2_ML_SCRIPTS/datasets_aside.sh")
+        echo "datasets aside: $mv_job" >&2
+        submit_datasets "$mv_job"
+        submit_rubin_vae "$AFTER_STAGE1" >/dev/null
+        ;;
     rubin-vae) submit_rubin_vae "" >/dev/null ;;
     stage1) submit_stage1 "" "$@" >/dev/null ;;
     stage2) submit_stage2 "" "$@" >/dev/null ;;

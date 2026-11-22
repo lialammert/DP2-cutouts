@@ -110,10 +110,15 @@ rubin_vae:
   # as build_stage1_real.py does: the VAE never sees holes, and its target is the stamp itself.
   min_valid_fraction: 0.7        # stamps with fewer unmasked pixels than this (any band) are left out
   stats_max_stamps: 20000        # train stamps drawn for scale_per_band (99.9th percentile of |flux|, as debvader)
-  run_name: dp2_d1_real          # name of the debvader-keras run (EXPERIMENTS_DIR/<run_name>)
+  # Name of the debvader-keras run (EXPERIMENTS_DIR/<run_name>). A new name for every rebuild: train.py --resume would
+  # otherwise continue the previous run. dp2_d1_real (2026-11-19): ReLU decoder mean, y band dead.
+  run_name: dp2_d1_pipeline_linear
   # Overrides of the template run's config.json (dotted keys). Data: the real build, every stamp of each split
   # (sizes 0 = all), no S/N cut (the cut is for shape heads, absent here), no cache (a re-export must be read).
   debvader_overrides:
+    # Linear decoder mean: with the original ReLU the y output died (all pre-activations < 0, no gradient left; audit
+    # of dp2_d1_real, 2026-11-22). The scale keeps the original ReLU (softplus to be tested on its own).
+    model.output_mean_activation: linear
     data.real_min_snr: 0.0
     data.train_size: 0
     data.validation_size: 0
