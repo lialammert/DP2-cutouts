@@ -271,6 +271,28 @@ def test_read_mmu_rows_by_row_group(tmp_path, monkeypatch):
     assert got == {"-1006": 6.0, "-1007": 7.0, "-1008": 8.0, "-1049": 49.0}
 
 
+def test_mmu_mirror_opens_the_catalogue_once_for_all_patches(monkeypatch):
+    # 1 071 patches: reopening the HATS catalogue from Hugging Face for each box took hours.
+    hub = pytest.importorskip("huggingface_hub")
+    opened, seen = [], []
+    monkeypatch.setattr(euclid_images, "open_mmu_catalog", lambda url: opened.append(url) or "CAT")
+
+    def parts(url, box=None, cat=None):
+        seen.append(cat)
+        return [f"hf://datasets/org/repo/euclid/Norder=5/Npix={int(box[0])}.parquet"]
+
+    class FakeFS:
+        def info(self, remote):
+            return dict(size=10)
+
+    monkeypatch.setattr(euclid_images, "mmu_partition_files", parts)
+    monkeypatch.setattr(hub, "HfFileSystem", FakeFS)
+    boxes = {f"p{i}": (float(i % 3), 1.0, 0.0, 1.0) for i in range(7)}
+    plan = euclid_images.mirror_mmu("hf://datasets/org/repo/euclid", "unused", boxes, dry_run=True)
+    assert opened == ["hf://datasets/org/repo/euclid"] and seen == ["CAT"] * 7
+    assert len(plan["files"]) == 3 and plan["total_bytes"] == 30
+
+
 def test_mmu_retries_transient_network_errors_only():
     class ProxyError(Exception):
         pass

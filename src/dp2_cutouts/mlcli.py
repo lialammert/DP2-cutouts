@@ -131,7 +131,8 @@ def main(argv=None):
     run = _debvader_run(args)
     if c == "phase0":
         from .ml import phase0
-        phase0.run(cfg, run, args.debvader_stats, args.n, args.reference_npz, out_name=args.run_name or "phase0")
+        phase0.run(cfg, run, args.debvader_stats, args.n, args.reference_npz, out_name=args.run_name or "phase0",
+                   split=args.split)
     elif c == "train-stage1":
         from .ml import stage1
         name = args.run_name or args.ablation or "stage1"

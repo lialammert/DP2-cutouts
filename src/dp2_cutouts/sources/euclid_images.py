@@ -157,11 +157,12 @@ def with_retries(fn, what, tries=6, wait=10.0, max_wait=300.0, sleep=time.sleep)
             sleep(delay)
 
 
-def mmu_partition_files(hats_url, box=None):
-    # Parquet files of the MMU HATS partitions that overlap the box (catalogue metadata only, no data read).
-    import lsdb
+def mmu_partition_files(hats_url, box=None, cat=None):
+    # Parquet files of the MMU HATS partitions that overlap the box (catalogue metadata only, no data read). cat: the
+    # catalogue already opened (open_mmu_catalog), so that many boxes do not reopen it from Hugging Face each time.
     from hats.io import paths
-    cat = with_retries(lambda: lsdb.open_catalog(hats_url, columns=["object_id"]), "open catalogue")
+    if cat is None:
+        cat = open_mmu_catalog(hats_url)
     base = cat.hc_structure.catalog_base_dir
     suffix = getattr(cat.hc_structure.catalog_info, "npix_suffix", None) or ".parquet"
     if box is not None:
@@ -171,6 +172,11 @@ def mmu_partition_files(hats_url, box=None):
         p = paths.pixel_catalog_file(base, px, npix_suffix=suffix)
         files.extend(sorted(p.rglob("*.parquet")) if suffix in ("/", "\\") else [p])
     return files
+
+
+def open_mmu_catalog(hats_url):
+    import lsdb
+    return with_retries(lambda: lsdb.open_catalog(hats_url, columns=["object_id"]), "open catalogue")
 
 
 def _footer(f):
@@ -242,9 +248,12 @@ def mirror_mmu(hats_url, cache, boxes, dry_run=False):
     from huggingface_hub import HfFileSystem, hf_hub_download
     cache = Path(cache)
     need = {}
-    for name, box in sorted(boxes.items()):
-        for f in mmu_partition_files(hats_url, box):
+    cat = open_mmu_catalog(hats_url)
+    for k, (name, box) in enumerate(sorted(boxes.items())):
+        for f in mmu_partition_files(hats_url, box, cat=cat):
             need.setdefault(str(f), []).append(name)
+        if (k + 1) % 100 == 0:
+            print(f"[mmu-mirror] {k + 1}/{len(boxes)} patches, {len(need)} partitions so far", flush=True)
     fs = HfFileSystem()
     files = []
     for remote, patches in sorted(need.items()):

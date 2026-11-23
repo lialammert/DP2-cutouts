@@ -174,3 +174,52 @@ def test_euclid_encoder_dropout_acts_in_training_only():
     c, d = (np.asarray(enc(x, training=True)) for _ in range(2))
     assert not np.allclose(c, d)                               # training: dropout draws differ
     assert EuclidEncoder.from_config(enc.get_config()).dropout_rate == 0.5
+
+
+def test_phase0_draws_from_one_split_and_reports_per_field(tmp_path):
+    # The phase 0 sample is taken from the patches of one split (the assignment D1 carries), read in the order
+    # Dataset.take indexes; fields are told apart by declination; the ratio of sums is reported next to the median.
+    import pandas as pd
+    import pyarrow as pa
+    import pyarrow.dataset as pds
+    from dp2_cutouts.ml import phase0
+    from dp2_cutouts.pairs import splits
+
+    tract = np.repeat([5063, 2395], 200)
+    patch = np.tile(np.repeat(np.arange(20), 10), 2)
+    t = pa.table(dict(tract=tract, patch=patch, healpix5=np.repeat([1, 2], 200), row=np.arange(400)))
+    pds.write_dataset(t, tmp_path / "data", format="parquet", partitioning=["healpix5"], partitioning_flavor="hive")
+    d = pds.dataset(tmp_path / "data", format="parquet", partitioning="hive")
+    cfg = dict(seed=0, splits=dict(fractions=dict(train=0.5, val=0.0, test=0.5, holdout=0.0)))
+    rows = phase0.split_rows(d, cfg, "test")
+    got = d.take(np.sort(rows)).to_pandas()
+    want = splits.split_table(pd.DataFrame(dict(tract=got["tract"], patch=got["patch"])), cfg)
+    assert len(rows) and (want == "test").all()
+    assert len(phase0.split_rows(d, cfg, "all")) == 400
+    with pytest.raises(ValueError):
+        phase0.split_rows(d, dict(seed=0, splits=dict(fractions=dict(train=1.0))), "test")
+    assert list(phase0.field_of([-27.8, -48.4])) == ["EDF-F", "EDF-S"]
+    df = pd.DataFrame(dict(obs_flux_i=[1.0, -1.0, 3.0], rec_flux_i=[1.0, 1.0, 2.0],
+                           rflux_i_rec_obs=[0.0, -2.0, -1 / 3]))
+    s = phase0.flux_summary(df, ["i"])
+    assert np.isclose(s["sums_rflux"]["i"], 4 / 3 - 1) and np.isclose(s["median_rflux"]["i"], -1 / 3)
+
+
+def test_training_schedule_in_steps_backup_and_validation_subset(tmp_path):
+    # train_steps sets the number of epochs from the size of the training split; backup_every_steps makes the
+    # resumable backup step-based; val_max_examples takes a fixed random subset of the val split.
+    import pandas as pd
+    from dp2_cutouts.ml import training
+    assert training.schedule(dict(epochs=300), 130) == 300
+    assert training.schedule(dict(epochs=300, train_steps=None), 130) == 300
+    assert training.schedule(dict(epochs=300, train_steps=150000), 5000) == 30
+    assert training.schedule(dict(epochs=300, train_steps=10), 5000) == 1
+    meta = pd.DataFrame(dict(split=["train"] * 50 + ["val"] * 40 + ["test"] * 10))
+    assert training.validation_indices(meta, "val", None, 0) is None
+    assert training.validation_indices(meta, "val", 100, 0) is None
+    v = training.validation_indices(meta, "val", 15, 0)
+    assert len(v) == 15 and set(v) <= set(range(50, 90))
+    assert np.array_equal(v, training.validation_indices(meta, "val", 15, 0))
+    cb = training.callbacks(tmp_path, {}, 5, True, backup_every_steps=500)
+    assert cb[0].save_freq == 500
+    assert training.callbacks(tmp_path, {}, 5, True)[0].save_freq == "epoch"

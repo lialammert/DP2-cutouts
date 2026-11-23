@@ -22,7 +22,7 @@ from .data import Stage1Batches
 from .debvader_bridge import FrozenRubinVAE, cholesky_from_params
 from .models import EuclidEncoder, ProjectionHead, add_temperature, inverse_temperature
 from .training import (FrozenGuard, callbacks, denormalise_ops, environment, optimizer, prepare_run_dir, set_seeds,
-                       write_json)
+                       schedule, validation_indices, write_json)
 
 
 class Stage1Model(keras.Model):
@@ -184,13 +184,16 @@ def train(cfg, debvader_run, run_name, ablation=None, stats_path=None, resume=Tr
                                           d1=json.loads((cfg.dataset_dir("d1") / "info.json").read_text())))
     train_ds = Stage1Batches(cfg, vae, "train", s1["batch_size"], train=True, seed=int(cfg["seed"]),
                              workers=4, use_multiprocessing=False, max_queue_size=8)
-    val_ds = Stage1Batches(cfg, vae, "val", s1["batch_size"], train=False)
+    val_ds = Stage1Batches(cfg, vae, "val", s1["batch_size"], train=False,
+                           indices=validation_indices(train_ds.st.meta, "val", s1.get("val_max_examples"),
+                                                      int(cfg["seed"])))
     model.compile(optimizer=optimizer(s1["learning_rate"], s1["clipnorm"]))
     subs = dict(euclid_encoder=model.euclid_encoder)
     if model.use_nce:
         subs.update(proj_euclid=model.proj_euclid, proj_rubin=model.proj_rubin)
-    model.fit(train_ds, validation_data=val_ds, epochs=int(s1["epochs"]),
-              callbacks=callbacks(run_dir, subs, s1["early_stopping_patience"], resume), verbose=2)
+    model.fit(train_ds, validation_data=val_ds, epochs=schedule(s1, len(train_ds)),
+              callbacks=callbacks(run_dir, subs, s1["early_stopping_patience"], resume,
+                                  s1.get("backup_every_steps")), verbose=2)
     after = guard.check()
     if model.use_nce:
         np.save(run_dir / "log_inv_tau.npy", np.asarray(ops.convert_to_numpy(model.log_inv_tau)))

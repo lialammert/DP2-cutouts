@@ -26,7 +26,7 @@ from .debvader_bridge import FrozenRubinVAE
 from .models import ProjectionHead, add_temperature, inverse_temperature
 from .stage1 import load_euclid_encoder
 from .training import (FrozenGuard, callbacks, denormalise_ops, environment, optimizer, prepare_run_dir, set_seeds,
-                       write_json)
+                       schedule, validation_indices, write_json)
 
 
 def student_encoder(debvader_run, init, stats_path=None):
@@ -193,13 +193,16 @@ def train(cfg, debvader_run, stage1_run, run_name, ablation=None, stats_path=Non
                                           d2=json.loads((cfg.dataset_dir("d2") / "info.json").read_text())))
     train_ds = Stage2Batches(cfg2, vae, "train", s2["batch_size"], train=True, seed=int(cfg["seed"]),
                              workers=4, use_multiprocessing=False, max_queue_size=8)
-    val_ds = Stage2Batches(cfg2, vae, "val", s2["batch_size"], train=False)
+    val_ds = Stage2Batches(cfg2, vae, "val", s2["batch_size"], train=False,
+                           indices=validation_indices(train_ds.st.meta, "val", s2.get("val_max_examples"),
+                                                      int(cfg["seed"])))
     model.compile(optimizer=optimizer(s2["learning_rate"], s2["clipnorm"]))
     subs = dict(student_encoder=model.student)
     if model.use_nce:
         subs.update(proj_student=model.proj_student, proj_teacher=model.proj_teacher)
-    model.fit(train_ds, validation_data=val_ds, epochs=int(s2["epochs"]),
-              callbacks=callbacks(run_dir, subs, s2["early_stopping_patience"], resume), verbose=2)
+    model.fit(train_ds, validation_data=val_ds, epochs=schedule(s2, len(train_ds)),
+              callbacks=callbacks(run_dir, subs, s2["early_stopping_patience"], resume,
+                                  s2.get("backup_every_steps")), verbose=2)
     after = guard.check()
     write_json(run_dir / "frozen_check.json", dict(before=guard.before, after=after, unchanged=True))
     (run_dir / "DONE").write_text("stage 2 training finished\n")

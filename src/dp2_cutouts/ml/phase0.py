@@ -11,7 +11,8 @@
 #                   (per-stamp peak in normalised units, fraction of pixels above the round-trip saturation)
 #   5 domain gap    reconstruction of DP2 isolated galaxies: chi^2 per pixel with the DP2 variance, ellipticity and
 #                   flux of the reconstruction against the observed stamp, binned in S/N
-# Reads the final stamp dataset of the pipeline directly: it does not need Euclid images or D1.
+# Reads the final stamp dataset of the pipeline directly (no Euclid image, no D1), on the patches of one split
+# (--split, default test: the reference VAE trains on the train patches of D1) and per field (EDF-F / EDF-S).
 
 import json
 
@@ -27,18 +28,54 @@ from .training import environment
 from .units import UnitConverter
 
 
-def sample_final(pcfg, bands, n, seed):
+# Euclid deep fields of the full run, told apart by declination (EDF-F around -28 deg, EDF-S around -48 deg).
+FIELD_DEC_SPLIT = -40.0
+
+
+def field_of(dec):
+    return np.where(np.asarray(dec, float) < FIELD_DEC_SPLIT, "EDF-S", "EDF-F")
+
+
+def split_rows(d, cfg, split):
+    # Row positions of the final dataset d whose patch is in `split` (the assignment of pairs/splits.py, the one D1
+    # and D2 carry), or every row for split None / "all". Read in file order, the order Dataset.take indexes.
+    total = d.count_rows()
+    if split in (None, "all"):
+        return np.arange(total)
+    from ..pairs import splits
+    tp = d.to_table(columns=["tract", "patch"], use_threads=False).to_pandas()
+    rows = np.flatnonzero((splits.split_table(tp, cfg) == split).to_numpy())
+    if not len(rows):
+        raise ValueError(f"no stamp of the final dataset lies in split {split!r} (use --split all)")
+    return rows
+
+
+def sample_final(pcfg, bands, n, seed, cfg=None, split=None):
+    # n stamps drawn at random among the rows of the split. Returns (meta, flux, ivar, mask, total rows, rows in split).
     root = common.final_dir(pcfg) / "data"
     d = ds.dataset(root, format="parquet", partitioning="hive")
     total = d.count_rows()
-    take = np.sort(np.random.default_rng(seed).choice(total, size=min(n, total), replace=False))
+    rows = split_rows(d, cfg, split)
+    take = np.sort(np.random.default_rng(seed).choice(rows, size=min(n, len(rows)), replace=False))
     t = d.take(take)
     meta = common.table_to_pandas(t)
     flux, ivar, mask = common.unpack_images(t.column("image"), bands)
-    return meta, flux, ivar, mask, int(total)
+    return meta, flux, ivar, mask, int(total), int(len(rows))
 
 
-def run(cfg, debvader_run, stats_path=None, n=3000, reference_npz=None, out_name="phase0"):
+def flux_summary(df, bands):
+    # Median of rec / obs - 1 and ratio of sums sum(rec) / sum(obs) - 1 per band: at aperture S/N ~ 1 the median goes
+    # negative even for a perfect reconstruction, the ratio of sums does not (scripts/inspect/phase0_flux_bias.py).
+    out = dict(median_rflux={}, sums_rflux={})
+    for b in bands:
+        out["median_rflux"][b] = float(np.nanmedian(df[f"rflux_{b}_rec_obs"])) if len(df) else np.nan
+        o, r = df[f"obs_flux_{b}"].to_numpy(float), df[f"rec_flux_{b}"].to_numpy(float)
+        ok = np.isfinite(o) & np.isfinite(r)
+        out["sums_rflux"][b] = float(r[ok].sum() / o[ok].sum() - 1.0) if ok.any() and o[ok].sum() else np.nan
+    return out
+
+
+def run(cfg, debvader_run, stats_path=None, n=3000, reference_npz=None, out_name="phase0", split="test"):
     out_dir = cfg.eval_dir(out_name)
     out_dir.mkdir(parents=True, exist_ok=True)
     rep = dict(environment=environment())
@@ -57,8 +94,12 @@ def run(cfg, debvader_run, stats_path=None, n=3000, reference_npz=None, out_name
 
     # 2 determinism, 4 units, 5 domain gap: on a sample of DP2 stamps
     bands = list(cfg["rubin"]["bands"])
-    meta, flux, ivar, mask, total = sample_final(cfg.pipeline(), bands, int(n), int(cfg["seed"]))
+    meta, flux, ivar, mask, total, n_split = sample_final(cfg.pipeline(), bands, int(n), int(cfg["seed"]), cfg, split)
     rep["final_dataset_rows"] = total
+    # The stamps are drawn from one split (default test: patches the VAE trained on are in train) so that the
+    # checks are not made on what the VAE has seen.
+    rep["sample"] = dict(split=split or "all", rows_in_split=n_split, n=int(len(meta)))
+    meta["field"] = field_of(meta["dec"]) if "dec" in meta else "unknown"
     units = UnitConverter.for_vae(cfg, v1)
     rep["units"] = units.describe()
     f = units.flux(flux)
@@ -106,7 +147,13 @@ def run(cfg, debvader_run, stats_path=None, n=3000, reference_npz=None, out_name
     rep["domain_gap"] = dict(median_chi2=float(df["chi2_rec_obs"].median()),
                              mean_de1=float(np.nanmean(df["de1_rec_obs"])),
                              mean_de2=float(np.nanmean(df["de2_rec_obs"])),
-                             median_rflux={b: float(np.nanmedian(df[f"rflux_{b}_rec_obs"])) for b in bands})
+                             **flux_summary(df, bands))
+    # The same per field: the VAE must hold on every depth of the run, not only on the average.
+    rep["domain_gap_by_field"] = {
+        f: dict(n=int(len(g)), median_chi2=float(g["chi2_rec_obs"].median()),
+                mean_de1=float(np.nanmean(g["de1_rec_obs"])), mean_de2=float(np.nanmean(g["de2_rec_obs"])),
+                **flux_summary(g, bands))
+        for f, g in df.groupby("field")}
 
     # 3 reference predictions of the campaign, if given: {"images": (N,59,59,6) in VAE units, "mu": (N, D)}
     if reference_npz:
@@ -120,7 +167,8 @@ def run(cfg, debvader_run, stats_path=None, n=3000, reference_npz=None, out_name
     np.savez_compressed(out_dir / "phase0_examples.npz", obs=f[:k], rec=rec_phys[:k], weight=w[:k],
                         object_id=meta["object_id"].to_numpy()[:k])
     (out_dir / "phase0_report.json").write_text(json.dumps(rep, indent=2, default=float))
-    print(json.dumps({k: rep[k] for k in ("decoder_shared", "deterministic", "normalisation", "domain_gap")},
+    print(json.dumps({k: rep[k] for k in ("decoder_shared", "deterministic", "sample", "normalisation", "domain_gap",
+                                          "domain_gap_by_field")},
                      indent=2, default=float))
     print(f"phase 0 -> {out_dir}")
     return rep

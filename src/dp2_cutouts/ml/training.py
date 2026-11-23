@@ -95,15 +95,39 @@ class StopOnNaN(keras.callbacks.Callback):
             raise RuntimeError(f"non-finite loss at batch {batch}: {v}")
 
 
-def callbacks(run_dir, submodels, patience, resume):
+def callbacks(run_dir, submodels, patience, resume, backup_every_steps=None):
+    # backup_every_steps: resumable backup every that many steps instead of every epoch (an epoch of the full D1 is
+    # thousands of steps; a job cut by its walltime resumes from the last backup and restarts that epoch from its
+    # first batch, the weights keeping what the cut part had learnt: keras 3 BackupAndRestore, tested).
     run_dir = Path(run_dir)
     cbs = [BestSubmodels(run_dir, submodels), StopOnNaN(),
            keras.callbacks.CSVLogger(str(run_dir / "history.csv"), append=True),
            keras.callbacks.EarlyStopping(monitor="val_total_loss", mode="min", patience=int(patience))]
     if resume:
-        cbs.insert(0, keras.callbacks.BackupAndRestore(str(run_dir / "backup"), save_freq="epoch",
+        freq = int(backup_every_steps) if backup_every_steps else "epoch"
+        cbs.insert(0, keras.callbacks.BackupAndRestore(str(run_dir / "backup"), save_freq=freq,
                                                        delete_checkpoint=False))
     return cbs
+
+
+def schedule(settings, n_train_batches):
+    # Number of epochs: settings.train_steps (a budget in optimisation steps, the same whatever the size of the
+    # training set) when given, settings.epochs otherwise.
+    steps = settings.get("train_steps")
+    if steps:
+        return max(1, int(np.ceil(int(steps) / max(int(n_train_batches), 1))))
+    return int(settings["epochs"])
+
+
+def validation_indices(meta, split, max_examples, seed):
+    # Rows of `split` used for validation: all of them, or a fixed random subset of max_examples (validating on the
+    # whole val split of the full run would take as long as a training epoch). None: let the dataset take the split.
+    if not max_examples:
+        return None
+    rows = np.flatnonzero((meta["split"] == split).to_numpy())
+    if len(rows) <= int(max_examples):
+        return None
+    return np.sort(np.random.default_rng(seed).choice(rows, size=int(max_examples), replace=False))
 
 
 def optimizer(lr, clipnorm):

@@ -159,6 +159,13 @@ stage1:
   learning_rate: 0.0003
   clipnorm: 1.0
   early_stopping_patience: 30
+  # Scale of the full EDF-F + EDF-S run (an epoch is thousands of steps). null: as before.
+  #   train_steps         budget in optimisation steps, turned into epochs (then `epochs` is not used)
+  #   backup_every_steps  resumable backup every that many steps (else every epoch; jobs of the 2 h dev QoS)
+  #   val_max_examples    validation on a fixed random subset of val (else the whole split, each epoch)
+  train_steps: null
+  backup_every_steps: null
+  val_max_examples: null
   # Ablations of section 6C: run names, the loss weights each one overrides, and optionally latent_loss and the
   # Euclid encoder dropout.
   #   s1_latent_cross              main losses only (reference)
@@ -263,6 +270,10 @@ stage2:
   learning_rate: 0.0001
   clipnorm: 1.0
   early_stopping_patience: 30
+  # As in stage1: train_steps, backup_every_steps, val_max_examples (null: as before).
+  train_steps: null
+  backup_every_steps: null
+  val_max_examples: null
   # s2_latent_scene: optional, not launched for now (first check that the scene consistency is physically defined).
   ablations:
     s2_latent: {latent: 1.0, infonce: 0.0, scene: 0.0}

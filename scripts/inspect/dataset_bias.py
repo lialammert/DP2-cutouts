@@ -7,7 +7,8 @@
 # ellipticity, photometric redshift, extended probability, PHZ class, and the local density of Euclid sources
 # (neighbours within 5" and 10"). Populations: matches (Rubin objects of the patches with a one-to-one Euclid
 # counterpart), D1, D2 candidates (Euclid targets of the blended copaings groups), D2.
-# Prints quantiles, KS distances and median shifts, PHZ class fractions, and how much of D2 lies where D1 has
+# Prints quantiles, KS distances and median shifts (overall, within each field EDF-F / EDF-S, and between the two
+# fields), PHZ class fractions, and how much of D2 lies where D1 has
 # (almost) no example (what a reweighting of D1 towards D2 could not reach); writes the table and histograms.
 # Catalogues only (no image): a few minutes on cpu_p1.
 # Usage: python scripts/inspect/dataset_bias.py <ML config> <out dir> [--d1 DIR] [--d2 DIR]
@@ -32,6 +33,20 @@ PROPS = ["vis_mag", "size", "ellipticity", "photo_z", "extended_prob", "n_neigh_
 SETS = ["matches", "d1", "d2_candidates", "d2"]
 BOX_COLS = {"phz_photo_z_phz_median": "photo_z", "mer_catalogue_extended_prob": "extended_prob",
             "phz_classification_phz_classification": "phz_class"}
+PAIRS = [("matches", "d1"), ("matches", "d2"), ("d1", "d2"), ("d2_candidates", "d2")]
+FIELD_DEC_SPLIT = -40.0          # EDF-F around -28 deg, EDF-S around -48 deg (as ml/phase0.py)
+
+
+def ks_table(pops, pairs):
+    # KS distance and median shift (second - first) of every property for each pair of populations.
+    rows = []
+    for c in PROPS:
+        for a, b in pairs:
+            x, y = pops[a][c].dropna().to_numpy(), pops[b][c].dropna().to_numpy()
+            if len(x) and len(y):
+                rows.append(dict(prop=c, pair=f"{a} -> {b}", ks=ks_2samp(x, y).statistic,
+                                 median_shift=np.median(y) - np.median(x)))
+    return pd.DataFrame(rows)
 
 
 def euclid_properties(case):
@@ -45,7 +60,8 @@ def euclid_properties(case):
     box["object_id"] = box["object_id"].astype("int64")
     out = pd.DataFrame(dict(object_id=e["object_id"].astype("int64").to_numpy(),
                             vis_mag=e["vis_mag"].to_numpy(float), size=e["size_true"].to_numpy(float),
-                            ellipticity=e["ellipticity"].to_numpy(float)))
+                            ellipticity=e["ellipticity"].to_numpy(float),
+                            field=np.where(e["dec"].to_numpy(float) < FIELD_DEC_SPLIT, "EDF-S", "EDF-F")))
     wx, ny = common.sky_offset_arcsec(float(e["ra"].mean()), float(e["dec"].mean()), e["ra"].to_numpy(float),
                                       e["dec"].to_numpy(float))
     tree = cKDTree(np.c_[wx, ny])
@@ -110,17 +126,27 @@ def main():
         print(f"\n{c} (quantiles 10/25/50/75/90 %)\n{tab.to_string()}")
 
     print("\nKS distance (0 = same distribution, 1 = disjoint) and median shift (second - first)")
-    pairs = [("matches", "d1"), ("matches", "d2"), ("d1", "d2"), ("d2_candidates", "d2")]
-    ks = []
-    for c in PROPS:
-        for a, b in pairs:
-            x, y = pops[a][c].dropna().to_numpy(), pops[b][c].dropna().to_numpy()
-            if len(x) and len(y):
-                ks.append(dict(prop=c, pair=f"{a} -> {b}", ks=ks_2samp(x, y).statistic,
-                               median_shift=np.median(y) - np.median(x)))
-    ks = pd.DataFrame(ks)
+    ks = ks_table(pops, PAIRS)
     print(ks.pivot(index="prop", columns="pair", values="ks").round(3).to_string())
     print(ks.pivot(index="prop", columns="pair", values="median_shift").round(3).to_string())
+
+    # Per field: each dataset against the population of its own field, and the two fields against each other.
+    fr = pd.DataFrame({s: t["field"].value_counts() for s, t in pops.items()}).fillna(0).astype(int)
+    print(f"\nobjects per field\n{fr.to_string()}\nfraction per field\n{(fr / fr.sum()).round(3).to_string()}")
+    fields = sorted(allp["field"].dropna().unique())
+    for f in fields:
+        sub = {s: t[t["field"] == f] for s, t in pops.items()}
+        k = ks_table(sub, PAIRS)
+        if len(k):
+            print(f"\n[{f}] KS distance\n{k.pivot(index='prop', columns='pair', values='ks').round(3).to_string()}")
+    if len(fields) == 2:
+        a, b = fields
+        cross = {f"{s}_{f}": t[t["field"] == f] for s, t in pops.items() for f in fields}
+        k = ks_table(cross, [(f"{s}_{a}", f"{s}_{b}") for s in SETS])
+        if len(k):
+            print(f"\n{a} -> {b}, same population: KS distance and median shift")
+            print(k.pivot(index="prop", columns="pair", values="ks").round(3).to_string())
+            print(k.pivot(index="prop", columns="pair", values="median_shift").round(3).to_string())
 
     if "phz_class" in allp:
         cls = pd.DataFrame({s: t["phz_class"].astype(str).value_counts(normalize=True) for s, t in pops.items()})
