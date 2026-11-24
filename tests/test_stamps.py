@@ -4,6 +4,8 @@
 # The two pitfalls of the recipe, on a synthetic image: the (column, row) order of the WCS against the
 # [row, column] indexing of arrays, and the FITS origin 1 against the array origin 0.
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from astropy.wcs import WCS
@@ -281,3 +283,70 @@ def test_halo_ring_sees_the_wing_left_past_a_mask():
     assert np.isnan(halo_ring(flux, var, np.zeros(shape, bool), usable, r_target)[0])
     near_target = binary_dilation(np.hypot(xx - 10, yy - 20) <= 1, iterations=1)
     assert halo_ring(flux, var, near_target, usable, r_target)[1] == 0      # ring inside 2 target ellipses only
+
+
+def test_two_tasks_downloading_the_same_seg_tile_do_not_clash(tmp_path, monkeypatch):
+    # Neighbouring patches fetched at the same time share MER tiles: the second download must not fail on, or
+    # corrupt, the first one's temporary file.
+    import threading
+
+    from dp2_cutouts.sources import euclid_seg
+    payload = b"x" * 1000
+    started, release = threading.Barrier(2), threading.Event()
+
+    class Response:
+        headers = {"Content-Length": str(len(payload))}
+        def __enter__(self): return self
+        def __exit__(self, *exc): return False
+        def raise_for_status(self): pass
+        def iter_content(self, chunk):
+            started.wait()  # both tasks are mid-download
+            yield payload[:500]
+            release.wait(5)
+            yield payload[500:]
+
+    monkeypatch.setattr(euclid_seg.requests, "get", lambda *a, **k: Response())
+    import os
+    monkeypatch.setattr(os, "getpid", lambda: threading.get_ident())
+    results, errors = [], []
+
+    def task():
+        try:
+            results.append(euclid_seg.download("https://x/MER_SEG/1/EUC_MER_FINAL-SEGMAP_TILE1-A.fits", tmp_path))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=task) for _ in range(2)]
+    for t in threads:
+        t.start()
+    release.set()
+    for t in threads:
+        t.join()
+    assert not errors
+    assert results[0] == results[1] and results[0].read_bytes() == payload
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["EUC_MER_FINAL-SEGMAP_TILE1-A.fits"]
+
+
+def test_seg_tile_search_retries_irsa_outages(tmp_path, monkeypatch):
+    # IRSA's SIA service fails now and then (pyvo DALServiceError): the tile search is retried, not the patch lost.
+    from dp2_cutouts.sources import euclid_images, euclid_seg
+
+    class DALServiceError(Exception):
+        pass
+
+    calls = []
+
+    def find_tiles(*a):
+        calls.append(1)
+        if len(calls) < 3:
+            raise DALServiceError("Unable to access the capabilities endpoint")
+        return ["102018211"]
+
+    monkeypatch.setattr(euclid_seg, "find_tiles", find_tiles)
+    monkeypatch.setattr(euclid_seg, "seg_url", lambda tile: f"https://x/{tile}/T.fits")
+    monkeypatch.setattr(euclid_seg, "download", lambda url, d: Path(d) / "T.fits")
+    monkeypatch.setattr(euclid_images.time, "sleep", lambda s: None)
+    monkeypatch.setattr(euclid_images.with_retries, "__defaults__",
+                        (6, 10.0, 300.0, lambda s: None, None))
+    assert euclid_seg.fetch_for_box(52.9, -28.1, 0.1, tmp_path) == [tmp_path / "102018211" / "T.fits"]
+    assert len(calls) == 3

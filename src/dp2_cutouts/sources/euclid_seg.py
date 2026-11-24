@@ -51,7 +51,12 @@ def seg_url(tile, session=None):
 
 
 def download(url, dest_dir, chunk=8 << 20):
-    # Into dest_dir/<file name>; skipped when a file of the advertised size is already there.
+    # Into dest_dir/<file name>; skipped when a file of the advertised size is already there. Neighbouring patches
+    # share tiles and their fetch tasks run at the same time: each download goes to its own temporary file (host and
+    # pid in the name) and is moved into place atomically, so two tasks fetching the same tile never write into the
+    # same file or remove each other's (both copies are the same file; the last one to finish replaces the other).
+    import os
+    import socket
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     out = dest_dir / url.rsplit("/", 1)[1]
@@ -60,13 +65,16 @@ def download(url, dest_dir, chunk=8 << 20):
         size = int(r.headers.get("Content-Length", -1))
         if out.exists() and out.stat().st_size == size:
             return out
-        tmp = out.with_suffix(out.suffix + ".part")
-        with open(tmp, "wb") as f:
-            for block in r.iter_content(chunk):
-                f.write(block)
-    if size >= 0 and tmp.stat().st_size != size:
-        raise IOError(f"{url}: got {tmp.stat().st_size} bytes, expected {size}")
-    tmp.rename(out)
+        tmp = out.with_name(f"{out.name}.{socket.gethostname()}.{os.getpid()}.part")
+        try:
+            with open(tmp, "wb") as f:
+                for block in r.iter_content(chunk):
+                    f.write(block)
+            if size >= 0 and tmp.stat().st_size != size:
+                raise IOError(f"{url}: got {tmp.stat().st_size} bytes, expected {size}")
+            os.replace(tmp, out)
+        finally:
+            tmp.unlink(missing_ok=True)
     return out
 
 
@@ -144,11 +152,22 @@ def seg_on_grid(seg_paths, wcs, shape, sub=2, rows_per_chunk=256):
         return ts.grid(wcs, shape, sub, rows_per_chunk)
 
 
+def _irsa_transient(e):
+    # IRSA's SIA service fails now and then ("Unable to access the capabilities endpoint"): pyvo raises it as a
+    # DALServiceError, retried like the usual network hiccups.
+    from .euclid_images import is_transient
+    return type(e).__name__ == "DALServiceError" or is_transient(e)
+
+
 def fetch_for_box(ra, dec, radius_deg, cache_dir):
-    # Tiles touching the circle, downloaded into cache_dir/<tile>/; returns the local paths.
+    # Tiles touching the circle, downloaded into cache_dir/<tile>/; returns the local paths. The IRSA queries are
+    # retried on transient errors.
+    from .euclid_images import with_retries
     paths = []
-    for tile in find_tiles(ra, dec, radius_deg):
-        paths.append(download(seg_url(tile), Path(cache_dir) / tile))
+    for tile in with_retries(lambda: find_tiles(ra, dec, radius_deg), "IRSA SIA", transient=_irsa_transient):
+        url = with_retries(lambda: seg_url(tile), f"MER_SEG {tile} listing", transient=_irsa_transient)
+        paths.append(with_retries(lambda: download(url, Path(cache_dir) / tile), f"MER_SEG {tile}",
+                                  transient=_irsa_transient))
     return paths
 
 
