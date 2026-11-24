@@ -143,13 +143,15 @@ def is_transient(exc):
     return False
 
 
-def with_retries(fn, what, tries=6, wait=10.0, max_wait=300.0, sleep=time.sleep):
-    # fn() retried on transient network errors, waiting 10, 20, 40 ... s (capped); anything else is raised at once.
+def with_retries(fn, what, tries=6, wait=10.0, max_wait=300.0, sleep=time.sleep, transient=None):
+    # fn() retried on transient network errors (is_transient, or the given predicate), waiting 10, 20, 40 ... s
+    # (capped); anything else is raised at once.
+    transient = transient or is_transient
     for k in range(tries):
         try:
             return fn()
         except Exception as e:  # noqa: BLE001 - filtered by is_transient
-            if k == tries - 1 or not is_transient(e):
+            if k == tries - 1 or not transient(e):
                 raise
             delay = min(wait * 2 ** k, max_wait)
             print(f"[mmu] {what}: {type(e).__name__}: {str(e)[:120]} -> retry {k + 1}/{tries - 1} in {delay:.0f} s",
