@@ -7,6 +7,10 @@ Runbook of the Rubin x Euclid cross-instrument work on Jean Zay: datasets D1 and
 
 # Rubin × Euclid cross-instrument learning — runbook (Jean Zay)
 
+> **Archived on 2026-11-24.** This architecture (Stage 1 / Stage 2) is no longer the active research pipeline; it
+> is kept runnable for traceability (git tag `legacy-stage12`). The active campaign is
+> [deblend.md](deblend.md). The dataset steps below (MMU mirror, D1, D2, quality) are still the ones in use.
+
 Everything here runs on Jean Zay. Nothing is meant to run on a laptop: the Euclid images alone do not fit.
 The DebVAder reference run is **given on the command line** (`DEBVADER_RUN`), never written in a file.
 

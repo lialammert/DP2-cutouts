@@ -555,3 +555,22 @@ def test_d2_mask_quality_keeps_a_blend_the_moments_test_rejects():
     assert r_faint == ["low_snr"], (r_faint, out["snr_vis"])
     with pytest.raises(ValueError):
         euclid_separation(cut, tgt, others, _d2_cfg("nope"), np.random.default_rng(1))
+
+
+def test_d1_flags_other_euclid_sources_without_touching_the_pixels():
+    # dataset1.euclid_neighbour_mask: the partner's pixels are flagged (ellipse fallback here: no MER tile), the
+    # target's are not; the image is not modified by the flagging (readers decide what to put there).
+    from dp2_cutouts.pairs.dataset1 import euclid_neighbour_need
+
+    cut, tgt, others = _d2_cut(50.0, 80.0, 14)
+    e = pd.concat([pd.DataFrame(dict(ra=[tgt["ra"]], dec=[tgt["dec"]], a_e=[3.0], b_e=[3.0], theta=[0.0],
+                                     vis_flux=[1.0], object_id=[7])),
+                   others.assign(object_id=[8])], ignore_index=True)
+    cfg = {"dataset1": {}, "dataset2": dict(mask_k=2.0, seg_grow_px=2)}
+    before = cut["flux"].copy()
+    need, how = euclid_neighbour_need(cut, 7, e, cfg, None, 81)
+    assert how == "ellipse"
+    assert need[40, 54] and not need[40, 40]
+    assert np.array_equal(cut["flux"], before)
+    none, how = euclid_neighbour_need(cut, 99, e, cfg, None, 81)
+    assert how == "no_catalogue_row" and not none.any()

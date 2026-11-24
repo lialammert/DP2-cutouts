@@ -97,6 +97,10 @@ dataset1:
   # from the target (stamp column halo_ring_z). Unlike the predicted ratio it does not penalise tight masks.
   # null: off. To replace the predicted cut, set this and max_companion_light_ratio: null.
   max_halo_ring_z: null
+  # Euclid pixels of the other sources on each D1 cutout, flagged as in D2 (array euclid_fill; pixels unchanged):
+  # segmentation (MER segments, ellipses where no tile covers the cutout) | ellipse | null (off, earlier builds).
+  # Needed by the deblending campaign, whose Euclid inputs must be treated alike in D1 and D2.
+  euclid_neighbour_mask: segmentation
   contamination_radius_arcsec: 3.0     # other Euclid sources inside this radius are counted per pair
   contamination_delta_mag: 2.5         # ... if brighter than target VIS mag + this
   # Conditioning features of the Euclid encoder: Rubin PSF of the stamp (known at inference, Rubin-side metadata).
@@ -292,3 +296,54 @@ evaluation:
   retrieval_k: [1, 5, 10]
   bootstrap: 200
   n_examples_figures: 24
+
+# ----------------------------------------------------------------------------------------------------------------
+# Deblending campaign (2026-11-24): three probabilistic deblenders compared on real D1 / D2, weak lensing first.
+#   Run A: K1 Euclid VIS VAE + K2 Rubin decoder from the Euclid latent (both frozen), MC-dropout student (latent MSE)
+#   Run B: same K1 / K2, CFM student;  Run C: joint VAE C1, conditional teacher C2, CFM student C3.
+# Commands: dp2-ml <cfg> deblend-stats | deblend-train <stage> | deblend-eval <what>; scripts/jeanzay/ml/
+# submit_deblend.sh pilot | all | seeds | final. Design and rules: docs/deblend.md. The stage1 / stage2 /
+# stage1_acceptance / controlled_blends / evaluation sections above belong to the archived architecture.
+deblend:
+  euclid_band: VIS                 # NIR bands left out until their flux scale is established
+  latent_dim: 32
+  d2_centering: rubin              # rubin: Rubin-only input (target = Euclid member nearest the Rubin centre)
+  require_d1_euclid_fill: true     # refuse a D1 built without dataset1.euclid_neighbour_mask
+  stats_max_examples: 20000
+  seed: 20261124
+  replicate_dependencies: false    # seeds replicate the students (A, B, C2, C3); K1, K2, C1 shared
+  run_suffix: ""                   # "_pilot" for the pilots (submit_deblend.sh pilot)
+  runs: {rubin_vae: dbl_rubin_vae, k1: dbl_k1, k2: dbl_k2, A: dbl_runA, B: dbl_runB, c1: dbl_c1, c2: dbl_c2,
+         c3: dbl_c3}
+  train:                           # common recipe; deblend.<stage>.train overrides it
+    batch_size: 128
+    learning_rate: 1.0e-4          # debvader-keras real stage 1 (Adam, batch 128)
+    clipnorm: 1.0
+    train_steps: 100000            # step budget (epochs derived from it); provisional until the pilot
+    epochs: 100                    # used when train_steps is null
+    early_stopping_patience: 3     # in epochs (an epoch of the full D1 is ~9 000 steps)
+    backup_every_steps: 2000       # resumable backups: 2 h dev-QoS jobs chained
+    val_max_examples: 20000
+  rubin_vae: {beta: 1.0, train: {train_steps: 150000}}
+  k1: {beta: 1.0, mask_augment_prob: 0.0, mask_pool_size: 5000, train: {train_steps: 150000}}
+  k2: {}
+  A: {embed: 128, dropout: 0.1}
+  B: {context: 128, hidden: [128, 128], standardise: true, stats_batches: 100}
+  c1: {embed: 128, fusion: [256], beta: 1.0, weight_r: 1.0, weight_e: 1.0, train: {train_steps: 150000}}
+  c2: {embed: 128, fusion: [256], lambda_d1: auto, lambda_batches: 8}
+  c3: {context: 128, hidden: [128, 128], standardise: true, stats_batches: 100, lambda_replay: 1.0,
+       init_context_from_c2: true, train: {train_steps: 150000}}
+  eval:
+    k_samples: 10                  # posterior samples per galaxy (50 / 100 with --set deblend.eval.k_samples=...)
+    nfe: 20
+    method: heun
+    flux_aperture_px: 6
+    max_examples: 5000
+    relation_max_examples: 3000
+    latent_max_examples: 5000
+    jacobian_n: 32
+    mask_pool: 2000
+    batch_size: 64
+    bootstrap: 200
+    cost_batch: 64
+    cost_k: 10

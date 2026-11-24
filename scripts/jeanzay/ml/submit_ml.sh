@@ -192,7 +192,7 @@ case "$STEP" in
     mmu-mirror) submit_mmu_mirror ;;
     probe) submit_probe "$@" ;;
     phase0) submit_phase0 ;;
-    datasets) submit_datasets ;;
+    datasets) submit_datasets "${AFTER_JOB:-}" ;;   # AFTER_JOB=<job id>: wait for it (e.g. the assembly)
     rebuild)
         # Move the current datasets aside once the AFTER jobs are over (whatever their outcome: a test still reading
         # them only has to be finished), then rebuild everything and train the reference VAE on the new D1.

@@ -8,6 +8,12 @@
 # companions leave too much light on the target after masking (clean_of_companions), each
 # with its reason; every other check is recorded as a column, for the quality report and for later selections.
 # One shard per Rubin patch (the job of one Slurm array task), merged afterwards.
+# Optional array (off by default, so that earlier builds are reproduced exactly): euclid_fill
+# (dataset1.euclid_neighbour_mask) = Euclid pixels of the other sources on the cutout, found as in D2 (MER
+# segmentation, or ellipses where no tile covers the cutout), so that the Euclid view of a D1 target can be
+# treated like the masked central of D2. The Euclid pixels themselves are left unchanged: readers decide what to
+# put in place of the flagged pixels. (The Rubin pixels filled with sky by the stamp pipeline are real sky
+# pixels of the same region, i.e. observations: nothing flags them here.)
 
 import json
 
@@ -76,6 +82,43 @@ def clean_of_companions(meta, d1):
     return keep, reason
 
 
+def euclid_neighbour_need(cut, eid, e, cfg, tiles, n):
+    # Pixels of the other Euclid sources on the target's n x n cutout (bool), by the D2 rules (dataset2.
+    # euclid_separation): MER segments when a tile covers the cutout, else mask_k times their ellipse. e: the
+    # copaings Euclid table with Euclid-resolution ellipses (a_e, b_e in Euclid pixels, theta). Returns (need, how).
+    from ..common.ellipse import radius_map
+    from .dataset2 import segmentation_need
+    d1, d2 = cfg["dataset1"], cfg["dataset2"]
+    w = cut["wcs"]
+    hit = e.index[e["object_id"].to_numpy() == int(eid)]
+    if len(hit) == 0:
+        return np.zeros((n, n), bool), "no_catalogue_row"
+    t = e.loc[hit[0]]
+    others = e.drop(index=hit[0])
+    dra = np.abs(((others["ra"] - t["ra"] + 180) % 360) - 180) * np.cos(np.radians(t["dec"])) * 3600
+    others = others[(dra < 15) & (np.abs(others["dec"] - t["dec"]) * 3600 < 15)]
+    tx, ty = w.world_to_pixel_values(t["ra"], t["dec"])
+    labels = tiles.grid(w, (n, n), sub=1) if tiles is not None else None
+    if labels is not None and bool((labels != 0).any()):
+        ox, oy = w.world_to_pixel_values(others["ra"].to_numpy(float), others["dec"].to_numpy(float))
+        others_px = pd.DataFrame(dict(x=np.asarray(ox, float), y=np.asarray(oy, float),
+                                      a=others["a_e"].to_numpy(float), b=others["b_e"].to_numpy(float),
+                                      theta=others["theta"].to_numpy(float),
+                                      flux=others["vis_flux"].to_numpy(float)))
+        others_px = others_px[(others_px["x"] > -n) & (others_px["x"] < 2 * n)
+                              & (others_px["y"] > -n) & (others_px["y"] < 2 * n)]
+        tgt = dict(a_e=t["a_e"], b_e=t["b_e"], theta=t["theta"], flux=float(t["vis_flux"]))
+        grow = int(d1.get("euclid_seg_grow_px", d2.get("seg_grow_px", 2)))
+        return segmentation_need(labels, (tx, ty), tgt, others_px, grow), "segmentation"
+    k = float(d1.get("euclid_mask_k", d2.get("mask_k", 2.0)))
+    need = np.zeros((n, n), bool)
+    for o in others.itertuples(index=False):
+        ox, oy = w.world_to_pixel_values(o.ra, o.dec)
+        if -o.a_e * k <= ox <= n + o.a_e * k and -o.a_e * k <= oy <= n + o.a_e * k:
+            need |= radius_map((n, n), float(ox), float(oy), o.a_e, o.b_e, o.theta) <= k
+    return need, "ellipse"
+
+
 def build_patch(cfg, patch):
     from ..pipeline.patches import patch_case
 
@@ -90,6 +133,9 @@ def build_patch(cfg, patch):
     t = common.read_final_patch(pcfg, patch["tract"], patch["patch"])
     meta = common.table_to_pandas(t)
     flux_r, ivar_r, mask_r = common.unpack_images(t.column("image"), rb)
+    neigh_mask = d1.get("euclid_neighbour_mask") or None
+    if neigh_mask not in (None, "segmentation", "ellipse"):
+        raise ValueError(f"dataset1.euclid_neighbour_mask must be null, segmentation or ellipse, not {neigh_mask!r}")
     rejected = []
 
     has = meta["euclid_object_id"].notna().to_numpy()
@@ -104,7 +150,8 @@ def build_patch(cfg, patch):
     meta, flux_r, ivar_r, mask_r = meta[alone].reset_index(drop=True), flux_r[alone], ivar_r[alone], mask_r[alone]
     if len(meta) == 0:
         # Patch without final stamps (no target, not processed): an empty shard records that it was looked at.
-        store.write_shard(shard_dir(cfg, patch["name"]), pd.DataFrame(), empty_arrays(n_r, len(rb), n_e, len(eb)),
+        store.write_shard(shard_dir(cfg, patch["name"]), pd.DataFrame(),
+                          empty_arrays(n_r, len(rb), n_e, len(eb), neigh_mask is not None),
                           pd.DataFrame(rejected), info=dict(patch=patch["name"]))
         return dict(n_pairs=0, n_rejected=len(rejected))
 
@@ -113,6 +160,21 @@ def build_patch(cfg, patch):
     box = case.sky_box if len(objects) else None
     cuts = euclid_images.fetch(ec, objects, box) if len(objects) else {}
     neigh, tree = euclid_neighbours(case)
+    e_tab, tiles = None, None
+    if neigh_mask is not None:
+        from .dataset2 import euclid_ellipses, euclid_table, rubin_to_euclid_px
+        e_tab = euclid_table(case)
+        a_r, b_r, th = euclid_ellipses(e_tab, cfg, common.RUBIN_SCALE)
+        k_px = rubin_to_euclid_px(cfg)
+        e_tab["a_e"], e_tab["b_e"], e_tab["theta"] = a_r * k_px, b_r * k_px, th
+        if neigh_mask == "segmentation":
+            from ..sources import euclid_seg
+            paths = euclid_seg.cached_tiles(euclid_seg.cache_dir(pcfg["masking"]))
+            if not paths:
+                raise RuntimeError("dataset1.euclid_neighbour_mask = segmentation but no MER segmentation tile in the "
+                                   "cache: run the pipeline's fetch with a segmentation masking")
+            tiles = euclid_seg.TileSet(paths).__enter__()
+    fill_e = np.zeros((len(meta), n_e, n_e), bool)
 
     keep, rows = [], []
     ef = np.zeros((len(meta), n_e, n_e, len(eb)), np.float32)
@@ -141,6 +203,9 @@ def build_patch(cfg, patch):
                                  detail=f"{valid_vis:.3f}"))
             continue
         ef[i], ei[i], em[i], ep[i] = f, iv, m, present
+        how = None
+        if neigh_mask is not None:
+            fill_e[i], how = euclid_neighbour_need(cut, eid, e_tab, cfg, tiles, n_e)
         keep.append(i)
 
         # Alignment: catalogue offset Euclid - Rubin, sub-pixel centring of each stamp, measured centroids.
@@ -172,7 +237,12 @@ def build_patch(cfg, patch):
             euclid_source_px=int(cut.get("source_px", -1)), n_euclid_contaminants=n_cont,
             nearest_euclid_arcsec=d_near,
             rubin_valid_fraction=float((~mask_r[i]).mean()), rubin_bad_ivar=int((~np.isfinite(ivar_r[i])).sum()
-                                                                                 + (ivar_r[i] < 0).sum())))
+                                                                                 + (ivar_r[i] < 0).sum()),
+            euclid_neighbour_masking=how,
+            euclid_fill_fraction=float(fill_e[i].mean()) if neigh_mask is not None else np.nan))
+
+    if tiles is not None:
+        tiles.__exit__(None, None, None)
 
     keep = np.asarray(keep, int)
     meta = pd.concat([meta.iloc[keep].reset_index(drop=True), pd.DataFrame(rows)], axis=1)
@@ -180,18 +250,23 @@ def build_patch(cfg, patch):
     meta["split"] = splits.split_table(meta, cfg).values if len(meta) else pd.Series(dtype=object)
     arrays = dict(rubin_flux=flux_r[keep], rubin_ivar=ivar_r[keep], rubin_mask=mask_r[keep],
                   euclid_flux=ef[keep], euclid_ivar=ei[keep], euclid_mask=em[keep], euclid_present=ep[keep])
+    if neigh_mask is not None:
+        arrays["euclid_fill"] = fill_e[keep]
     if len(keep) == 0:
-        arrays = empty_arrays(n_r, len(rb), n_e, len(eb))
+        arrays = empty_arrays(n_r, len(rb), n_e, len(eb), neigh_mask is not None)
     store.write_shard(shard_dir(cfg, patch["name"]), meta, arrays, pd.DataFrame(rejected),
                       info=dict(patch=patch["name"]))
     return dict(n_pairs=int(len(keep)), n_rejected=len(rejected))
 
 
-def empty_arrays(n_r, b_r, n_e, b_e):
-    return dict(rubin_flux=np.zeros((0, n_r, n_r, b_r), np.float32), rubin_ivar=np.zeros((0, n_r, n_r, b_r), np.float32),
-                rubin_mask=np.zeros((0, n_r, n_r, b_r), bool), euclid_flux=np.zeros((0, n_e, n_e, b_e), np.float32),
-                euclid_ivar=np.zeros((0, n_e, n_e, b_e), np.float32), euclid_mask=np.zeros((0, n_e, n_e, b_e), bool),
-                euclid_present=np.zeros((0, b_e), bool))
+def empty_arrays(n_r, b_r, n_e, b_e, euclid_fill=False):
+    a = dict(rubin_flux=np.zeros((0, n_r, n_r, b_r), np.float32), rubin_ivar=np.zeros((0, n_r, n_r, b_r), np.float32),
+             rubin_mask=np.zeros((0, n_r, n_r, b_r), bool), euclid_flux=np.zeros((0, n_e, n_e, b_e), np.float32),
+             euclid_ivar=np.zeros((0, n_e, n_e, b_e), np.float32), euclid_mask=np.zeros((0, n_e, n_e, b_e), bool),
+             euclid_present=np.zeros((0, b_e), bool))
+    if euclid_fill:
+        a["euclid_fill"] = np.zeros((0, n_e, n_e), bool)
+    return a
 
 
 def info(cfg):
@@ -201,7 +276,8 @@ def info(cfg):
                 rubin_pixel_scale=common.RUBIN_SCALE, euclid_pixel_scale=float(cfg["euclid"]["pixel_scale"]),
                 euclid_image_source=cfg["euclid"]["image_source"],
                 config_fingerprint=cfg.fingerprint(["rubin", "euclid", "dataset1", "splits", "seed"]),
-                mask_convention="True = pixel not to be trusted",
+                mask_convention="True = pixel not to be trusted; euclid_fill (when present) = Euclid pixel of "
+                                "another source, not the target",
                 stamp_centre="integer pixel nearest to the catalogue position; sub-pixel offsets in meta")
 
 

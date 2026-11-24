@@ -109,7 +109,15 @@ another installation reproduces exactly the same dataset.
 
 `notebooks/01_catalogs`, `02_cuts`, `03_masking`. Their outputs show DP2 pixels: clear them before committing.
 
-## Cross-instrument learning (Rubin × Euclid, Jean Zay)
+## Probabilistic deblending campaign (Rubin × Euclid, Jean Zay)
+
+Since 2026-11-24 the learning side compares three probabilistic deblenders of real Rubin blends on D1 / D2, with
+Euclid as training-only information and weak lensing as the priority metric: package `src/dp2_cutouts/deblend/`,
+commands `dp2-ml <cfg> deblend-stats | deblend-train | deblend-eval`, Slurm graph
+`scripts/jeanzay/ml/submit_deblend.sh`. Design, data rules, run order and known limits:
+[docs/deblend.md](docs/deblend.md).
+
+## Cross-instrument learning, first architecture (archived)
 
 On top of the final dataset: paired datasets (D1 isolated galaxies seen by both surveys, D2 Rubin blends that
 Euclid resolves, controlled blends), Stage 1 (a Euclid encoder into the latent space of the frozen DebVAder VAE

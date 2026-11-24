@@ -11,6 +11,11 @@
 #   blends                          controlled blends from D1 (val, test)
 #   export-rubin-vae                Rubin stamps of D1 as a debvader-keras real build, to train the reference VAE
 #                                   (--debvader-run: template run whose config.json gives the architecture)
+#   deblend-stats                   normalisation scales of the deblending campaign (D1 train split)
+#   deblend-train STAGE [--seed S]  train one stage of the campaign: rubin_vae, k1, k2, A, B, c1, c2, c3
+#                                   (--max-steps N: short pilot / smoke run)
+#   deblend-eval WHAT [--seed S]    evaluations of the campaign (see deblend/evaluate.py)
+# Legacy (archived architecture, kept runnable for traceability, not part of the active campaign):
 #   train-stage1 | eval-stage1      Stage 1 (needs --debvader-run; --ablation picks the loss weights)
 #   train-stage2 | eval-stage2      Stage 2 (needs --debvader-run and --stage1-run)
 # The DebVAder run folder (paper_baseline) is given with --debvader-run or the DEBVADER_RUN environment variable;
@@ -22,7 +27,8 @@ import sys
 import traceback
 
 COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "blends",
-            "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2")
+            "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2", "deblend-stats",
+            "deblend-train", "deblend-eval")
 
 
 def _debvader_run(args):
@@ -58,7 +64,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="dp2-ml")
     ap.add_argument("config")
     ap.add_argument("command", choices=COMMANDS)
-    ap.add_argument("what", nargs="?", help="quality: d1 or d2")
+    ap.add_argument("what", nargs="?", help="quality: d1 or d2; deblend-train: stage; deblend-eval: evaluation")
     ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
                     help="override a configuration value (repeatable)")
     ap.add_argument("--patches", nargs="+")
@@ -76,6 +82,8 @@ def main(argv=None):
     ap.add_argument("--split", default="test")
     ap.add_argument("--n", type=int, default=3000, help="phase0: number of DP2 stamps")
     ap.add_argument("--reference-npz", help="phase0: predictions saved by the campaign (images, mu)")
+    ap.add_argument("--seed", type=int, help="deblend: replicate seed (run folder suffix _s<seed>)")
+    ap.add_argument("--max-steps", type=int, help="deblend-train: stop after this many steps (pilot / smoke)")
     args = ap.parse_args(argv)
 
     from .mlconfig import MLConfig
@@ -122,6 +130,25 @@ def main(argv=None):
 
     # Everything below imports keras (backend chosen in dp2_cutouts.ml).
     from . import ml  # noqa: F401
+    if c == "deblend-stats":
+        import json
+        from .deblend import data
+        out = data.deblend_dir(cfg)
+        out.mkdir(parents=True, exist_ok=True)
+        stats = data.compute_norm_stats(cfg, int(cfg["deblend"].get("stats_max_examples", 20000)))
+        (out / "norm_stats.json").write_text(json.dumps(stats, indent=2))
+        print(json.dumps(stats, indent=2))
+        return
+    if c == "deblend-train":
+        from .deblend import train
+        if args.what not in train.STAGES:
+            sys.exit(f"deblend-train needs a stage: {', '.join(train.STAGES)}")
+        train.train(cfg, args.what, args.seed, not args.no_resume, args.force, args.max_steps)
+        return
+    if c == "deblend-eval":
+        from .deblend import evaluate as devaluate
+        devaluate.run(cfg, args.what, args.seed, args.split)
+        return
     if c == "probe-euclid":
         from .ml import probe
         if not args.patch:
