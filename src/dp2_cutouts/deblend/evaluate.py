@@ -231,8 +231,8 @@ def _iterate(ds, max_n):
 
 
 def out_dir(cfg, what, split, seed):
-    name = what + (f"_{split}" if split else "") + (f"_s{seed}" if seed is not None else "") +         str(cfg["deblend"].get("run_suffix") or "")
-    d = data.deblend_dir(cfg) / "evaluations" / name
+    from .campaign import eval_dir
+    d = eval_dir(cfg, what, split, seed)
     d.mkdir(parents=True, exist_ok=True)
     return d
 

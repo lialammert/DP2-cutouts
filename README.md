@@ -113,8 +113,8 @@ another installation reproduces exactly the same dataset.
 
 Since 2026-11-24 the learning side compares three probabilistic deblenders of real Rubin blends on D1 / D2, with
 Euclid as training-only information and weak lensing as the priority metric: package `src/dp2_cutouts/deblend/`,
-commands `dp2-ml <cfg> deblend-stats | deblend-train | deblend-eval`, Slurm graph
-`scripts/jeanzay/ml/submit_deblend.sh`. Design, data rules, run order and known limits:
+commands `dp2-ml <cfg> deblend-stats | deblend-train | deblend-eval | deblend-campaign | deblend-advance`,
+self-advancing Slurm campaign started by `scripts/jeanzay/ml/submit_deblend.sh`. Design, data rules, run order and known limits:
 [docs/deblend.md](docs/deblend.md).
 
 ## Cross-instrument learning, first architecture (archived)

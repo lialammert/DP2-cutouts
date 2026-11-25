@@ -19,4 +19,11 @@ ARGS=()
 for a in "$@"; do
     ARGS+=("${a//\$SLURM_ARRAY_TASK_ID/${SLURM_ARRAY_TASK_ID:-}}")
 done
-dp2-ml "$DP2_ML_CONFIG" "${ARGS[@]}"
+rc=0
+dp2-ml "$DP2_ML_CONFIG" "${ARGS[@]}" || rc=$?
+# A job of the deblending campaign (deblend-stats) advances it when it ends (deblend/campaign.py).
+if [[ -n "${DEBLEND_CAMPAIGN:-}" ]]; then
+    # shellcheck disable=SC2086
+    dp2-ml "$DP2_ML_CONFIG" deblend-advance ${DEBLEND_SET:-} || echo "deblend-advance failed" >&2
+fi
+exit "$rc"

@@ -121,10 +121,26 @@ count as observations (decision of 2026-11-24).
    - `run.json` (λ_D1 calibration, parameter counts).
 
    Then set `deblend.train.train_steps` from the measured speed.
-4. `submit_deblend.sh all`: the eight trainings as chains of 2-hour dev-QoS jobs that resume from their backups,
-   then the evaluations on the test split.
+4. `submit_deblend.sh all`: the eight trainings, then the evaluations on the test split.
 5. `SEEDS="1 2" submit_deblend.sh seeds`: replicates of the students (A, B, C2, C3).
 6. `submit_deblend.sh final`: holdout, once.
+
+`submit_deblend.sh status` prints the state of every node of every campaign.
+
+**How the campaign moves forward** (`deblend/campaign.py`).
+- The dev QoS refuses more than about ten queued jobs per user. Submitting each training as a fixed chain of
+  2-hour jobs (80 jobs for the campaign) is therefore impossible. Each step writes a campaign spec under
+  `deblend/campaign/` and submits only the nodes whose dependencies are met.
+- Every campaign job runs `dp2-ml <cfg> deblend-advance` when it ends, or 5 minutes before its walltime. That
+  call submits what has become ready: the next stages, or the same training again.
+- A training stops on its own after `DEBLEND_TIME_BUDGET_MIN` minutes (100 by default in `deblend.slurm`). It
+  writes its backup with the epoch in progress, does not write `DONE`, and the next job resumes from the backup.
+- At most `deblend.campaign.max_queued` jobs of the user (8 by default) sit in the dev QoS, the user's other jobs
+  included. A refused submission is retried at the next advance.
+- A node whose command raised an exception leaves a marker in `deblend/campaign/failed/<job name>` and is not
+  resubmitted. After fixing the cause, `dp2-ml <cfg> deblend-advance retry <job name>` resubmits it.
+- A node is also given up after `max_jobs_train` (30) or `max_jobs_eval` (2) jobs.
+- An evaluation whose `summary.json` already exists counts as done. To redo it, delete its folder.
 
 **Outputs** go under `$DP2_ML_ROOT/deblend/`:
 - `norm_stats.json`;

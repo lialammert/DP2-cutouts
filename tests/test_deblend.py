@@ -236,6 +236,16 @@ def test_every_stage_trains_with_frozen_parts_and_samples_from_rubin_only(cfg):
     assert np.std(za, axis=1).mean() > 0          # MC dropout gives diverse samples
 
 
+def test_a_training_stopped_on_its_time_budget_resumes_the_cut_epoch(cfg):
+    from dp2_cutouts.deblend import train
+    rd = train.train(cfg, "k1", seed=7, time_budget_s=1e-6)
+    assert not (rd / "DONE").exists()
+    meta = json.loads((rd / "backup" / "training_metadata.json").read_text())
+    assert meta["epoch"] == 0                      # the cut epoch is redone, not skipped
+    rd = train.train(cfg, "k1", seed=7)
+    assert (rd / "DONE").exists()
+
+
 def test_evaluations_run_on_the_trained_campaign(cfg):
     # After the stage test (same module fixture): every evaluation produces its summary.
     from dp2_cutouts.deblend import evaluate

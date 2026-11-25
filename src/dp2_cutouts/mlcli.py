@@ -15,6 +15,11 @@
 #   deblend-train STAGE [--seed S]  train one stage of the campaign: rubin_vae, k1, k2, A, B, c1, c2, c3
 #                                   (--max-steps N: short pilot / smoke run)
 #   deblend-eval WHAT [--seed S]    evaluations of the campaign (see deblend/evaluate.py)
+#   deblend-campaign MODE           start a self-advancing Slurm campaign (pilot | all | seeds | final; --seed,
+#                                   --max-steps, --split, --after DEPENDENCY), see deblend/campaign.py
+#   deblend-advance [status | retry JOB | stop CAMPAIGN]
+#                                   submit what has become ready in the active campaigns (run by every campaign job
+#                                   when it ends); status: print only
 # Legacy (archived architecture, kept runnable for traceability, not part of the active campaign):
 #   train-stage1 | eval-stage1      Stage 1 (needs --debvader-run; --ablation picks the loss weights)
 #   train-stage2 | eval-stage2      Stage 2 (needs --debvader-run and --stage1-run)
@@ -28,7 +33,7 @@ import traceback
 
 COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "blends",
             "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2", "deblend-stats",
-            "deblend-train", "deblend-eval")
+            "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance")
 
 
 def _debvader_run(args):
@@ -60,11 +65,37 @@ def _shards(cfg, args, kind):
     return ok
 
 
+def _deblend(cfg, args, c):
+    if c == "deblend-stats":
+        import json
+        from .deblend import data
+        out = data.deblend_dir(cfg)
+        out.mkdir(parents=True, exist_ok=True)
+        stats = data.compute_norm_stats(cfg, int(cfg["deblend"].get("stats_max_examples", 20000)))
+        (out / "norm_stats.json").write_text(json.dumps(stats, indent=2))
+        print(json.dumps(stats, indent=2))
+        return
+    if c == "deblend-train":
+        from .deblend import train
+        if args.what not in train.STAGES:
+            sys.exit(f"deblend-train needs a stage: {', '.join(train.STAGES)}")
+        budget = args.time_budget_min or float(os.environ.get("DEBLEND_TIME_BUDGET_MIN") or 0) or None
+        train.train(cfg, args.what, args.seed, not args.no_resume, args.force, args.max_steps,
+                    budget * 60 if budget else None)
+        return
+    if c == "deblend-eval":
+        from .deblend import evaluate as devaluate
+        devaluate.run(cfg, args.what, args.seed, args.split)
+        return
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="dp2-ml")
     ap.add_argument("config")
     ap.add_argument("command", choices=COMMANDS)
-    ap.add_argument("what", nargs="?", help="quality: d1 or d2; deblend-train: stage; deblend-eval: evaluation")
+    ap.add_argument("what", nargs="?", help="quality: d1 or d2; deblend-train: stage; deblend-eval: evaluation; "
+                                            "deblend-campaign: mode; deblend-advance: status | retry | stop")
+    ap.add_argument("target", nargs="?", help="deblend-advance retry: job name; stop: campaign name")
     ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
                     help="override a configuration value (repeatable)")
     ap.add_argument("--patches", nargs="+")
@@ -84,12 +115,31 @@ def main(argv=None):
     ap.add_argument("--reference-npz", help="phase0: predictions saved by the campaign (images, mu)")
     ap.add_argument("--seed", type=int, help="deblend: replicate seed (run folder suffix _s<seed>)")
     ap.add_argument("--max-steps", type=int, help="deblend-train: stop after this many steps (pilot / smoke)")
+    ap.add_argument("--time-budget-min", type=float,
+                    help="deblend-train: stop after that many minutes without finishing, resumable (default: "
+                         "$DEBLEND_TIME_BUDGET_MIN, set by deblend.slurm)")
+    ap.add_argument("--after", help="deblend-campaign: Slurm dependency of the first jobs, e.g. afterok:123")
     args = ap.parse_args(argv)
 
     from .mlconfig import MLConfig
     cfg = MLConfig.load(args.config, args.set)
     c = args.command
 
+    if c in ("deblend-campaign", "deblend-advance"):
+        # No keras here: the campaign is started from a login node.
+        from .deblend import campaign
+        if c == "deblend-campaign":
+            campaign.start(cfg, args.config, args.set, args.what, args.seed, args.max_steps, args.split, args.after)
+        elif args.what in (None, "status"):
+            campaign.advance(cfg, submit=args.what is None)
+        elif args.what == "retry" and args.target:
+            campaign.retry(cfg, args.target)
+            campaign.advance(cfg)
+        elif args.what == "stop" and args.target:
+            campaign.stop(cfg, args.target)
+        else:
+            sys.exit("deblend-advance [status | retry JOB_NAME | stop CAMPAIGN]")
+        return
     if c in ("d1", "d2"):
         sys.exit(0 if _shards(cfg, args, c) else 1)
     if c == "d1-merge":
@@ -130,25 +180,15 @@ def main(argv=None):
 
     # Everything below imports keras (backend chosen in dp2_cutouts.ml).
     from . import ml  # noqa: F401
-    if c == "deblend-stats":
-        import json
-        from .deblend import data
-        out = data.deblend_dir(cfg)
-        out.mkdir(parents=True, exist_ok=True)
-        stats = data.compute_norm_stats(cfg, int(cfg["deblend"].get("stats_max_examples", 20000)))
-        (out / "norm_stats.json").write_text(json.dumps(stats, indent=2))
-        print(json.dumps(stats, indent=2))
-        return
-    if c == "deblend-train":
-        from .deblend import train
-        if args.what not in train.STAGES:
-            sys.exit(f"deblend-train needs a stage: {', '.join(train.STAGES)}")
-        train.train(cfg, args.what, args.seed, not args.no_resume, args.force, args.max_steps)
-        return
-    if c == "deblend-eval":
-        from .deblend import evaluate as devaluate
-        devaluate.run(cfg, args.what, args.seed, args.split)
-        return
+    if c.startswith("deblend-"):
+        # Inside a campaign job, an exception leaves a failure marker so that the campaign does not resubmit it.
+        try:
+            return _deblend(cfg, args, c)
+        except BaseException as e:  # noqa: BLE001 (SystemExit from argument checks included)
+            if not (isinstance(e, SystemExit) and e.code in (0, None)):
+                from .deblend import campaign
+                campaign.mark_failed(cfg, "".join(traceback.format_exception(type(e), e, e.__traceback__)))
+            raise
     if c == "probe-euclid":
         from .ml import probe
         if not args.patch:

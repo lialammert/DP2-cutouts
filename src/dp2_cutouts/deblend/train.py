@@ -17,6 +17,7 @@
 # validation loss of the stage only (never on test or holdout).
 
 import json
+import time
 from pathlib import Path
 
 import keras
@@ -26,13 +27,10 @@ from keras import ops
 from ..ml.training import (FrozenGuard, callbacks, environment, optimizer, prepare_run_dir, schedule, set_seeds,
                            validation_indices, write_json)
 from . import data
-from .layers import sample_diag, sample_tril
+from .campaign import DEPENDS, STAGES, run_dir, run_name  # noqa: F401  (names shared with the campaign)
+from .layers import ConvDecoder, sample_diag, sample_tril
 from .models import (C2Branches, C2Model, C3Model, CFMStudent, ImageEncoder, ImageVAE, JointEncoder, JointVAE,
                      K2Model, RubinBlendRegressor, RunAModel, RunBModel)
-from .layers import ConvDecoder
-
-STAGES = ("rubin_vae", "k1", "k2", "A", "B", "c1", "c2", "c3")
-DEPENDS = dict(rubin_vae=(), k1=(), k2=("k1",), A=("k1",), B=("k1",), c1=(), c2=("c1",), c3=("c1", "c2"))
 
 
 # ----------------------------------------------------------------------------- settings and folders
@@ -42,16 +40,6 @@ def settings(cfg, stage):
     tr = dict(db["train"])
     tr.update(st.pop("train", {}) or {})
     return dict(stage=stage, d=int(db["latent_dim"]), train=tr, model=st)
-
-
-def run_name(cfg, stage, seed=None):
-    # deblend.run_suffix (e.g. _pilot) keeps short pilot runs apart from the real ones.
-    base = cfg["deblend"]["runs"][stage] + str(cfg["deblend"].get("run_suffix") or "")
-    return base if seed is None else f"{base}_s{int(seed)}"
-
-
-def run_dir(cfg, stage, seed=None):
-    return data.deblend_dir(cfg) / "runs" / run_name(cfg, stage, seed)
 
 
 def dep_dir(cfg, stage, seed=None):
@@ -287,7 +275,37 @@ def build(cfg, stage, s, seed, deps):
     return model, loaders, frozen, subs
 
 
-def train(cfg, stage, seed=None, resume=True, force=False, max_steps=None):
+class TimeBudget(keras.callbacks.Callback):
+    # Stops training after `seconds` (counted from `t0`) at the end of a batch, so that a job of the dev QoS ends
+    # on its own before its walltime. The backup is then written with the epoch in progress, which a resumed run
+    # restarts (keras 3 resumes at epoch boundaries), so no completed step is lost to the cut.
+    def __init__(self, seconds, backup, t0):
+        super().__init__()
+        self.seconds, self.backup, self.t0, self.hit = float(seconds), backup, float(t0), False
+        self._epoch = 0
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self._epoch = epoch
+
+    def on_train_batch_end(self, batch, logs=None):
+        if not self.hit and time.time() - self.t0 > self.seconds:
+            self.hit = True
+            self.model.stop_training = True
+            print(f"time budget of {self.seconds / 60:.0f} min reached at epoch {self._epoch} batch {batch}: "
+                  "saving the backup and stopping (the next job resumes)")
+
+    def on_epoch_end(self, epoch, logs=None):
+        # After BackupAndRestore.on_epoch_end (earlier in the list), which counts the cut epoch as completed.
+        if self.hit and self.backup is not None:
+            self.backup._current_epoch = epoch
+            self.backup._last_batch_seen = 0
+            self.backup._save_model()
+
+
+def train(cfg, stage, seed=None, resume=True, force=False, max_steps=None, time_budget_s=None):
+    # time_budget_s: stop after that many seconds (from this call) without writing DONE; the same command resumes
+    # from <run>/backup. Ignored with max_steps (pilot runs are short and not resumable).
+    t0 = time.time()
     seed_v = int(cfg["deblend"]["seed"]) if seed is None else int(seed)
     set_seeds(seed_v)
     rd = run_dir(cfg, stage, seed)
@@ -311,10 +329,18 @@ def train(cfg, stage, seed=None, resume=True, force=False, max_steps=None):
                                      n_params={k: int(v.count_params()) for k, v in subs.items()},
                                      n_train_batches=len(tr), environment=environment()))
     model.compile(optimizer=optimizer(s["train"]["learning_rate"], s["train"].get("clipnorm")))
+    resumable = resume and not max_steps
+    cbs = callbacks(rd, subs, s["train"]["early_stopping_patience"], resumable, s["train"].get("backup_every_steps"))
+    budget = None
+    if time_budget_s and resumable:
+        backup = next(c for c in cbs if isinstance(c, keras.callbacks.BackupAndRestore))
+        budget = TimeBudget(time_budget_s, backup, t0)
+        cbs.append(budget)
     model.fit(tr, validation_data=va, epochs=schedule(s["train"], len(tr)),
-              steps_per_epoch=min(len(tr), int(max_steps)) if max_steps else None,
-              callbacks=callbacks(rd, subs, s["train"]["early_stopping_patience"], resume and not max_steps,
-                                  s["train"].get("backup_every_steps")), verbose=2)
+              steps_per_epoch=min(len(tr), int(max_steps)) if max_steps else None, callbacks=cbs, verbose=2)
+    if budget is not None and budget.hit:
+        print(f"deblend {stage}: stopped on the time budget, not finished (no DONE); the same command resumes")
+        return rd
     if guard is not None:
         after = guard.check()
         write_json(rd / "frozen_check.json", dict(before=guard.before, after=after, unchanged=True))

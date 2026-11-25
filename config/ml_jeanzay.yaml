@@ -315,6 +315,11 @@ deblend:
   run_suffix: ""                   # "_pilot" for the pilots (submit_deblend.sh pilot)
   runs: {rubin_vae: dbl_rubin_vae, k1: dbl_k1, k2: dbl_k2, A: dbl_runA, B: dbl_runB, c1: dbl_c1, c2: dbl_c2,
          c3: dbl_c3}
+  campaign:                        # self-advancing Slurm campaign (deblend/campaign.py, submit_deblend.sh)
+    qos: qos_gpu_a100-dev          # QoS whose queued jobs are counted (overridden by --qos= in DP2_GPU_EXTRA)
+    max_queued: 8                  # the dev QoS refuses more than ~10 queued jobs per user, all projects together
+    max_jobs_train: 30             # 2 h jobs per training before giving up (walltime kills, node failures)
+    max_jobs_eval: 2
   train:                           # common recipe; deblend.<stage>.train overrides it
     batch_size: 128
     learning_rate: 1.0e-4          # debvader-keras real stage 1 (Adam, batch 128)
