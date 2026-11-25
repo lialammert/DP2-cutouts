@@ -8,7 +8,8 @@
 #               masked pixel whose mirror pixel shows the target, unmasked, is given that pixel's light), over the
 #               light of the target that stays visible. 0: no target light under the masks.
 #   calibration real D2 mask patterns (the masked regions touching their D2 target, rotated / flipped at random) laid
-#               on isolated D1 galaxies, filled with sky as D2 does; the true change of the VIS adaptive moments
+#               on isolated D1 galaxies of similar size to that target (adaptive-moment sigma within 20 %: D1 galaxies
+#               are brighter and larger than D2 targets), filled with sky as D2 does; the true change of the VIS adaptive moments
 #               (shape |de|, size, flux) is measured against the unmasked galaxy, together with lost_sym.
 #   result      the largest lost_sym below which the injected masks keep |de| under --tol (per bin, 90th
 #               percentile), and the share of D2 above it, overall, by VIS magnitude, and for the targets that
@@ -72,7 +73,8 @@ def lost_sym(raw, valid, fill, sig):
     pos = np.clip(sm, 0, None)
     lost = float(pos[::-1, ::-1][known].sum())
     vis = float(pos[t].sum())
-    unknown = float((near & ~mirror_t).sum()) / max(float(near.sum()), 1.0) if near.any() else 0.0
+    # Masked pixels whose mirror is masked too: their loss is not estimated (lost_sym is a lower bound there).
+    unknown = float((near & fill[::-1, ::-1]).sum()) / max(float(near.sum()), 1.0) if near.any() else 0.0
     return lost / max(vis + lost, 1e-30), unknown
 
 
@@ -136,8 +138,9 @@ def measure_d2(cfg, paths, max_patterns, seed):
                 if t is not None:
                     lab, nb = ndimage.label(fill[i], structure=np.ones((3, 3)))
                     touch = np.unique(lab[ndimage.binary_dilation(t, iterations=4) & (lab > 0)])
-                    if len(touch):
-                        patterns.append(np.isin(lab, touch))
+                    if len(touch) and np.isfinite(g["sigma_vis_px"]) and g["sigma_vis_px"] > 0:
+                        # Packed bits (a 119 x 119 mask is 14 kB unpacked), with the size of the D2 target.
+                        patterns.append((np.packbits(np.isin(lab, touch)), float(g["sigma_vis_px"])))
         print(f"D2 {p.name}: {len(st)} targets", flush=True)
     rng = np.random.default_rng(seed)
     rng.shuffle(patterns)
@@ -150,25 +153,40 @@ def inject_d1(cfg, paths, patterns, n_inject, seed):
     rng = np.random.default_rng(seed)
     out = []
     per_store = int(np.ceil(n_inject / max(len(paths), 1)))
+    # Size matching: a pattern is laid on a D1 galaxy of similar size (adaptive-moment sigma within 20 %) to the D2
+    # target it was cut around, so that it bites into the galaxy as much as it did into its target.
+    lsig = np.log(np.array([q[1] for q in patterns])) if patterns else np.zeros(0)
+    order = np.argsort(lsig)
+    lsig_sorted = lsig[order]
+    n_unmatched = 0
     for p in paths:
         st = Store(p)
         if len(st) == 0 or not patterns:
             continue
         has_fill = "euclid_fill" in st.names()
         rows = np.flatnonzero(st.meta["split"].to_numpy() != "holdout")
-        rows = np.sort(rng.permutation(rows)[:per_store])
+        rows = np.sort(rng.permutation(rows)[:3 * per_store])     # spare galaxies for the size matching
         if len(rows) == 0:
             continue
         f, iv = st.take("euclid_flux", rows)[..., vis], st.take("euclid_ivar", rows)[..., vis]
         mk = st.take("euclid_mask", rows)[..., vis]
         own = st.take("euclid_fill", rows) if has_fill else np.zeros(f.shape, bool)
+        done = 0
         for j, row in enumerate(rows):
+            if done >= per_store:
+                break
             valid = (~mk[j]) & (iv[j] > 0)
             w = (valid & ~own[j]).astype(np.int32)
             truth = moments(f[j], w)
             if not truth["ok"]:
                 continue
-            pat = patterns[rng.integers(len(patterns))]
+            ls_g = np.log(truth["sigma"]) if truth["sigma"] > 0 else np.nan
+            lo, hi = np.searchsorted(lsig_sorted, [ls_g - 0.18, ls_g + 0.18])
+            if not np.isfinite(ls_g) or hi <= lo:
+                n_unmatched += 1
+                continue
+            bits, sig_t = patterns[order[rng.integers(lo, hi)]]
+            pat = np.unpackbits(bits, count=f[j].size).reshape(f[j].shape).astype(bool)
             need = np.rot90(pat, int(rng.integers(4)))
             if rng.random() < 0.5:
                 need = need[:, ::-1]
@@ -181,6 +199,7 @@ def inject_d1(cfg, paths, patterns, n_inject, seed):
             after = moments(ff[..., 0], w)
             ls, unk = lost_sym(f[j], valid, need | own[j], sig)
             rec = dict(store=str(p), row=int(row), lost_sym=ls, lost_unknown=unk, ok=bool(after["ok"]),
+                       sigma_truth_px=float(truth["sigma"]), sigma_pattern_target_px=sig_t,
                        masked_frac=float(need.mean()),
                        masked_in_moment_ellipse=masked_in_ellipse(need, after["e1"], after["e2"], after["sigma"]))
             if after["ok"]:
@@ -189,7 +208,8 @@ def inject_d1(cfg, paths, patterns, n_inject, seed):
                            dflux=float(after["flux"] / truth["flux"] - 1.0) if truth["flux"] else np.nan,
                            dc_px=float(np.hypot(after["x"] - truth["x"], after["y"] - truth["y"])))
             out.append(rec)
-        print(f"D1 {p.name}: {len(rows)} injections", flush=True)
+            done += 1
+        print(f"D1 {p.name}: {done} injections, {n_unmatched} without a size-matched pattern so far", flush=True)
     return pd.DataFrame(out)
 
 
@@ -232,19 +252,45 @@ def report(d2, inj, tab, thr, tol, tols):
         th = threshold(tab, t)
         share = 100 * (ok["lost_sym"] >= th).mean()
         lines.append(f"  tolerance {t:5.3f}: lost_sym < {th:.3f}, D2 judged damaged {share:5.1f} %")
-    lines += ["", f"-> with tolerance {tol}: lost_sym < {thr:.3f}", ""]
-    bad = ok["lost_sym"] >= thr
-    lines.append(f"D2 damaged by the masks (lost_sym >= {thr:.3f}): {100 * bad.mean():.1f} % of {len(ok)}")
-    for name, sel in (("pass the former before/after test", ok["old_test_ok"]),
-                      ("fail it (neighbour entered the measurement)", ~ok["old_test_ok"])):
-        lines.append(f"  {name:45s} {int(sel.sum()):6d} targets, damaged {100 * bad[sel].mean():5.1f} %")
-    mag = pd.cut(ok["euclid_vis_mag"], [0, 24, 25, 26, 30])
-    for b, g in bad.groupby(mag, observed=True):
-        lines.append(f"  VIS {str(b):12s} {len(g):6d} targets, damaged {100 * g.mean():5.1f} %")
+    if thr <= 0:
+        lines += ["", f"-> no lost_sym value keeps the true |de| p90 within {tol}: even with no visible loss, the",
+                  "   masks change the shape beyond it in more than 10 % of the injections (the lines below then",
+                  "   count every target as damaged and are not a result).", ""]
+    else:
+        lines += ["", f"-> with tolerance {tol}: lost_sym < {thr:.3f}", ""]
+    okj = inj[inj["ok"]]
+    q = np.nanquantile(okj["de"], [0.5, 0.75, 0.9, 0.95])
+    lines.append(f"All injections (size-matched D2 masks touching their target): true |de| median {q[0]:.4f}, "
+                 f"75 % {q[1]:.4f}, 90 % {q[2]:.4f}, 95 % {q[3]:.4f}")
+    for t in (0.01, 0.02, 0.05):
+        lines.append(f"  share with true |de| > {t}: {100 * float((okj['de'] > t).mean()):5.1f} %")
+    # D2 targets through the calibration: each target gets the injection statistics of its lost_sym bin.
+    b = pd.cut(ok["lost_sym"], LOST_BINS, right=False, labels=False).to_numpy().astype(int)
+    med = tab["de_med"].to_numpy() if "de_med" in tab else np.full(len(tab), np.nan)
+    p90 = tab["de_p90"].to_numpy() if "de_p90" in tab else np.full(len(tab), np.nan)
+    exp_med, exp_p90 = med[b], p90[b]
+    lines += ["", "D2 through the calibration (expected true |de| of its lost_sym bin):",
+              "  group                                         n      lost_sym<0.005  bin median>0.02  bin p90>0.05"]
+    for name, sel in (("all D2", np.ones(len(ok), bool)), ("pass the former before/after test", ok["old_test_ok"]),
+                      ("fail it", ~ok["old_test_ok"])):
+        sel = np.asarray(sel, bool)
+        lines.append(f"  {name:42s} {int(sel.sum()):6d}   {100 * float((ok['lost_sym'][sel] < 0.005).mean()):10.1f} %"
+                     f"   {100 * float(np.nanmean(exp_med[sel] > 0.02)):10.1f} %   "
+                     f"{100 * float(np.nanmean(exp_p90[sel] > 0.05)):9.1f} %")
+    lines.append("")
+    if thr > 0:
+        bad = ok["lost_sym"] >= thr
+        lines.append(f"D2 damaged by the masks (lost_sym >= {thr:.3f}): {100 * bad.mean():.1f} % of {len(ok)}")
+        for name, sel in (("pass the former before/after test", ok["old_test_ok"]),
+                          ("fail it (neighbour entered the measurement)", ~ok["old_test_ok"])):
+            lines.append(f"  {name:45s} {int(sel.sum()):6d} targets, damaged {100 * bad[sel].mean():5.1f} %")
+        mag = pd.cut(ok["euclid_vis_mag"], [0, 24, 25, 26, 30])
+        for k, g in bad.groupby(mag, observed=True):
+            lines.append(f"  VIS {str(k):12s} {len(g):6d} targets, damaged {100 * g.mean():5.1f} %")
     q = np.nanquantile(ok["halo_ring_z"].to_numpy(float), [0.5, 0.9, 0.99])
     lines += ["", f"neighbour light left around the masks, halo_ring_z (not calibrated): median {q[0]:.2f}, "
                   f"90 % {q[1]:.2f}, 99 % {q[2]:.2f}",
-              f"lost_unknown (masked pixels near the target whose mirror is not visible target light), D2 median "
+              f"lost_unknown (masked pixels near the target whose mirror is masked too), D2 median "
               f"{ok['lost_unknown'].median():.2f}: lost_sym is a lower bound there"]
     return lines
 
