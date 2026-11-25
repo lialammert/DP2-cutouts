@@ -297,7 +297,7 @@ def advance(cfg, cdir=None, runner=run_cmd, env=None, after=None, load=_load, su
         if not lk.held:
             print("[campaign] another advance holds the lock: leaving it the work")
             submit = False
-        jobs = queue(runner, env) if submit else []
+        jobs = queue(runner, env)   # also for `status`, so that queued jobs show as queued, not ready
         if jobs is None:
             submit, jobs = False, []
         me = env.get("SLURM_JOB_ID", "").split("_")[0]

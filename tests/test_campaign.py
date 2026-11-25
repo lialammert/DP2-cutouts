@@ -79,10 +79,12 @@ def test_ready_stages_are_submitted_under_the_queue_cap(tmp_path):
     cfg = _cfg(tmp_path, "_pilot")
     slurm = FakeSlurm()
     C.start(cfg, tmp_path / "cfg.yaml", [], "pilot", max_steps=300, split="val", runner=slurm, env=ENV)
-    # The statistics job is still queued: nothing else yet.
+    # The statistics job is still queued: nothing else yet, and `status` shows it as queued.
     slurm.queue = [("101", "dbl.stats", "qos_cpu-t3")]
     _advance(cfg, slurm)
     assert slurm.names() == ["dbl.stats"]
+    rep = C.advance(cfg, runner=slurm, env=ENV, load=lambda p, s: cfg, submit=False)
+    assert rep["pilot_pilot"]["dbl.stats"] == "queued"
     # Statistics done; 6 other jobs of the user fill the dev QoS: only 2 of the 3 root trainings go in.
     (C.deblend_dir(cfg) / "norm_stats.json").write_text("{}")
     slurm.queue = [(str(i), f"other{i}", QOS) for i in range(6)]
