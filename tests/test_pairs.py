@@ -604,3 +604,9 @@ def test_d1_flags_other_euclid_sources_without_touching_the_pixels():
     assert np.array_equal(cut["flux"], before)
     none, how = euclid_neighbour_need(cut, 99, e, cfg, None, 81)
     assert how == "no_catalogue_row" and not none.any()
+
+
+def test_cli_imports_and_knows_repair_meta():
+    # Every Slurm job goes through dp2-ml: a syntax error in mlcli.py stops all of them at once.
+    from dp2_cutouts import mlcli
+    assert "repair-meta" in mlcli.COMMANDS

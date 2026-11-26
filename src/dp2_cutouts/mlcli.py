@@ -159,9 +159,9 @@ def main(argv=None):
         root = cfg.dataset_dir(args.what)
         shards = [s for s in sorted((root / "shards").glob("*")) if s.is_dir() and not s.name.endswith(".tmp")]
         fixed = store.repair_meta(shards, root)
-        print(f"{args.what}: meta.parquet rewritten from {len(shards)} shards" +
-              ("".join(f"
-  {f}" for f in fixed) if fixed else " (nothing to fix)"))
+        print(f"{args.what}: meta.parquet rewritten from {len(shards)} shards")
+        for f in fixed or ["nothing to fix"]:
+            print(f"  {f}")
         return
     if c == "quality":
         from .pairs import quality
