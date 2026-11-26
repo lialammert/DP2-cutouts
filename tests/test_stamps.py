@@ -350,3 +350,33 @@ def test_seg_tile_search_retries_irsa_outages(tmp_path, monkeypatch):
                         (6, 10.0, 300.0, lambda s: None, None))
     assert euclid_seg.fetch_for_box(52.9, -28.1, 0.1, tmp_path) == [tmp_path / "102018211" / "T.fits"]
     assert len(calls) == 3
+
+
+def test_euclid_arbiter_masks_only_what_euclid_sees():
+    # masking.euclid_arbiter: a Rubin object with no Euclid source nearby (a deblender piece of the target's halo)
+    # and a Rubin footprint holding no Euclid source are left unmasked; a Rubin neighbour Euclid also sees is
+    # masked as before.
+    import pandas as pd
+
+    from dp2_cutouts.stages.stamps import companion_mask_segmentation_catalog
+
+    shape = (41, 41)
+    lab = np.zeros(shape, np.int64)
+    lab[5:36, 5:36] = 1                                 # one Euclid segment: the target and its halo
+    seg = np.broadcast_to(lab, (4,) + shape).copy()
+    det = np.zeros(shape, bool)
+    det[2:8, 33:39] = True                              # a separate Rubin footprint, nothing in Euclid
+    det[30:36, 2:8] = True                              # a separate Rubin footprint with a Euclid source
+    target = (20.0, 20.0, 3.0, 3.0, 0.0, 1.0e5)
+    comp = pd.DataFrame(dict(x=[31.0, 5.0, 5.2], y=[20.0, 33.0, 33.1], a=[4.0, 1.0, 1.0], b=[4.0, 1.0, 1.0],
+                             theta=0.0, survey=["rubin", "rubin", "euclid"], flux=[3.0e4, 50.0, 50.0]))
+
+    def run(arbiter):
+        need, _ = companion_mask_segmentation_catalog(det, seg, shape, 0, 0, target, comp, 10.0, 1, 0,
+                                                      euclid_arbiter=arbiter)
+        return need
+
+    old, new = run(False), run(True)
+    assert old[20, 31] and old[4, 35]                   # halo piece and Euclid-less footprint masked before
+    assert not new[20, 31] and not new[4, 35]           # not any more
+    assert old[33, 5] and new[33, 5]                    # the neighbour both surveys see stays masked

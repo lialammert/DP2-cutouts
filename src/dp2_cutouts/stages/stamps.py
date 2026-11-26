@@ -211,7 +211,7 @@ def rubin_footprint_mask(det, xt, yt, grow_px):
 
 
 def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, comp, pad, grow_px, seg_grow_px,
-                                        counterpart=None, keep_k=2.0, dedup_px=2.0):
+                                        counterpart=None, keep_k=2.0, dedup_px=2.0, euclid_arbiter=False):
     # "segmentation_catalog" method: the Euclid segmentation decides where the edges are, the catalogues decide who
     # owns what. Every catalogued object (Rubin Object table, Euclid MER catalogue; a Euclid source within dedup_px
     # of a Rubin object or of the target is the same object) is placed in the segment found at its position.
@@ -228,11 +228,27 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
     # Neighbour pixels are grown by seg_grow_px (Rubin PSF), never into the target's pixels.
     # Objects too faint for Rubin (comp column visible = False, the depth rule) are not masked: a segment owned only
     # by such objects is left as it is, and they take no share of a segment they share with visible objects.
+    # euclid_arbiter (masking.euclid_arbiter, 2026-11-26): nothing is masked where Euclid sees no object. A Rubin
+    # footprint is masked only if a Euclid source lies in it, and a Rubin object counts as a neighbour only with a
+    # Euclid source within dedup_px: deblender children of a bright galaxy (pieces of its halo, no Euclid
+    # counterpart) no longer take the target's wings (case 2561_67, scripts/inspect/mask_origin.py).
     # target: (x, y, a, b, theta[, flux]) in the box frame; comp: x, y (region frame), a, b, theta, survey[, visible,
     # flux], fluxes in the same unit.
     h, w = shape
     xt, yt, a, b, th = target[:5]
-    m, target_fp = rubin_footprint_mask(detected[oy:oy + h, ox:ox + w], xt, yt, grow_px)
+    sel = ((comp["x"] > ox - pad) & (comp["x"] < ox + w + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + h + pad))
+    near = comp[sel]
+    eu_pts = near.loc[near["survey"] == "euclid", ["x", "y"]].to_numpy(float).reshape(-1, 2) - [ox, oy]
+    det = detected[oy:oy + h, ox:ox + w]
+    if euclid_arbiter:
+        lab_d, _ = label(det, structure=np.ones((3, 3), int))
+        keep = set()
+        for ex_, ey_ in list(eu_pts) + [(xt, yt)]:
+            i_, j_ = int(np.floor(ey_ + 0.5)), int(np.floor(ex_ + 0.5))
+            if 0 <= i_ < h and 0 <= j_ < w and lab_d[i_, j_] > 0:
+                keep.add(int(lab_d[i_, j_]))
+        det = np.isin(lab_d, sorted(keep))
+    m, target_fp = rubin_footprint_mask(det, xt, yt, grow_px)
 
     L = seg[:, oy:oy + h, ox:ox + w]
     lab = L[0].copy()
@@ -257,14 +273,15 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
     if counterpart is not None:
         objs.append(dict(x=counterpart[0], y=counterpart[1], a=a, b=b, th=th, target=True, visible=True, flux=f_t))
         anchors.append(tuple(counterpart))
-    sel = ((comp["x"] > ox - pad) & (comp["x"] < ox + w + pad) & (comp["y"] > oy - pad) & (comp["y"] < oy + h + pad))
-    near = comp[sel]
     rub = near[near["survey"] == "rubin"]
     rub_pts = np.array([[r.x - ox, r.y - oy] for r in rub.itertuples()] + list(anchors), float).reshape(-1, 2)
     for r in near.itertuples():
         x_, y_ = r.x - ox, r.y - oy
         if r.survey == "euclid" and len(rub_pts) and np.min(np.hypot(rub_pts[:, 0] - x_, rub_pts[:, 1] - y_)) < dedup_px:
             continue
+        if euclid_arbiter and r.survey == "rubin" and not (
+                len(eu_pts) and np.min(np.hypot(eu_pts[:, 0] - x_, eu_pts[:, 1] - y_)) < dedup_px):
+            continue                                        # Euclid sees no object there: not a neighbour
         objs.append(dict(x=x_, y=y_, a=r.a, b=r.b, th=r.theta, target=False,
                          visible=bool(getattr(r, "visible", True)), flux=float(getattr(r, "flux", np.nan))))
     for o in objs:
@@ -544,7 +561,8 @@ def process_target(row, img, cfg, rubin, euclid, banks, rng):
                       else int(mc["seg_grow_px"]))
             need_s, _ = companion_mask_segmentation_catalog(img["detected"], img["seg"], (size, size), bx, by,
                                                             (x - bx, y - by, a, b, th, f_target), comp, pad,
-                                                            mc["grow_px"], grow_s, counterpart=cp)
+                                                            mc["grow_px"], grow_s, counterpart=cp,
+                                                            euclid_arbiter=bool(mc.get("euclid_arbiter", False)))
             if mc["method"] in ("segmentation_catalog", "pipeline"):
                 return need_s, None
             # "hybrid": the footprint masking (wide: whole Rubin footprints of separate neighbours, no ring of
