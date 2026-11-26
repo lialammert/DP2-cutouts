@@ -41,24 +41,26 @@ def test_store_merge_keeps_64bit_ids_and_repairs_old_merges(tmp_path):
     # A patch without pairs is written with a column-less DataFrame (dataset1/2.build_patch): concatenating it made
     # every int64 column float64, rounding the Rubin ids (sequential, about 2^59) into massive collisions.
     big = 2 ** 59 + 1
-    _shard(tmp_path, "p0", 70, big)
-    store.write_shard(tmp_path / "shards" / "p1", pd.DataFrame(), dict(a=np.zeros((0, 3, 3), np.float32),
-                                                                         m=np.zeros((0, 3, 3), bool)))
-    _shard(tmp_path, "p2", 5, big + 1000)
+    empty = dict(a=np.zeros((0, 3, 3), np.float32), m=np.zeros((0, 3, 3), bool))
+    store.write_shard(tmp_path / "shards" / "p0", pd.DataFrame(), empty)      # first shard empty, as on Jean Zay
+    _shard(tmp_path, "p1", 70, big)
+    store.write_shard(tmp_path / "shards" / "p2", pd.DataFrame(), empty)
+    _shard(tmp_path, "p3", 5, big + 1000)
     shards = sorted((tmp_path / "shards").glob("*"))
     store.merge_shards(shards, tmp_path, dict(name="t"))
     meta = store.Store(tmp_path).meta
     assert meta["object_id"].dtype == np.int64 and not meta["object_id"].duplicated().any()
     assert meta["object_id"].iloc[-1] == big + 1004
     # A dataset merged the old way: same rows, ids rounded to float64. repair_meta restores them from the shards.
-    old = meta.copy()
+    old = meta[["shard"] + [c for c in meta.columns if c != "shard"]].copy()   # old merge: "shard" first
     old["object_id"] = old["object_id"].astype(float)
     old["tract"] = old["tract"].astype(float)
     old.to_parquet(tmp_path / "meta.parquet", index=False)
     assert old["object_id"].duplicated().any()
     fixed = store.repair_meta(shards, tmp_path)
     assert any(f.startswith("object_id") for f in fixed)
-    assert store.Store(tmp_path).meta.equals(meta)
+    repaired = store.Store(tmp_path).meta
+    assert list(repaired.columns) == list(old.columns) and repaired[list(meta.columns)].equals(meta)
     # Rows that do not line up with the merged arrays are refused.
     bad = old.copy()
     bad["tract"] = bad["tract"] + 1

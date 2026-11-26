@@ -129,8 +129,13 @@ def repair_meta(shard_dirs, out_dir):
                            f"dataset ({info['n_shards']}, {info['n']} rows): merge again instead")
     new = merged_meta(shards, infos)
     old = pd.read_parquet(out_dir / "meta.parquet")
-    if len(new) != len(old) or list(new.columns) != list(old.columns):
-        raise RuntimeError("rebuilt metadata does not have the rows / columns of the merged one")
+    if len(new) != len(old):
+        raise RuntimeError(f"rebuilt metadata has {len(new)} rows, the merged one {len(old)}")
+    if set(new.columns) != set(old.columns):
+        raise RuntimeError(f"columns differ: only rebuilt {sorted(set(new.columns) - set(old.columns))}, "
+                           f"only merged {sorted(set(old.columns) - set(new.columns))}")
+    # Same columns; the old merge put "shard" first when the first shard was empty: keep the merged order.
+    new = new[list(old.columns)]
     if not (old["shard"].astype(str).to_numpy() == new["shard"].astype(str).to_numpy()).all():
         raise RuntimeError("shard order differs from the merged dataset")
     fixed = []
