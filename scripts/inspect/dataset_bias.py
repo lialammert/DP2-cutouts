@@ -6,7 +6,9 @@
 # Euclid catalogue quantities (the Rubin photometry of a D2 target is that of the blend): VIS magnitude, size,
 # ellipticity, photometric redshift, extended probability, PHZ class, and the local density of Euclid sources
 # (neighbours within 5" and 10"). Populations: matches (Rubin objects of the patches with a one-to-one Euclid
-# counterpart), D1, D2 candidates (Euclid targets of the blended copaings groups), D2.
+# counterpart), D1, D2 candidates (Euclid targets of the blended copaings groups), D2, and D2 used: the targets the
+# deblending campaign trains and evaluates on (deblend.d2_selection, one target per group; train, val and test
+# splits, the holdout being kept out of every choice).
 # Prints quantiles, KS distances and median shifts (overall, within each field EDF-F / EDF-S, and between the two
 # fields), PHZ class fractions, and how much of D2 lies where D1 has
 # (almost) no example (what a reweighting of D1 towards D2 could not reach); writes the table and histograms.
@@ -30,10 +32,11 @@ from dp2_cutouts.pairs import common, dataset2  # noqa: E402
 from dp2_cutouts.pairs.store import Store  # noqa: E402
 
 PROPS = ["vis_mag", "size", "ellipticity", "photo_z", "extended_prob", "n_neigh_5", "n_neigh_10"]
-SETS = ["matches", "d1", "d2_candidates", "d2"]
+SETS = ["matches", "d1", "d2_candidates", "d2", "d2_used"]
 BOX_COLS = {"phz_photo_z_phz_median": "photo_z", "mer_catalogue_extended_prob": "extended_prob",
             "phz_classification_phz_classification": "phz_class"}
-PAIRS = [("matches", "d1"), ("matches", "d2"), ("d1", "d2"), ("d2_candidates", "d2")]
+PAIRS = [("matches", "d1"), ("matches", "d2"), ("d1", "d2"), ("d2_candidates", "d2"), ("d2", "d2_used"),
+         ("d1", "d2_used"), ("matches", "d2_used")]
 FIELD_DEC_SPLIT = -40.0          # EDF-F around -28 deg, EDF-S around -48 deg (as ml/phase0.py)
 
 
@@ -107,6 +110,11 @@ def main():
         print(f"{p['name']}: {len(cat)} matches, {len(cand)} D2 candidates", flush=True)
     members["d1"] = set(d1["euclid_object_id"].dropna().astype("int64"))
     members["d2"] = set(d2["euclid_object_id"].astype("int64"))
+    from dp2_cutouts.deblend.data import d2_keep, d2_rows
+    keep, info = d2_keep(cfg, d2)
+    used = np.concatenate([d2_rows(d2, sp, cfg["deblend"]["d2_centering"], keep) for sp in ("train", "val", "test")])
+    members["d2_used"] = set(d2.loc[used, "euclid_object_id"].astype("int64"))
+    print(f"D2 used: {len(used)} targets (deblend.d2_selection {info or 'none'}, one per group, holdout excluded)")
     allp = pd.concat(props, ignore_index=True).drop_duplicates("object_id").set_index("object_id")
 
     pops = {}
@@ -158,10 +166,11 @@ def main():
                                  s=np.floor(np.log10(t["size"].clip(lower=1e-3)) / 0.15),
                                  z=np.floor(t["photo_z"] / 0.25))).dropna().astype("int64")
     b1 = bins(pops["d1"]).value_counts()
-    b2 = bins(pops["d2"])
-    n1 = np.array([b1.get(tuple(r), 0) for r in b2.itertuples(index=False)])
-    for k in (1, 5, 20):
-        print(f"D2 targets in a (mag, size, z) bin with fewer than {k} D1 examples: {np.mean(n1 < k):.3f}")
+    for name in ("d2", "d2_used"):
+        b2 = bins(pops[name])
+        n1 = np.array([b1.get(tuple(r), 0) for r in b2.itertuples(index=False)])
+        for k in (1, 5, 20):
+            print(f"{name} targets in a (mag, size, z) bin with fewer than {k} D1 examples: {np.mean(n1 < k):.3f}")
 
     fig, axes = plt.subplots(2, 4, figsize=(16, 7))
     for ax, c in zip(axes.ravel(), PROPS):
@@ -179,7 +188,7 @@ def main():
         ax.set_yticks([])
     axes.ravel()[0].legend(fontsize=7)
     axes.ravel()[-1].axis("off")
-    fig.suptitle("Euclid catalogue properties: matches, D1, D2 candidates, D2 (normalised histograms)")
+    fig.suptitle("Euclid catalogue properties: matches, D1, D2 candidates, D2, D2 used (normalised histograms)")
     fig.tight_layout()
     fig.savefig(out / "dataset_bias.png", dpi=130)
     print(f"\n-> {out / 'dataset_bias.parquet'}, {out / 'dataset_bias.png'}")

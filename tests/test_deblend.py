@@ -129,6 +129,32 @@ def test_d2_rubin_centring_keeps_one_target_per_group(cfg):
 
 
 # ----------------------------------------------------------------------------- flow matching
+def test_d2_selection_drops_groups_whose_nearest_target_fails(cfg):
+    from dp2_cutouts.deblend.data import d2_keep, d2_rows
+    from dp2_cutouts.mlconfig import MLConfig
+    meta = pd.DataFrame(dict(split="train", group_id=["g0", "g0", "g1", "g1", "g2", "g2"],
+                             rc_offset_x_px=[0, 3, 0, 3, 0, 3], rc_offset_y_px=0, euclid_object_id=range(6),
+                             sep_delta_e=[0.0, 0.0, 0.5, 0.0, 0.0, 0.0], sep_centroid_shift_arcsec=0.0,
+                             sep_rel_size_change=0.0, sep_rel_flux_change=0.0,
+                             euclid_vis_mag=[22.0, 22.0, 22.0, 22.0, 99.0, 22.0]))
+    raw = json.loads(json.dumps(cfg.raw))
+    raw["deblend"]["d2_selection"] = dict(
+        before_after=dict(max_delta_e=0.02, max_centroid_shift_arcsec=0.05, max_rel_size_change=0.05,
+                          max_rel_flux_change=0.05), vis_mag_max="auto", vis_mag_quantile=1.0)
+    c = MLConfig(raw=raw, path=cfg.path)
+    import dp2_cutouts.deblend.data as D
+    old = D.d1_vis_mag_limit
+    D.d1_vis_mag_limit = lambda cfg_, q: 25.0
+    try:
+        keep, info = d2_keep(c, meta)
+    finally:
+        D.d1_vis_mag_limit = old
+    assert keep.tolist() == [True, True, False, True, False, True] and info["vis_mag_max"] == 25.0
+    # g1's nearest member fails the test and g2's is too faint: those groups are dropped, not given the farther one.
+    assert d2_rows(meta, "train", "rubin", keep).tolist() == [0]
+    assert d2_keep(cfg, meta)[0].all()          # no deblend.d2_selection: everything
+
+
 def test_cfm_integrators_are_exact_on_a_constant_field():
     from dp2_cutouts.deblend.cfm import integrate, steps_for_nfe
 

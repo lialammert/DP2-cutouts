@@ -70,16 +70,13 @@ def merge_shards(shard_dirs, out_dir, info):
                                        f"expected {ref['arrays'][k]}")
         counts = [inf["n"] for inf in infos]
         total = int(sum(counts))
-        metas, rejs = [], []
-        for s, inf in zip(shards, infos):
-            m = pd.read_parquet(s / "meta.parquet")
-            m["shard"] = s.name
-            metas.append(m)
+        meta = merged_meta(shards, infos)
+        rejs = []
+        for s in shards:
             r = pd.read_parquet(s / "rejected.parquet")
             if len(r):
                 r["shard"] = s.name
                 rejs.append(r)
-        meta = pd.concat(metas, ignore_index=True)
         if len(meta) != total:
             raise RuntimeError("meta rows and array rows disagree")
         for k in names:
@@ -103,6 +100,54 @@ def merge_shards(shard_dirs, out_dir, info):
         return total
     finally:
         lock.unlink(missing_ok=True)
+
+
+def merged_meta(shards, infos):
+    # Metadata of the shards in merge order. Empty shards (patches without pairs, written with a column-less
+    # DataFrame) are left out of the concatenation: pandas would otherwise turn every int64 column into float64,
+    # which rounds the 64-bit Rubin / Euclid identifiers (2^59 and more) and makes thousands of them collide.
+    metas = []
+    for s, inf in zip(shards, infos):
+        if inf["n"] == 0:
+            continue
+        m = pd.read_parquet(s / "meta.parquet")
+        m["shard"] = s.name
+        metas.append(m)
+    return pd.concat(metas, ignore_index=True) if metas else pd.DataFrame()
+
+
+def repair_meta(shard_dirs, out_dir):
+    # Rewrites meta.parquet of a merged dataset from its shards, arrays untouched (for datasets merged before the
+    # empty-shard fix). Refuses unless the rows line up with the merged arrays: same shards, same count, same
+    # positions and same float columns as the current meta.parquet.
+    out_dir = Path(out_dir)
+    info = json.loads((out_dir / "info.json").read_text())
+    shards = [Path(s) for s in shard_dirs if shard_done(s)]
+    infos = [json.loads((s / "info.json").read_text()) for s in shards]
+    if len(shards) != info["n_shards"] or sum(inf["n"] for inf in infos) != info["n"]:
+        raise RuntimeError(f"shards ({len(shards)}, {sum(inf['n'] for inf in infos)} rows) do not match the merged "
+                           f"dataset ({info['n_shards']}, {info['n']} rows): merge again instead")
+    new = merged_meta(shards, infos)
+    old = pd.read_parquet(out_dir / "meta.parquet")
+    if len(new) != len(old) or list(new.columns) != list(old.columns):
+        raise RuntimeError("rebuilt metadata does not have the rows / columns of the merged one")
+    if not (old["shard"].astype(str).to_numpy() == new["shard"].astype(str).to_numpy()).all():
+        raise RuntimeError("shard order differs from the merged dataset")
+    fixed = []
+    for c in new.columns:
+        a, b = old[c], new[c]
+        if a.dtype == b.dtype:
+            if pd.api.types.is_float_dtype(a) and not np.array_equal(a.to_numpy(), b.to_numpy(), equal_nan=True):
+                raise RuntimeError(f"column {c} differs: rows do not line up")
+            continue
+        fixed.append(f"{c}: {a.dtype} -> {b.dtype}")
+        if pd.api.types.is_numeric_dtype(a) and pd.api.types.is_numeric_dtype(b):
+            if not np.allclose(a.to_numpy(float), b.to_numpy(float), equal_nan=True, rtol=2.0 ** -52, atol=0):
+                raise RuntimeError(f"column {c} differs beyond the float rounding: rows do not line up")
+    tmp = out_dir / "meta.parquet.tmp"
+    new.to_parquet(tmp, index=False)
+    os.replace(tmp, out_dir / "meta.parquet")
+    return fixed
 
 
 class Store:

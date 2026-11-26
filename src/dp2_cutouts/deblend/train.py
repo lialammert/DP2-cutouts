@@ -169,7 +169,9 @@ def _loaders(cfg, s, which, seed, workers=4):
                 data.D1Batches(cfg, "val", bs, False, seed, indices=vidx, fields=fields))
     if which == "d2":
         st = data.Store(cfg.dataset_dir("d2"))
-        rows = data.d2_rows(st.meta, "val", cfg["deblend"]["d2_centering"])
+        keep, info = data.d2_keep(cfg, st.meta)
+        print(f"D2 selection (deblend.d2_selection): {info or 'none'}")
+        rows = data.d2_rows(st.meta, "val", cfg["deblend"]["d2_centering"], keep)
         mx = tr.get("val_max_examples")
         if mx and len(rows) > int(mx):
             rows = np.sort(np.random.default_rng(seed).choice(rows, int(mx), replace=False))
@@ -275,6 +277,14 @@ def build(cfg, stage, s, seed, deps):
     return model, loaders, frozen, subs
 
 
+def _selection(loader):
+    # deblend.d2_selection as applied by the D2 loader of this stage (None for D1-only stages).
+    for d in (loader, getattr(loader, "a", None)):
+        if d is not None and hasattr(d, "selection"):
+            return d.selection
+    return None
+
+
 class TimeBudget(keras.callbacks.Callback):
     # Stops training after `seconds` (counted from `t0`) at the end of a batch, so that a job of the dev QoS ends
     # on its own before its walltime. The backup is then written with the epoch in progress, which a resumed run
@@ -327,7 +337,8 @@ def train(cfg, stage, seed=None, resume=True, force=False, max_steps=None, time_
                                      dependencies={k: str(v) for k, v in deps.items()},
                                      dependency_fingerprints={k: weights_fingerprint(v) for k, v in frozen.items()},
                                      n_params={k: int(v.count_params()) for k, v in subs.items()},
-                                     n_train_batches=len(tr), environment=environment()))
+                                     n_train_batches=len(tr), d2_selection=_selection(tr),
+                                     environment=environment()))
     model.compile(optimizer=optimizer(s["train"]["learning_rate"], s["train"].get("clipnorm")))
     resumable = resume and not max_steps
     cbs = callbacks(rd, subs, s["train"]["early_stopping_patience"], resumable, s["train"].get("backup_every_steps"))

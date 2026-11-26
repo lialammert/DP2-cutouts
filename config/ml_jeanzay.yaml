@@ -308,6 +308,14 @@ deblend:
   euclid_band: VIS                 # NIR bands left out until their flux scale is established
   latent_dim: 32
   d2_centering: rubin              # rubin: Rubin-only input (target = Euclid member nearest the Rubin centre)
+  d2_selection:                    # D2 targets used for training and evaluation (D2 itself unchanged), 2026-11-26
+    # Masking the neighbours must leave the VIS measurement of the target unchanged: keeps ~28 % of D2. Injecting
+    # real D2 masks on isolated D1 galaxies (scripts/inspect/mask_damage.py) showed that the targets failing it are
+    # ~4x more often damaged by their masks (shape changed by > 0.02) than those passing it.
+    before_after: {max_delta_e: 0.02, max_centroid_shift_arcsec: 0.05, max_rel_size_change: 0.05,
+                   max_rel_flux_change: 0.05}
+    vis_mag_max: auto              # auto: the vis_mag_quantile of the D1 train VIS magnitudes (D1 = Rubin S/N_i > 5),
+    vis_mag_quantile: 0.95         # so that D2 targets are galaxies Rubin detects; null: no magnitude cut
   require_d1_euclid_fill: true     # refuse a D1 built without dataset1.euclid_neighbour_mask
   stats_max_examples: 20000
   seed: 20261124

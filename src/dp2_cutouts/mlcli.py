@@ -8,6 +8,8 @@
 #   d1 | d2 [--index N|--patches]   build the D1 / D2 shard of one or more patches (prepost: Euclid images)
 #   d1-merge | d2-merge             merge the shards into the memory-mapped dataset
 #   quality d1|d2                   quality report of a merged dataset
+#   repair-meta d1|d2               rewrite meta.parquet of a merged dataset from its shards, arrays untouched
+#                                   (datasets merged before the empty-shard fix: identifiers rounded to float64)
 #   blends                          controlled blends from D1 (val, test)
 #   export-rubin-vae                Rubin stamps of D1 as a debvader-keras real build, to train the reference VAE
 #                                   (--debvader-run: template run whose config.json gives the architecture)
@@ -31,7 +33,7 @@ import os
 import sys
 import traceback
 
-COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "blends",
+COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "repair-meta", "blends",
             "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2", "deblend-stats",
             "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance")
 
@@ -149,6 +151,17 @@ def main(argv=None):
     if c == "d2-merge":
         from .pairs import dataset2
         dataset2.merge(cfg)
+        return
+    if c == "repair-meta":
+        from .pairs import store
+        if args.what not in ("d1", "d2"):
+            sys.exit("repair-meta needs d1 or d2")
+        root = cfg.dataset_dir(args.what)
+        shards = [s for s in sorted((root / "shards").glob("*")) if s.is_dir() and not s.name.endswith(".tmp")]
+        fixed = store.repair_meta(shards, root)
+        print(f"{args.what}: meta.parquet rewritten from {len(shards)} shards" +
+              ("".join(f"
+  {f}" for f in fixed) if fixed else " (nothing to fix)"))
         return
     if c == "quality":
         from .pairs import quality

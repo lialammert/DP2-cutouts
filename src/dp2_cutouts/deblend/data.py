@@ -109,17 +109,61 @@ class Norm:
                 raise ValueError(f"invalid {name} normalisation scale {s}")
 
 
-def d2_rows(meta, split, centering):
+def d2_rows(meta, split, centering, keep=None):
     # Rows of D2 used for a split; with Rubin centring, one target per group: the Euclid member nearest to the
-    # centre of the Rubin stamp (smallest |rc_offset|; ties by euclid_object_id).
+    # centre of the Rubin stamp (smallest |rc_offset|; ties by euclid_object_id). keep: boolean array over meta (the
+    # selection of d2_keep), applied after the choice of the target, so that a group whose nearest member fails is
+    # dropped rather than given its farther member as target.
     sel = meta[meta["split"] == split]
     if centering == "euclid":
-        return np.sort(sel.index.to_numpy())
-    if centering != "rubin":
+        rows = np.sort(sel.index.to_numpy())
+    elif centering == "rubin":
+        d = np.hypot(sel["rc_offset_x_px"].astype(float), sel["rc_offset_y_px"].astype(float))
+        order = sel.assign(_d=d.to_numpy()).sort_values(["group_id", "_d", "euclid_object_id"])
+        rows = np.sort(order.groupby("group_id", sort=False).head(1).index.to_numpy())
+    else:
         raise ValueError(f"deblend.d2_centering must be rubin or euclid, not {centering!r}")
-    d = np.hypot(sel["rc_offset_x_px"].astype(float), sel["rc_offset_y_px"].astype(float))
-    order = sel.assign(_d=d.to_numpy()).sort_values(["group_id", "_d", "euclid_object_id"])
-    return np.sort(order.groupby("group_id", sort=False).head(1).index.to_numpy())
+    return rows if keep is None else rows[np.asarray(keep, bool)[rows]]
+
+
+def d1_vis_mag_limit(cfg, quantile):
+    # VIS magnitude below which a fraction `quantile` of the D1 train galaxies lie (D1 is selected on Rubin S/N).
+    m = Store(cfg.dataset_dir("d1")).meta
+    v = m.loc[m["split"] == "train", "euclid_vis_mag"].to_numpy(float)
+    v = v[np.isfinite(v)]
+    if len(v) == 0:
+        raise RuntimeError("no finite euclid_vis_mag in the D1 train split")
+    return float(np.quantile(v, float(quantile)))
+
+
+def d2_keep(cfg, meta):
+    # Selection of the D2 targets used for training and evaluation (deblend.d2_selection; absent or null: all).
+    # D2 itself is not changed. Returns (boolean array over meta, description).
+    sel = cfg["deblend"].get("d2_selection")
+    keep = np.ones(len(meta), bool)
+    info = {}
+    if not sel:
+        return keep, info
+    ba = sel.get("before_after")
+    if ba:
+        # The target measured on VIS before and after the neighbours are masked: the masking must leave it
+        # unchanged (a failed measurement, NaN, fails).
+        for col, key in (("sep_delta_e", "max_delta_e"), ("sep_centroid_shift_arcsec", "max_centroid_shift_arcsec"),
+                         ("sep_rel_size_change", "max_rel_size_change"),
+                         ("sep_rel_flux_change", "max_rel_flux_change")):
+            if ba.get(key) is not None:
+                ok = meta[col].to_numpy(float) < float(ba[key])
+                info[f"pass_{key}"] = float(ok.mean())
+                keep &= ok
+    lim = sel.get("vis_mag_max")
+    if lim is not None:
+        if lim == "auto":
+            lim = d1_vis_mag_limit(cfg, sel.get("vis_mag_quantile", 0.95))
+        ok = meta["euclid_vis_mag"].to_numpy(float) <= float(lim)
+        info.update(vis_mag_max=float(lim), pass_vis_mag=float(ok.mean()))
+        keep &= ok
+    info["kept"] = float(keep.mean())
+    return keep, info
 
 
 class Batches(keras.utils.PyDataset):
@@ -233,7 +277,8 @@ class D2Batches(Batches):
     def __init__(self, cfg, split, batch_size, train, seed=0, indices=None, fields=("blend", "euclid"), **kw):
         self.st = Store(cfg.dataset_dir("d2"))
         self.centering = cfg["deblend"]["d2_centering"]
-        rows = d2_rows(self.st.meta, split, self.centering) if indices is None else indices
+        keep, self.selection = d2_keep(cfg, self.st.meta)
+        rows = d2_rows(self.st.meta, split, self.centering, keep) if indices is None else indices
         super().__init__(rows, batch_size, train, seed, **kw)
         self.prep = Prepare(cfg, load_norm_stats(cfg))
         self.fields = tuple(fields)

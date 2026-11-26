@@ -103,6 +103,20 @@ count as observations (decision of 2026-11-24).
 - The stamps centred on the Euclid target (`d2_centering: euclid`) carry Euclid information that is not
   available at inference; they are kept for diagnostics only.
 
+**D2 selection** (`deblend.d2_selection`, decided 2026-11-26). It is applied when D2 is read, for training and
+evaluation; D2 itself is unchanged.
+- The target is measured on VIS before and after its neighbours are masked, and masking must leave it unchanged:
+  |Δe| < 0.02, centroid shift < 0.05", size and flux changes < 5 %. This keeps about 28 % of D2.
+  - The D2 build records these numbers but does not apply them (`separation_test: mask_quality`).
+  - Laying real D2 masks on isolated D1 galaxies of the same size (`scripts/inspect/mask_damage.py`) showed
+    that the targets failing the test are about 4 times more often damaged by their masks. Typical damage:
+    shape changed by more than 0.02, part of the target's light lost.
+  - The cost is a bias towards easier blends, where the target dominates or its neighbour is far.
+    `scripts/inspect/dataset_bias.py` measures the selected population (`d2_used`).
+- The VIS magnitude must be at most the 95 % quantile of D1 train. D1 is selected on Rubin S/N, so this keeps D2
+  targets that Rubin detects.
+- The target of each group is chosen first. A group whose target fails is dropped, never given another member.
+
 **Splits.**
 - The patch hash is shared by D1 and D2 (70 / 10 / 10 / 10): no patch feeds two splits.
 - Checkpoints are selected on the validation loss only.
