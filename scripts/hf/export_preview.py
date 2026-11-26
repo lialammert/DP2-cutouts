@@ -22,7 +22,7 @@
 # when the shards are gone.
 # DP2 pixels: the output must only go to a PRIVATE repository (Rubin data rights).
 # Usage: python scripts/hf/export_preview.py <ML config> <out dir> [--n-d1 1500] [--n-d2 2500] [--seed 0]
-#            [--n-rejected 80] [--rejected-patches 60] [--no-pixels]
+#            [--n-rejected 80] [--rejected-patches 60] [--no-pixels] [--only-rejected]
 
 import argparse
 import json
@@ -329,27 +329,36 @@ def main():
     ap.add_argument("--n-rejected", type=int, default=80, help="rejected objects per reason (0: none)")
     ap.add_argument("--rejected-patches", type=int, default=60)
     ap.add_argument("--no-pixels", action="store_true", help="D1 without raw stamps and split masks, no rejected")
+    ap.add_argument("--only-rejected", action="store_true",
+                    help="keep the D1 / D2 already exported in <out dir>, (re)do the rejected objects only")
     args = ap.parse_args()
     cfg = MLConfig.load(args.config)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(args.seed)
-    d1, i1 = export(cfg, "d1", args.n_d1, rng, pixels=not args.no_pixels)
-    d1_meta = pd.concat([m for m in (pd.read_parquet(Path(p) / "meta.parquet", columns=["split", "euclid_vis_mag"])
-                                     if n_rows(p) else None for p in sources(cfg, "d1")) if m is not None])
-    d2, i2 = export(cfg, "d2", args.n_d2, rng, d1_meta)
-    d1.to_parquet(out / "d1.parquet", index=False)
-    d2.to_parquet(out / "d2.parquet", index=False)
-    info = dict(d1=i1, d2=i2)
+    if args.only_rejected:
+        info = json.loads((out / "info.json").read_text())
+    else:
+        rng = np.random.default_rng(args.seed)
+        d1, i1 = export(cfg, "d1", args.n_d1, rng, pixels=not args.no_pixels)
+        d1_meta = pd.concat([m for m in (pd.read_parquet(Path(p) / "meta.parquet", columns=["split", "euclid_vis_mag"])
+                                         if n_rows(p) else None for p in sources(cfg, "d1")) if m is not None])
+        d2, i2 = export(cfg, "d2", args.n_d2, rng, d1_meta)
+        d1.to_parquet(out / "d1.parquet", index=False)
+        d2.to_parquet(out / "d2.parquet", index=False)
+        info = dict(d1=i1, d2=i2)
+        # Written now: the rejected objects are the slow part and a walltime may stop them.
+        (out / "info.json").write_text(json.dumps(info, indent=2, default=str))
+        (out / "README.md").write_text(CARD)
+        print(f"-> {out}: d1 {len(d1)}, d2 {len(d2)} objects ({int(d2['selected'].sum())} selected)", flush=True)
     if args.n_rejected and not args.no_pixels:
         d1r, ir = export_rejected(cfg, args.n_rejected, args.rejected_patches, np.random.default_rng(args.seed + 1))
         if len(d1r):
             d1r.to_parquet(out / "d1r.parquet", index=False)
             info["d1r"] = ir
-    (out / "info.json").write_text(json.dumps(info, indent=2, default=str))
-    (out / "README.md").write_text(CARD)
-    size = sum(f.stat().st_size for f in out.iterdir()) / 1e6
-    print(f"-> {out}: d1 {len(d1)}, d2 {len(d2)} objects ({int(d2['selected'].sum())} selected), {size:.0f} MB")
+            (out / "info.json").write_text(json.dumps(info, indent=2, default=str))
+            print(f"-> {out}: d1r {len(d1r)} rejected objects", flush=True)
+    size = sum(f.stat().st_size for f in out.iterdir() if f.is_file()) / 1e6
+    print(f"-> {out}: {size:.0f} MB")
 
 
 if __name__ == "__main__":
