@@ -17,3 +17,9 @@
 #   train       one entry point per stage (checkpoints, resume, frozen-weight checks)
 #   infer       Rubin-only samplers of the three runs
 #   evaluate    diagnostics and comparisons
+
+import os
+
+# The campaign is written for JAX (the lambda_D1 calibration needs it). Without KERAS_BACKEND, Keras falls back to
+# TensorFlow, not installed in the Jean Zay venv: a job submitted from a shell without the variable failed on import.
+os.environ.setdefault("KERAS_BACKEND", "jax")
