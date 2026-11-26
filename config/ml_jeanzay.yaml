@@ -316,6 +316,8 @@ deblend:
                    max_rel_flux_change: 0.05}
     vis_mag_max: auto              # auto: the vis_mag_quantile of the D1 train VIS magnitudes (D1 = Rubin S/N_i > 5),
     vis_mag_quantile: 0.95         # so that D2 targets are galaxies Rubin detects; null: no magnitude cut
+    euclid_cut1: true              # D1's cut 1 on the target: Euclid object neither point-like nor spurious (copaings
+                                   # removes Rubin point sources only); needs d2/euclid_flags.parquet (dp2-ml d2-flags)
   require_d1_euclid_fill: true     # refuse a D1 built without dataset1.euclid_neighbour_mask
   stats_max_examples: 20000
   seed: 20261124

@@ -612,3 +612,52 @@ def test_cli_imports_and_knows_repair_meta():
     # Every Slurm job goes through dp2-ml: a syntax error in mlcli.py stops all of them at once.
     from dp2_cutouts import mlcli
     assert "repair-meta" in mlcli.COMMANDS
+
+
+def test_d2_euclid_flags_cut1(tmp_path, monkeypatch):
+    # D1's cut 1 for D2 targets: MER flags read from each patch's Euclid catalogue, matched by Euclid id, a missing
+    # flag counting as not set; refused when a target is missing from its catalogue.
+    from dp2_cutouts.pairs import euclid_flags
+    from dp2_cutouts.pipeline import patches as P
+
+    class Case:
+        def __init__(self, d):
+            self.d = d
+
+        def data(self, *parts):
+            return self.d.joinpath(*parts)
+
+    class Cfg:
+        def dataset_dir(self, name):
+            return tmp_path / "datasets" / name
+
+        def pipeline(self):
+            return None
+
+    big = -(2 ** 59)
+    boxes = {"p0": dict(object_id=[big - 1, big - 2, big - 3], mer_catalogue_point_like_flag=[0, 1, None],
+                        mer_catalogue_spurious_flag=[0, 0, 0], mer_catalogue_point_like_prob=[0.1, 0.9, None],
+                        mer_catalogue_spurious_prob=0.0),
+             "p1": dict(object_id=[big - 4, big - 5], mer_catalogue_point_like_flag=[0, 0],
+                        mer_catalogue_spurious_flag=[1, 0], mer_catalogue_point_like_prob=0.0,
+                        mer_catalogue_spurious_prob=[0.8, 0.0])}
+    for name, b in boxes.items():
+        d = tmp_path / "patches" / name / "00_euclid"
+        d.mkdir(parents=True)
+        pd.DataFrame(b).to_parquet(d / "euclid_box.parquet")
+    monkeypatch.setattr(P, "load_patches", lambda cfg: [{"name": "p0"}, {"name": "p1"}])
+    monkeypatch.setattr(P, "patch_case", lambda cfg, p: Case(tmp_path / "patches" / p["name"]))
+    root = tmp_path / "datasets" / "d2"
+    root.mkdir(parents=True)
+    ids = [big - 5, big - 1, big - 2, big - 3, big - 4]
+    pd.DataFrame(dict(euclid_object_id=ids, shard=["p1", "p0", "p0", "p0", "p1"])).to_parquet(root / "meta.parquet")
+    f = euclid_flags.build(Cfg())
+    assert f["euclid_object_id"].tolist() == ids                       # rows of D2, in its order
+    assert f["euclid_cut1_pass"].tolist() == [True, True, False, True, False]
+    assert euclid_flags.cut1_for(Cfg(), [big - 4, big - 3]).tolist() == [False, True]
+    with pytest.raises(RuntimeError):
+        euclid_flags.cut1_for(Cfg(), [big - 99])
+    pd.DataFrame(dict(euclid_object_id=ids + [big - 7], shard=["p1", "p0", "p0", "p0", "p1", "p1"])).to_parquet(
+        root / "meta.parquet")
+    with pytest.raises(RuntimeError):
+        euclid_flags.build(Cfg())

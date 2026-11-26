@@ -115,6 +115,11 @@ evaluation; D2 itself is unchanged.
     `scripts/inspect/dataset_bias.py` measures the selected population (`d2_used`).
 - The VIS magnitude must be at most the 95 % quantile of D1 train. D1 is selected on Rubin S/N, so this keeps D2
   targets that Rubin detects.
+- D1's cut 1 (`euclid_cut1`, added 2026-11-26): the Euclid target is neither point-like nor spurious.
+  - copaings drops Rubin point sources only. Two stars, or a star on a galaxy, make an extended Rubin blend that
+    Euclid splits into D2 targets, while D1 drops point-like counterparts.
+  - The flags come from `d2/euclid_flags.parquet`, written by `dp2-ml <config> d2-flags` (Euclid catalogues of the
+    patches, a few minutes). Without that file, reading D2 stops with an error.
 - The target of each group is chosen first. A group whose target fails is dropped, never given another member.
 
 **Splits.**

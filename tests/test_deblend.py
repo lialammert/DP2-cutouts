@@ -153,6 +153,19 @@ def test_d2_selection_drops_groups_whose_nearest_target_fails(cfg):
     # g1's nearest member fails the test and g2's is too faint: those groups are dropped, not given the farther one.
     assert d2_rows(meta, "train", "rubin", keep).tolist() == [0]
     assert d2_keep(cfg, meta)[0].all()          # no deblend.d2_selection: everything
+    # D1's cut 1 on the targets (point-like / spurious Euclid objects), from d2/euclid_flags.parquet.
+    raw["deblend"]["d2_selection"] = dict(euclid_cut1=True)
+    c = MLConfig(raw=raw, path=cfg.path)
+    flags = c.dataset_dir("d2") / "euclid_flags.parquet"
+    pd.DataFrame(dict(euclid_object_id=np.arange(6, dtype=np.int64),
+                      euclid_cut1_pass=[True, False, True, True, True, True])).to_parquet(flags)
+    try:
+        keep, info = d2_keep(c, meta)
+    finally:
+        flags.unlink()
+    assert keep.tolist() == [True, False, True, True, True, True] and info["pass_euclid_cut1"] == 5 / 6
+    with pytest.raises(FileNotFoundError):
+        d2_keep(c, meta)
 
 
 def test_cfm_integrators_are_exact_on_a_constant_field():

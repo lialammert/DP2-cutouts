@@ -74,6 +74,9 @@ def d2_selected(cfg, meta, d1_meta):
         lim = float(np.quantile(v[np.isfinite(v)], float(sel.get("vis_mag_quantile", 0.95))))
     if lim is not None:
         keep &= meta["euclid_vis_mag"].to_numpy(float) <= float(lim)
+    if sel.get("euclid_cut1"):
+        from dp2_cutouts.pairs import euclid_flags
+        keep &= euclid_flags.cut1_for(cfg, meta["euclid_object_id"])
     return keep, lim
 
 

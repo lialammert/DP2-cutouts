@@ -162,6 +162,12 @@ def d2_keep(cfg, meta):
         ok = meta["euclid_vis_mag"].to_numpy(float) <= float(lim)
         info.update(vis_mag_max=float(lim), pass_vis_mag=float(ok.mean()))
         keep &= ok
+    if sel.get("euclid_cut1"):
+        # D1's cut 1 (Euclid object neither point-like nor spurious), from d2/euclid_flags.parquet (dp2-ml d2-flags).
+        from ..pairs import euclid_flags
+        ok = euclid_flags.cut1_for(cfg, meta["euclid_object_id"])
+        info["pass_euclid_cut1"] = float(ok.mean())
+        keep &= ok
     info["kept"] = float(keep.mean())
     return keep, info
 

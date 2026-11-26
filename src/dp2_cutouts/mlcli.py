@@ -7,6 +7,8 @@
 #   phase0 [--run-name N]           reference VAE checks on DP2 stamps (needs --debvader-run); evaluations/N
 #   d1 | d2 [--index N|--patches]   build the D1 / D2 shard of one or more patches (prepost: Euclid images)
 #   d1-merge | d2-merge             merge the shards into the memory-mapped dataset
+#   d2-flags                        Euclid point-like / spurious flags of the D2 targets (d2/euclid_flags.parquet),
+#                                   for deblend.d2_selection.euclid_cut1 (D1's cut 1); catalogues only, a few minutes
 #   quality d1|d2                   quality report of a merged dataset
 #   repair-meta d1|d2               rewrite meta.parquet of a merged dataset from its shards, arrays untouched
 #                                   (datasets merged before the empty-shard fix: identifiers rounded to float64)
@@ -33,7 +35,7 @@ import os
 import sys
 import traceback
 
-COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "quality", "repair-meta", "blends",
+COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "d2-flags", "quality", "repair-meta", "blends",
             "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2", "deblend-stats",
             "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance")
 
@@ -151,6 +153,13 @@ def main(argv=None):
     if c == "d2-merge":
         from .pairs import dataset2
         dataset2.merge(cfg)
+        return
+    if c == "d2-flags":
+        from .pairs import euclid_flags
+        f = euclid_flags.build(cfg)
+        print(f"d2: {len(f)} targets -> {cfg.dataset_dir('d2') / euclid_flags.FILE}")
+        print(f"  point-like {int((f['euclid_point_like_flag'] == 1).sum())}, spurious "
+              f"{int((f['euclid_spurious_flag'] == 1).sum())}, pass cut 1 {f['euclid_cut1_pass'].mean():.1%}")
         return
     if c == "repair-meta":
         from .pairs import store
