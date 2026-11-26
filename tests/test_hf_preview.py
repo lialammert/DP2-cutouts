@@ -2,11 +2,10 @@
 # Anna Preto
 # AstroDeep Project
 # The preview export for the private Hugging Face viewer (scripts/hf): fake D1 / D2 shards before any merge,
-# holdout left out, D2 selection flag, images decoded back to the stored values, figures drawn.
+# holdout left out, D2 selection flag, static site records decoded back to the exported images.
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -66,20 +65,29 @@ def test_preview_export_and_viewer_figures(stores, tmp_path):
     assert d2["selected"].tolist() == (d2["sep_delta_e"] < 0.02).tolist()
     assert set(d2["field"]) == {"EDF-F", "EDF-S"} and (d2["target_rubin_x"] == 2.0).all()
 
-    sys.path.insert(0, str(ROOT / "scripts" / "hf" / "space"))
-    try:
-        core = _module(ROOT / "scripts" / "hf" / "space" / "viewer_core.py", "viewer_core")
-    finally:
-        sys.path.pop(0)
-    row = d2.iloc[0].to_dict()
-    im = core.decode(row, i2)
-    sig = np.asarray(json.loads(row["rubin_sigma"]))
-    assert np.allclose(sig, 3.0, rtol=1e-3) and im["rubin"].shape == (NR, NR, 6)
-    assert np.allclose(im["vis"] * row["vis_sigma"], im["vis_masked"] * row["vis_sigma"] + 1, atol=0.02)
-    assert im["fill"][15, 15] and not im["fill"][60, 60]
-    for kind, t, info in (("d1", d1, i1), ("d2", d2, i2)):
-        rows = core.select(t, kind, ["train"], ["EDF-F", "EDF-S"], (18, 30), "selected")
-        assert len(rows) and (t.iloc[rows]["split"] == "train").all()
-        fig = core.figure(t.iloc[rows[0]].to_dict(), info, kind)
-        assert len(fig.axes) == 4
-        assert "rubin" not in core.describe(t.iloc[rows[0]].to_dict(), kind)
+    # Static site: records decoded the way index.html does (fixed-size records, float16, big-endian packbits).
+    site_mod = _module(ROOT / "scripts" / "hf" / "static_site.py", "static_site")
+    exp = tmp_path / "export"
+    exp.mkdir()
+    d1.to_parquet(exp / "d1.parquet", index=False)
+    d2.to_parquet(exp / "d2.parquet", index=False)
+    (exp / "info.json").write_text(json.dumps(dict(d1=i1, d2=i2), default=str))
+    site = site_mod.build_site(exp, tmp_path / "site")
+    assert (site / "index.html").exists() and "sdk: static" in (site / "README.md").read_text(encoding="utf-8")
+    for name, t, info in (("d1", d1, i1), ("d2", d2, i2)):
+        js = json.loads((site / "data" / f"{name}.json").read_text())
+        assert len(js["rows"]) == len(t) and js["record_bytes"] % 8 == 0
+        assert all(isinstance(r["euclid_object_id"], str) for r in js["rows"])
+        assert all("rubin" not in r and "fill" not in r for r in js["rows"])
+        k = len(t) - 1
+        buf = (site / "data" / f"{name}_{k // js['chunk']:03d}.bin").read_bytes()
+        base = (k % js["chunk"]) * js["record_bytes"]
+        pos, n = js["layout"]["rubin"]
+        rub = np.frombuffer(buf[base + pos:base + pos + n], np.float16).reshape(NR, NR, 6)
+        assert np.array_equal(rub, np.frombuffer(t.iloc[k]["rubin"], np.float16).reshape(NR, NR, 6))
+        pos, n = js["layout"]["fill"]
+        fill = np.unpackbits(np.frombuffer(buf[base + pos:base + pos + n], np.uint8), count=NE * NE).reshape(NE, NE)
+        assert fill[15, 15] and not fill[60, 60]
+        assert ("vis_masked" in js["layout"]) == (name == "d2")
+        assert js["rows"][k]["split"] == t.iloc[k]["split"] and js["rows"][k]["field"] == t.iloc[k]["field"]
+    assert (site / "data" / "d2.json").read_text().count('"selected":true') == int(d2["selected"].sum())

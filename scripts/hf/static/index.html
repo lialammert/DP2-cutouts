@@ -1,0 +1,274 @@
+<!doctype html>
+<!-- index.html - Anna Preto - AstroDeep Project
+     Static viewer of the private DP2 x Euclid preview (built by scripts/hf/static_site.py). Same angular scale on
+     every panel (Rubin 0.2"/px, VIS 0.1"/px). Shows Rubin DP2 pixels: private Space only. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DP2 x Euclid viewer</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1b1d22; --muted: #646a75; --line: #d9dce2; --panel: #f4f5f7; --accent: #3b5bdb; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15171b; --fg: #e6e8ec; --muted: #9aa1ad; --line: #30343c; --panel: #1d2026; --accent: #7c93f0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
+  main { max-width: 1120px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .note { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 10px 12px;
+              background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .controls label { white-space: nowrap; }
+  .group { display: flex; gap: 8px; align-items: center; }
+  .group > b { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  input[type=number] { width: 64px; }
+  input[type=text] { width: 190px; }
+  button, select, input { font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--line);
+                          border-radius: 6px; padding: 4px 8px; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .nav { display: flex; gap: 8px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+  #where { color: var(--muted); min-width: 90px; }
+  #status { color: var(--muted); }
+  .panels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  @media (max-width: 760px) { .panels { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  figure { margin: 0; }
+  figcaption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  canvas { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 4px;
+           image-rendering: pixelated; background: #000; }
+  table { border-collapse: collapse; margin-top: 14px; font-size: 12.5px; width: 100%; }
+  td { border-top: 1px solid var(--line); padding: 3px 8px; vertical-align: top; }
+  td:first-child { color: var(--muted); width: 230px; }
+  .cols { columns: 2 320px; column-gap: 24px; }
+  .cols table { margin-top: 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>DP2 × Euclid Q1, private preview</h1>
+  <p class="note">D1: isolated galaxies. D2: Rubin blends, stamp centred on the Rubin object; orange + = the Euclid
+    target; red = pixels of other Euclid sources (masked). Every panel is about 12″ wide. Keys: ← → next / previous,
+    R random.</p>
+
+  <div class="controls">
+    <div class="group"><b>Dataset</b>
+      <label><input type="radio" name="kind" value="d1"> D1</label>
+      <label><input type="radio" name="kind" value="d2" checked> D2</label></div>
+    <div class="group"><b>Split</b>
+      <label><input type="checkbox" name="split" value="train" checked> train</label>
+      <label><input type="checkbox" name="split" value="val" checked> val</label>
+      <label><input type="checkbox" name="split" value="test" checked> test</label></div>
+    <div class="group"><b>Field</b>
+      <label><input type="checkbox" name="field" value="EDF-F" checked> EDF-F</label>
+      <label><input type="checkbox" name="field" value="EDF-S" checked> EDF-S</label></div>
+    <div class="group"><b>VIS mag</b>
+      <input type="number" id="magLo" value="18" step="0.5"> –
+      <input type="number" id="magHi" value="30" step="0.5"></div>
+    <div class="group" id="selGroup"><b>D2 selection</b>
+      <select id="selection"><option value="all">all</option><option value="selected">selected</option>
+        <option value="rejected">rejected</option></select></div>
+  </div>
+
+  <div class="nav">
+    <button id="prev">◀ previous</button><button id="next">next ▶</button><button id="rand">random</button>
+    <span id="where">–</span>
+    <input type="text" id="oid" placeholder="euclid_object_id"><button id="go">go</button>
+    <span id="status">loading…</span>
+  </div>
+
+  <div class="panels">
+    <figure><figcaption>Rubin gri</figcaption><canvas id="c0"></canvas></figure>
+    <figure><figcaption>Rubin i</figcaption><canvas id="c1"></canvas></figure>
+    <figure><figcaption>Euclid VIS</figcaption><canvas id="c2"></canvas></figure>
+    <figure><figcaption id="cap3">VIS, neighbours masked</figcaption><canvas id="c3"></canvas></figure>
+  </div>
+  <div class="cols"><table id="meta"></table></div>
+</main>
+
+<script>
+"use strict";
+const S = 360;                                  // canvas size (device pixels) of every panel
+const F16 = new Float32Array(65536);            // float16 -> float32 lookup
+for (let h = 0; h < 65536; h++) {
+  const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, f = h & 1023;
+  F16[h] = e === 0 ? s * 2 ** -14 * (f / 1024) : e === 31 ? (f ? NaN : s * Infinity) : s * 2 ** (e - 15) * (1 + f / 1024);
+}
+const state = { info: null, sets: {}, chunks: new Map(), rows: [], pos: 0 };
+const $ = id => document.getElementById(id);
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + ": HTTP " + r.status);
+  return r.json();
+}
+async function chunk(kind, k) {
+  const key = kind + k;
+  if (!state.chunks.has(key)) {
+    state.chunks.set(key, fetch(`data/${kind}_${String(k).padStart(3, "0")}.bin`).then(r => {
+      if (!r.ok) throw new Error(`chunk ${key}: HTTP ${r.status}`);
+      return r.arrayBuffer();
+    }));
+  }
+  return state.chunks.get(key);
+}
+
+function f16(buf, pos, n) {
+  const u = new Uint16Array(buf, pos, n / 2), out = new Float32Array(u.length);
+  for (let i = 0; i < u.length; i++) out[i] = F16[u[i]];
+  return out;
+}
+function bits(buf, pos, n) {
+  const b = new Uint8Array(buf, pos), out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) out[i] = (b[i >> 3] >> (7 - (i & 7))) & 1;
+  return out;
+}
+
+async function decode(kind, idx) {
+  const set = state.sets[kind], inf = state.info[kind];
+  const buf = await chunk(kind, Math.floor(idx / set.chunk));
+  const base = (idx % set.chunk) * set.record_bytes, L = set.layout;
+  const nr = inf.rubin_px, ne = inf.euclid_px;
+  const out = { nr, ne, nb: inf.rubin_bands.length,
+    rubin: f16(buf, base + L.rubin[0], L.rubin[1]), vis: f16(buf, base + L.vis[0], L.vis[1]),
+    fill: bits(buf, base + L.fill[0], ne * ne) };
+  if (L.vis_masked) out.masked = f16(buf, base + L.vis_masked[0], L.vis_masked[1]);
+  return out;
+}
+
+// asinh stretch in noise units, 0..1 (as viewer_core.py): top = brightest pixel of the central third (>= 5 sigma),
+// soft = top / 10 (>= 1 sigma).
+function centralMax(get, n) {
+  let m = 5;
+  for (let y = Math.floor(n / 3); y < n - Math.floor(n / 3); y++)
+    for (let x = Math.floor(n / 3); x < n - Math.floor(n / 3); x++) { const v = get(x, y); if (v > m) m = v; }
+  return m;
+}
+function stretch(v, top) {
+  const soft = Math.max(top / 10, 1);
+  const s = Math.asinh(v / soft) / Math.asinh(top / soft);
+  return s > 1 ? 1 : s > 0 ? s : 0;
+}
+
+function paint(canvas, n, rgbAt, fill, cross) {
+  const off = document.createElement("canvas");
+  off.width = off.height = n;
+  const ctx = off.getContext("2d"), img = ctx.createImageData(n, n);
+  for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+    const [r, g, b] = rgbAt(x, y), o = ((n - 1 - y) * n + x) * 4;      // array row 0 = bottom (origin lower)
+    img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  canvas.width = canvas.height = S;
+  const c = canvas.getContext("2d");
+  c.imageSmoothingEnabled = false;
+  c.drawImage(off, 0, 0, S, S);
+  const k = S / n;
+  if (fill) {                                   // contour of the masked region: boundaries between pixels
+    c.strokeStyle = "#ff2b2b"; c.lineWidth = 1.5; c.beginPath();
+    for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
+      const f = fill[y * n + x];
+      if (x + 1 < n && f !== fill[y * n + x + 1]) { const X = (x + 1) * k; c.moveTo(X, (n - 1 - y) * k); c.lineTo(X, (n - y) * k); }
+      if (y + 1 < n && f !== fill[(y + 1) * n + x]) { const Y = (n - 1 - y) * k; c.moveTo(x * k, Y); c.lineTo((x + 1) * k, Y); }
+    }
+    c.stroke();
+  }
+  if (cross) {                                  // cross = [dx, dy] in pixels from the centre pixel, y up
+    const cx = S / 2 + cross[0] * k, cy = S / 2 - cross[1] * k, a = S / 22;
+    c.strokeStyle = "#ff9d00"; c.lineWidth = 2; c.beginPath();
+    c.moveTo(cx - a, cy); c.lineTo(cx + a, cy); c.moveTo(cx, cy - a); c.lineTo(cx, cy + a); c.stroke();
+  }
+}
+
+function grayAt(arr, n, top) {
+  return (x, y) => { const v = Math.round(255 * (1 - stretch(arr[y * n + x], top))); return [v, v, v]; };
+}
+
+async function show() {
+  const kind = currentKind(), rows = state.rows;
+  if (!rows.length) { $("where").textContent = "0 / 0"; $("status").textContent = "no object matches the filters"; $("meta").innerHTML = ""; return; }
+  state.pos = ((state.pos % rows.length) + rows.length) % rows.length;
+  const idx = rows[state.pos], meta = state.sets[kind].rows[idx];
+  $("where").textContent = `${state.pos + 1} / ${rows.length}`;
+  $("status").textContent = "loading…";
+  let im;
+  try { im = await decode(kind, idx); } catch (e) { $("status").textContent = String(e); return; }
+  if (rows[state.pos] !== idx) return;          // the user moved on meanwhile
+  const { nr, ne, nb } = im, band = b => (x, y) => im.rubin[(y * nr + x) * nb + b];
+  const tgt = kind === "d2" ? [meta.target_rubin_x || 0, meta.target_rubin_y || 0] : [0, 0];
+  // Rubin gri: i, r, g as R, G, B with one common stretch (colours kept)
+  const bi = band(3), br = band(2), bg = band(1);
+  const top = Math.max(centralMax(bi, nr), centralMax(br, nr), centralMax(bg, nr));
+  paint($("c0"), nr, (x, y) => [bi(x, y), br(x, y), bg(x, y)].map(v => Math.round(255 * stretch(v, top))), null, tgt);
+  paint($("c1"), nr, grayAt(im.rubin.filter((_, i) => i % nb === 3), nr, centralMax(bi, nr)), null, tgt);
+  const vtop = centralMax((x, y) => im.vis[y * ne + x], ne);
+  paint($("c2"), ne, grayAt(im.vis, ne, vtop), null, [0, 0]);
+  const m = im.masked || im.vis;
+  paint($("c3"), ne, grayAt(m, ne, centralMax((x, y) => m[y * ne + x], ne)), im.fill, [0, 0]);
+  $("cap3").textContent = kind === "d2" ? "VIS, neighbours masked" : "VIS, other sources masked";
+  const keys = Object.keys(meta);
+  $("meta").innerHTML = keys.map(k => `<tr><td>${k}</td><td>${fmt(meta[k])}</td></tr>`).join("");
+  $("status").textContent = "";
+  prefetch(kind);
+}
+function fmt(v) {
+  if (v === null || v === undefined) return "–";
+  if (Array.isArray(v)) return v.join(", ");
+  return String(v).replace(/&/g, "&amp;").replace(/</g, "&lt;");
+}
+function prefetch(kind) {                       // the chunk of the next object, so that "next" is instant
+  const rows = state.rows;
+  if (rows.length > 1) chunk(kind, Math.floor(rows[(state.pos + 1) % rows.length] / state.sets[kind].chunk)).catch(() => {});
+}
+
+function currentKind() { return document.querySelector("input[name=kind]:checked").value; }
+function checked(name) { return [...document.querySelectorAll(`input[name=${name}]:checked`)].map(e => e.value); }
+
+function filter() {
+  const kind = currentKind(), set = state.sets[kind];
+  const splits = checked("split"), fields = checked("field");
+  const lo = parseFloat($("magLo").value), hi = parseFloat($("magHi").value), sel = $("selection").value;
+  $("selGroup").style.display = kind === "d2" ? "" : "none";
+  state.rows = [];
+  set.rows.forEach((r, i) => {
+    if (!splits.includes(r.split) || !fields.includes(r.field)) return;
+    const m = r.euclid_vis_mag;
+    if (m !== null && m !== undefined && (m < lo || m > hi)) return;
+    if (kind === "d2" && sel !== "all" && (sel === "selected") !== !!r.selected) return;
+    state.rows.push(i);
+  });
+  state.pos = 0;
+  show();
+}
+
+function find() {
+  const kind = currentKind(), want = $("oid").value.trim();
+  const p = state.rows.findIndex(i => String(state.sets[kind].rows[i].euclid_object_id) === want);
+  if (p < 0) { $("status").textContent = "not found among the filtered objects"; return; }
+  state.pos = p; show();
+}
+
+async function init() {
+  try {
+    state.info = await getJSON("data/info.json");
+    const [d1, d2] = await Promise.all([getJSON("data/d1.json"), getJSON("data/d2.json")]);
+    state.sets = { d1, d2 };
+  } catch (e) { $("status").textContent = "cannot load the data: " + e; return; }
+  document.querySelectorAll(".controls input, .controls select").forEach(e => e.addEventListener("change", filter));
+  $("prev").onclick = () => { state.pos--; show(); };
+  $("next").onclick = () => { state.pos++; show(); };
+  $("rand").onclick = () => { state.pos = Math.floor(Math.random() * Math.max(state.rows.length, 1)); show(); };
+  $("go").onclick = find;
+  $("oid").addEventListener("keydown", e => { if (e.key === "Enter") find(); });
+  document.addEventListener("keydown", e => {
+    if (e.target.tagName === "INPUT" && e.target.type === "text") return;
+    if (e.key === "ArrowRight") { state.pos++; show(); }
+    else if (e.key === "ArrowLeft") { state.pos--; show(); }
+    else if (e.key === "r" || e.key === "R") $("rand").click();
+  });
+  filter();
+}
+init();
+</script>
+</body>
+</html>
