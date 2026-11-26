@@ -13,6 +13,8 @@
 #   SEEDS="1 2" scripts/jeanzay/ml/submit_deblend.sh seeds   # replicates of A, B, C2, C3 (K1, K2, C1 shared)
 #   scripts/jeanzay/ml/submit_deblend.sh final     # evaluations on the holdout split (final, once only)
 #   scripts/jeanzay/ml/submit_deblend.sh status    # state of every campaign, nothing submitted
+#   scripts/jeanzay/ml/submit_deblend.sh retry dbl.dbl_c2_pilot   # clear a failure marker and resubmit
+#   scripts/jeanzay/ml/submit_deblend.sh advance   # submit what is ready (after a fix, or if a chain stopped)
 #
 # The campaign advances itself (deblend/campaign.py): only the jobs whose dependencies are met are submitted, and
 # every job submits what has become ready when it ends. A training is a sequence of 2 h dev-QoS jobs, each
@@ -33,7 +35,7 @@ export DP2_ML_VENV DP2_CONFIG DP2_ML_CONFIG DP2_ML_ROOT DP2_CPU_ACCOUNT DP2_GPU_
 export DP2_ML_SCRIPTS="$(cd "$(dirname "$0")" && pwd)"
 export KERAS_BACKEND="${KERAS_BACKEND:-jax}"
 mkdir -p logs
-STEP="${1:?step: pilot | all | seeds | final | status}"
+STEP="${1:?step: pilot | all | seeds | final | status | advance | retry JOB}"
 PILOT_STEPS="${PILOT_STEPS:-300}"
 AFTER_OPT=()
 [[ -n "${AFTER:-}" ]] && AFTER_OPT=(--after "$AFTER")
@@ -51,6 +53,8 @@ case "$STEP" in
         done ;;
     final) ml deblend-campaign final --split holdout ${AFTER_OPT[@]+"${AFTER_OPT[@]}"} ;;
     status) ml deblend-advance status ;;
+    advance) ml deblend-advance ;;
+    retry) ml deblend-advance retry "${2:?retry needs the job name, e.g. dbl.dbl_c2_pilot}" ;;
     *) echo "unknown step $STEP" >&2; exit 2 ;;
 esac
 echo "logs: $(pwd)/logs; products: $DP2_ML_ROOT/deblend; campaign state: $DP2_ML_ROOT/deblend/campaign"
