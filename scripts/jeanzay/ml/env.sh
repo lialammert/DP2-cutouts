@@ -34,6 +34,9 @@ fi
 source "$DP2_ML_VENV/bin/activate"
 python -c "import numpy, dp2_cutouts" || { echo "ERROR: dp2_cutouts not importable from $DP2_ML_VENV" >&2; exit 2; }
 
+# Python output written to the Slurm log as it comes (a file is block-buffered: a training looked silent for its
+# whole first epoch).
+export PYTHONUNBUFFERED=1
 export KERAS_BACKEND="${KERAS_BACKEND:-jax}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.9}"

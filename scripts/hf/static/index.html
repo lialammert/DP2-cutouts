@@ -13,14 +13,16 @@
     :root { --bg: #15171b; --fg: #e6e8ec; --muted: #9aa1ad; --line: #30343c; --panel: #1d2026; --accent: #7c93f0; }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, -apple-system, sans-serif; }
-  main { max-width: 1120px; margin: 0 auto; padding: 16px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 16px; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .note { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  .note b { color: var(--fg); font-weight: 600; }
   .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 10px 12px;
               background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
   .controls label { white-space: nowrap; }
-  .group { display: flex; gap: 8px; align-items: center; }
+  .group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .group > b { font-weight: 600; color: var(--muted); font-size: 12px; text-transform: uppercase; }
   input[type=number] { width: 64px; }
   input[type=text] { width: 190px; }
@@ -29,33 +31,44 @@
   button { cursor: pointer; }
   button:hover { border-color: var(--accent); }
   .nav { display: flex; gap: 8px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
-  #where { color: var(--muted); min-width: 90px; }
-  #status { color: var(--muted); }
-  .panels { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  #where, #status { color: var(--muted); }
+  #where { min-width: 90px; }
+  #reasonLine { margin: 0 0 10px; font-weight: 600; }
+  .panels { display: grid; grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); gap: 12px 10px; }
   @media (max-width: 760px) { .panels { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   figure { margin: 0; }
-  figcaption { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  figcaption { font-size: 12px; color: var(--muted); margin-bottom: 4px; min-height: 2.8em; }
+  figcaption b { color: var(--fg); font-weight: 600; }
+  .frame { position: relative; }
   canvas { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 4px;
            image-rendering: pixelated; background: #000; }
-  table { border-collapse: collapse; margin-top: 14px; font-size: 12.5px; width: 100%; }
+  .missing { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+             text-align: center; padding: 12px; color: var(--muted); background: var(--panel); border-radius: 4px;
+             border: 1px dashed var(--line); font-size: 12.5px; }
+  .key i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin: 0 3px 0 6px; }
+  table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
   td { border-top: 1px solid var(--line); padding: 3px 8px; vertical-align: top; }
   td:first-child { color: var(--muted); width: 230px; }
-  .cols { columns: 2 320px; column-gap: 24px; }
-  .cols table { margin-top: 0; }
+  .cols { columns: 2 320px; column-gap: 24px; margin-top: 14px; }
 </style>
 </head>
 <body>
 <main>
   <h1>DP2 × Euclid Q1, private preview</h1>
-  <p class="note">D1: isolated galaxies. D2: Rubin blends, stamp centred on the Rubin object; orange + = the Euclid
-    target; red = pixels of other Euclid sources (masked). Every panel is about 12″ wide. Keys: ← → next / previous,
-    R random.</p>
+  <p class="note">Every panel is about 12″ wide. Orange + = the target. <span class="key">Masks:
+    <i style="background:#3b82f6"></i>Rubin detection footprints of other objects
+    <i style="background:#ff2b2b"></i>masks outside every Rubin footprint (on Rubin: neighbours inside the target's
+    footprint, e.g. deblender children, or not detected by Rubin, masked by their Euclid segment or catalogue
+    ellipse) / Euclid masks on VIS.</span> Masked Rubin pixels are replaced by sky from the same coadd: with the
+    <b>target</b> contrast that sky looks blank around bright objects, the <b>noise</b> contrast shows it.
+    Keys: ← → previous / next, R random.</p>
 
   <div class="controls">
     <div class="group"><b>Dataset</b>
-      <label><input type="radio" name="kind" value="d1"> D1</label>
-      <label><input type="radio" name="kind" value="d2" checked> D2</label></div>
-    <div class="group"><b>Split</b>
+      <label><input type="radio" name="kind" value="d1" checked> D1</label>
+      <label id="d1rOpt"><input type="radio" name="kind" value="d1r"> D1 rejected</label>
+      <label><input type="radio" name="kind" value="d2"> D2</label></div>
+    <div class="group" id="splitGroup"><b>Split</b>
       <label><input type="checkbox" name="split" value="train" checked> train</label>
       <label><input type="checkbox" name="split" value="val" checked> val</label>
       <label><input type="checkbox" name="split" value="test" checked> test</label></div>
@@ -65,35 +78,60 @@
     <div class="group"><b>VIS mag</b>
       <input type="number" id="magLo" value="18" step="0.5"> –
       <input type="number" id="magHi" value="30" step="0.5"></div>
+    <div class="group" id="reasonGroup"><b>Rejected by</b><select id="reason"></select></div>
+    <div class="group" id="eoGroup"><b>Masks outside Rubin footprints</b>
+      <select id="euclidOnly"><option value="all">all</option><option value="yes">yes</option>
+        <option value="no">no</option></select></div>
     <div class="group" id="selGroup"><b>D2 selection</b>
       <select id="selection"><option value="all">all</option><option value="selected">selected</option>
         <option value="rejected">rejected</option></select></div>
+    <div class="group"><b>Contrast</b>
+      <select id="contrast"><option value="target">target</option><option value="noise">noise</option></select></div>
   </div>
 
   <div class="nav">
     <button id="prev">◀ previous</button><button id="next">next ▶</button><button id="rand">random</button>
     <span id="where">–</span>
-    <input type="text" id="oid" placeholder="euclid_object_id"><button id="go">go</button>
+    <input type="text" id="oid" placeholder="object_id or euclid_object_id"><button id="go">go</button>
     <span id="status">loading…</span>
   </div>
-
-  <div class="panels">
-    <figure><figcaption>Rubin gri</figcaption><canvas id="c0"></canvas></figure>
-    <figure><figcaption>Rubin i</figcaption><canvas id="c1"></canvas></figure>
-    <figure><figcaption>Euclid VIS</figcaption><canvas id="c2"></canvas></figure>
-    <figure><figcaption id="cap3">VIS, neighbours masked</figcaption><canvas id="c3"></canvas></figure>
-  </div>
+  <p id="reasonLine"></p>
+  <div class="panels" id="panels"></div>
   <div class="cols"><table id="meta"></table></div>
 </main>
 
 <script>
 "use strict";
 const S = 360;                                  // canvas size (device pixels) of every panel
+const BLUE = "#3b82f6", RED = "#ff2b2b";
 const F16 = new Float32Array(65536);            // float16 -> float32 lookup
 for (let h = 0; h < 65536; h++) {
   const s = h & 0x8000 ? -1 : 1, e = (h >> 10) & 31, f = h & 1023;
   F16[h] = e === 0 ? s * 2 ** -14 * (f / 1024) : e === 31 ? (f ? NaN : s * Infinity) : s * 2 ** (e - 15) * (1 + f / 1024);
 }
+// Panels of each dataset: [title, image, mask contours, needs]. Images: gri / i of a Rubin stamp, vis, vis_masked.
+const PANELS = {
+  d1: [
+    ["<b>Rubin gri</b> — final D1 image", ["gri", "rubin"], [], "has_final"],
+    ["<b>Rubin i, raw</b> — before any mask", ["i", "rubin_raw"], [], "has_raw"],
+    ["<b>Rubin i, raw + Rubin pipeline mask</b> (blue)", ["i", "rubin_raw"], [["need_rubin", BLUE]], "has_need"],
+    ["<b>Rubin i — final D1 image</b>: masked pixels (blue: Rubin footprints, red: outside them) replaced by sky",
+     ["i", "rubin"], [["need_rubin", BLUE], ["need_euclid", RED]], "has_final"],
+    ["<b>Euclid VIS, raw</b>", ["vis", "vis"], [], "has_vis"],
+    ["<b>Euclid VIS + Euclid masks</b> (red)", ["vis", "vis"], [["fill", RED]], "has_vis"],
+  ],
+  d2: [
+    ["<b>Rubin gri</b> — blend centred on the Rubin object", ["gri", "rubin"], [], null],
+    ["<b>Rubin i</b> — the deblenders' input", ["i", "rubin"], [], null],
+    ["<b>Euclid VIS</b>, before masking", ["vis", "vis"], [], null],
+    ["<b>VIS, neighbours masked</b> (red), the teacher's target", ["vis", "vis_masked"], [["fill", RED]], null],
+  ],
+};
+PANELS.d1r = PANELS.d1;
+const MISSING = { has_final: "no final stamp: rejected before the stamps were cut",
+                  has_raw: "stamp outside the coadd", has_need: "no neighbour mask (rejected before masking)",
+                  has_vis: "no Euclid VIS cutout (no counterpart or none in the MMU)" };
+
 const state = { info: null, sets: {}, chunks: new Map(), rows: [], pos: 0 };
 const $ = id => document.getElementById(id);
 
@@ -103,7 +141,7 @@ async function getJSON(url) {
   return r.json();
 }
 async function chunk(kind, k) {
-  const key = kind + k;
+  const key = kind + ":" + k;
   if (!state.chunks.has(key)) {
     state.chunks.set(key, fetch(`data/${kind}_${String(k).padStart(3, "0")}.bin`).then(r => {
       if (!r.ok) throw new Error(`chunk ${key}: HTTP ${r.status}`);
@@ -112,45 +150,44 @@ async function chunk(kind, k) {
   }
   return state.chunks.get(key);
 }
-
 function f16(buf, pos, n) {
   const u = new Uint16Array(buf, pos, n / 2), out = new Float32Array(u.length);
   for (let i = 0; i < u.length; i++) out[i] = F16[u[i]];
   return out;
 }
-function bits(buf, pos, n) {
+function bitsAt(buf, pos, n) {
   const b = new Uint8Array(buf, pos), out = new Uint8Array(n);
   for (let i = 0; i < n; i++) out[i] = (b[i >> 3] >> (7 - (i & 7))) & 1;
   return out;
 }
-
 async function decode(kind, idx) {
   const set = state.sets[kind], inf = state.info[kind];
   const buf = await chunk(kind, Math.floor(idx / set.chunk));
   const base = (idx % set.chunk) * set.record_bytes, L = set.layout;
-  const nr = inf.rubin_px, ne = inf.euclid_px;
-  const out = { nr, ne, nb: inf.rubin_bands.length,
-    rubin: f16(buf, base + L.rubin[0], L.rubin[1]), vis: f16(buf, base + L.vis[0], L.vis[1]),
-    fill: bits(buf, base + L.fill[0], ne * ne) };
-  if (L.vis_masked) out.masked = f16(buf, base + L.vis_masked[0], L.vis_masked[1]);
+  const nr = inf.rubin_px, ne = inf.euclid_px, out = { nr, ne, nb: inf.rubin_bands.length };
+  for (const [name, [pos, size]] of Object.entries(L)) {
+    if (["fill"].includes(name)) out[name] = bitsAt(buf, base + pos, ne * ne);
+    else if (name.startsWith("need_")) out[name] = bitsAt(buf, base + pos, nr * nr);
+    else out[name] = f16(buf, base + pos, size);
+  }
   return out;
 }
 
-// asinh stretch in noise units, 0..1 (as viewer_core.py): top = brightest pixel of the central third (>= 5 sigma),
-// soft = top / 10 (>= 1 sigma).
+// asinh stretch in noise units, 0..1. target: top = brightest pixel of the central third (>= 5 sigma), linear to
+// top / 10; noise: linear to 1 sigma, top 50 sigma (the sky and the faint wings become visible).
 function centralMax(get, n) {
   let m = 5;
-  for (let y = Math.floor(n / 3); y < n - Math.floor(n / 3); y++)
-    for (let x = Math.floor(n / 3); x < n - Math.floor(n / 3); x++) { const v = get(x, y); if (v > m) m = v; }
+  const a = Math.floor(n / 3);
+  for (let y = a; y < n - a; y++) for (let x = a; x < n - a; x++) { const v = get(x, y); if (v > m) m = v; }
   return m;
 }
-function stretch(v, top) {
-  const soft = Math.max(top / 10, 1);
-  const s = Math.asinh(v / soft) / Math.asinh(top / soft);
-  return s > 1 ? 1 : s > 0 ? s : 0;
+function stretcher(top) {
+  const noise = $("contrast").value === "noise";
+  const t = noise ? 50 : top, soft = noise ? 1 : Math.max(top / 10, 1), norm = Math.asinh(t / soft);
+  return v => { const s = Math.asinh(v / soft) / norm; return s > 1 ? 1 : s > 0 ? s : 0; };
 }
 
-function paint(canvas, n, rgbAt, fill, cross) {
+function paint(canvas, n, rgbAt, contours, cross) {
   const off = document.createElement("canvas");
   off.width = off.height = n;
   const ctx = off.getContext("2d"), img = ctx.createImageData(n, n);
@@ -164,12 +201,13 @@ function paint(canvas, n, rgbAt, fill, cross) {
   c.imageSmoothingEnabled = false;
   c.drawImage(off, 0, 0, S, S);
   const k = S / n;
-  if (fill) {                                   // contour of the masked region: boundaries between pixels
-    c.strokeStyle = "#ff2b2b"; c.lineWidth = 1.5; c.beginPath();
+  for (const [m, color] of contours) {          // boundaries between masked and unmasked pixels
+    c.strokeStyle = color; c.lineWidth = 1.6; c.beginPath();
     for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) {
-      const f = fill[y * n + x];
-      if (x + 1 < n && f !== fill[y * n + x + 1]) { const X = (x + 1) * k; c.moveTo(X, (n - 1 - y) * k); c.lineTo(X, (n - y) * k); }
-      if (y + 1 < n && f !== fill[(y + 1) * n + x]) { const Y = (n - 1 - y) * k; c.moveTo(x * k, Y); c.lineTo((x + 1) * k, Y); }
+      const f = m[y * n + x];
+      if (x + 1 < n && f !== m[y * n + x + 1]) { const X = (x + 1) * k; c.moveTo(X, (n - 1 - y) * k); c.lineTo(X, (n - y) * k); }
+      if (y + 1 < n && f !== m[(y + 1) * n + x]) { const Y = (n - 1 - y) * k; c.moveTo(x * k, Y); c.lineTo((x + 1) * k, Y); }
+      if (f && (x === 0 || x === n - 1 || y === 0 || y === n - 1)) { /* edge of the stamp: no line */ }
     }
     c.stroke();
   }
@@ -180,13 +218,19 @@ function paint(canvas, n, rgbAt, fill, cross) {
   }
 }
 
-function grayAt(arr, n, top) {
-  return (x, y) => { const v = Math.round(255 * (1 - stretch(arr[y * n + x], top))); return [v, v, v]; };
+function buildPanels(kind) {
+  const P = PANELS[kind], box = $("panels");
+  box.style.setProperty("--cols", P.length === 6 ? 3 : 4);
+  box.innerHTML = P.map((p, i) => `<figure><figcaption>${p[0]}</figcaption><div class="frame">` +
+    `<canvas id="c${i}"></canvas><div class="missing" id="m${i}" hidden></div></div></figure>`).join("");
 }
 
 async function show() {
   const kind = currentKind(), rows = state.rows;
-  if (!rows.length) { $("where").textContent = "0 / 0"; $("status").textContent = "no object matches the filters"; $("meta").innerHTML = ""; return; }
+  if (!rows.length) {
+    $("where").textContent = "0 / 0"; $("status").textContent = "no object matches the filters";
+    $("meta").innerHTML = ""; $("reasonLine").textContent = ""; return;
+  }
   state.pos = ((state.pos % rows.length) + rows.length) % rows.length;
   const idx = rows[state.pos], meta = state.sets[kind].rows[idx];
   $("where").textContent = `${state.pos + 1} / ${rows.length}`;
@@ -194,20 +238,32 @@ async function show() {
   let im;
   try { im = await decode(kind, idx); } catch (e) { $("status").textContent = String(e); return; }
   if (rows[state.pos] !== idx) return;          // the user moved on meanwhile
-  const { nr, ne, nb } = im, band = b => (x, y) => im.rubin[(y * nr + x) * nb + b];
+  const { nr, ne, nb } = im;
   const tgt = kind === "d2" ? [meta.target_rubin_x || 0, meta.target_rubin_y || 0] : [0, 0];
-  // Rubin gri: i, r, g as R, G, B with one common stretch (colours kept)
-  const bi = band(3), br = band(2), bg = band(1);
-  const top = Math.max(centralMax(bi, nr), centralMax(br, nr), centralMax(bg, nr));
-  paint($("c0"), nr, (x, y) => [bi(x, y), br(x, y), bg(x, y)].map(v => Math.round(255 * stretch(v, top))), null, tgt);
-  paint($("c1"), nr, grayAt(im.rubin.filter((_, i) => i % nb === 3), nr, centralMax(bi, nr)), null, tgt);
-  const vtop = centralMax((x, y) => im.vis[y * ne + x], ne);
-  paint($("c2"), ne, grayAt(im.vis, ne, vtop), null, [0, 0]);
-  const m = im.masked || im.vis;
-  paint($("c3"), ne, grayAt(m, ne, centralMax((x, y) => m[y * ne + x], ne)), im.fill, [0, 0]);
-  $("cap3").textContent = kind === "d2" ? "VIS, neighbours masked" : "VIS, other sources masked";
-  const keys = Object.keys(meta);
-  $("meta").innerHTML = keys.map(k => `<tr><td>${k}</td><td>${fmt(meta[k])}</td></tr>`).join("");
+  PANELS[kind].forEach(([, [how, src], conts, need], i) => {
+    const canvas = $("c" + i), miss = $("m" + i);
+    if (need && meta[need] === false) {
+      miss.hidden = false; miss.textContent = MISSING[need]; canvas.width = canvas.height = S; return;
+    }
+    miss.hidden = true;
+    const contours = conts.filter(([m]) => im[m]).map(([m, col]) => [im[m], col]);
+    if (how === "gri" || how === "i") {
+      const a = im[src], band = b => (x, y) => a[(y * nr + x) * nb + b];
+      if (how === "gri") {
+        const bi = band(3), br = band(2), bg = band(1);
+        const st = stretcher(Math.max(centralMax(bi, nr), centralMax(br, nr), centralMax(bg, nr)));
+        paint(canvas, nr, (x, y) => [bi(x, y), br(x, y), bg(x, y)].map(v => Math.round(255 * st(v))), contours, tgt);
+      } else {
+        const bi = band(3), st = stretcher(centralMax(bi, nr));
+        paint(canvas, nr, (x, y) => { const v = Math.round(255 * (1 - st(bi(x, y)))); return [v, v, v]; }, contours, tgt);
+      }
+    } else {
+      const a = im[src], get = (x, y) => a[y * ne + x], st = stretcher(centralMax(get, ne));
+      paint(canvas, ne, (x, y) => { const v = Math.round(255 * (1 - st(get(x, y)))); return [v, v, v]; }, contours, [0, 0]);
+    }
+  });
+  $("reasonLine").textContent = kind === "d1r" ? "Rejected by " + (meta.reason_label || meta.reason) : "";
+  $("meta").innerHTML = Object.keys(meta).map(k => `<tr><td>${k}</td><td>${fmt(meta[k])}</td></tr>`).join("");
   $("status").textContent = "";
   prefetch(kind);
 }
@@ -224,17 +280,38 @@ function prefetch(kind) {                       // the chunk of the next object,
 function currentKind() { return document.querySelector("input[name=kind]:checked").value; }
 function checked(name) { return [...document.querySelectorAll(`input[name=${name}]:checked`)].map(e => e.value); }
 
+function fillReasons() {
+  const set = state.sets.d1r;
+  if (!set) return;
+  const count = {};
+  set.rows.forEach(r => { count[r.reason] = (count[r.reason] || 0) + 1; });
+  const label = r => (set.rows.find(x => x.reason === r) || {}).reason_label || r;
+  $("reason").innerHTML = `<option value="all">all reasons</option>` +
+    Object.keys(count).sort().map(r => `<option value="${r}">${fmt(label(r))} (${count[r]})</option>`).join("");
+}
+
 function filter() {
   const kind = currentKind(), set = state.sets[kind];
   const splits = checked("split"), fields = checked("field");
-  const lo = parseFloat($("magLo").value), hi = parseFloat($("magHi").value), sel = $("selection").value;
-  $("selGroup").style.display = kind === "d2" ? "" : "none";
+  const lo = parseFloat($("magLo").value), hi = parseFloat($("magHi").value);
+  const sel = $("selection").value, eo = $("euclidOnly").value, reason = $("reason").value;
+  $("selGroup").hidden = kind !== "d2";
+  $("eoGroup").hidden = kind === "d2";
+  $("reasonGroup").hidden = kind !== "d1r";
+  $("splitGroup").hidden = kind === "d1r";
+  if (buildPanels.kind !== kind) { buildPanels(kind); buildPanels.kind = kind; }
   state.rows = [];
   set.rows.forEach((r, i) => {
-    if (!splits.includes(r.split) || !fields.includes(r.field)) return;
+    if (kind !== "d1r" && !splits.includes(r.split)) return;
+    if (!fields.includes(r.field)) return;
     const m = r.euclid_vis_mag;
     if (m !== null && m !== undefined && (m < lo || m > hi)) return;
     if (kind === "d2" && sel !== "all" && (sel === "selected") !== !!r.selected) return;
+    if (kind !== "d2" && eo !== "all") {
+      if (r.has_need === false) return;
+      if ((eo === "yes") !== !!r.euclid_only_mask) return;
+    }
+    if (kind === "d1r" && reason !== "all" && r.reason !== reason) return;
     state.rows.push(i);
   });
   state.pos = 0;
@@ -243,7 +320,10 @@ function filter() {
 
 function find() {
   const kind = currentKind(), want = $("oid").value.trim();
-  const p = state.rows.findIndex(i => String(state.sets[kind].rows[i].euclid_object_id) === want);
+  const p = state.rows.findIndex(i => {
+    const r = state.sets[kind].rows[i];
+    return String(r.euclid_object_id) === want || String(r.object_id) === want;
+  });
   if (p < 0) { $("status").textContent = "not found among the filtered objects"; return; }
   state.pos = p; show();
 }
@@ -251,10 +331,16 @@ function find() {
 async function init() {
   try {
     state.info = await getJSON("data/info.json");
-    const [d1, d2] = await Promise.all([getJSON("data/d1.json"), getJSON("data/d2.json")]);
-    state.sets = { d1, d2 };
+    const names = ["d1", "d2", "d1r"].filter(k => state.info[k]);
+    const sets = await Promise.all(names.map(k => getJSON(`data/${k}.json`)));
+    names.forEach((k, i) => { state.sets[k] = sets[i]; });
   } catch (e) { $("status").textContent = "cannot load the data: " + e; return; }
+  if (!state.sets.d1r) $("d1rOpt").hidden = true;
+  const start = location.hash.slice(1);         // #d1, #d1r or #d2 opens that dataset
+  if (state.sets[start]) document.querySelector(`input[name=kind][value=${start}]`).checked = true;
+  fillReasons();
   document.querySelectorAll(".controls input, .controls select").forEach(e => e.addEventListener("change", filter));
+  $("contrast").onchange = () => show();
   $("prev").onclick = () => { state.pos--; show(); };
   $("next").onclick = () => { state.pos++; show(); };
   $("rand").onclick = () => { state.pos = Math.floor(Math.random() * Math.max(state.rows.length, 1)); show(); };

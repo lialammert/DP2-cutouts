@@ -6,6 +6,7 @@
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -58,7 +59,7 @@ def stores(tmp_path):
 def test_preview_export_and_viewer_figures(stores, tmp_path):
     ex = _module(ROOT / "scripts" / "hf" / "export_preview.py", "export_preview")
     rng = np.random.default_rng(1)
-    d1, i1 = ex.export(stores, "d1", 100, rng)
+    d1, i1 = ex.export(stores, "d1", 100, rng, pixels=False)
     d1_meta = pd.concat([ex.Store(p).meta for p in ex.sources(stores, "d1")])
     d2, i2 = ex.export(stores, "d2", 100, rng, d1_meta)
     assert len(d1) == len(d2) == 12 and not (d1["split"] == "holdout").any()
@@ -89,5 +90,31 @@ def test_preview_export_and_viewer_figures(stores, tmp_path):
         fill = np.unpackbits(np.frombuffer(buf[base + pos:base + pos + n], np.uint8), count=NE * NE).reshape(NE, NE)
         assert fill[15, 15] and not fill[60, 60]
         assert ("vis_masked" in js["layout"]) == (name == "d2")
+        assert ("need_rubin" in js["layout"] and "rubin_raw" in js["layout"]) == (name == "d1")
+        assert all(js["layout"][k][0] % 2 == 0 for k in js["layout"] if k in ("rubin", "rubin_raw", "vis"))
         assert js["rows"][k]["split"] == t.iloc[k]["split"] and js["rows"][k]["field"] == t.iloc[k]["field"]
     assert (site / "data" / "d2.json").read_text().count('"selected":true') == int(d2["selected"].sum())
+
+
+def test_mask_split_and_cut_funnel():
+    # The pipeline's neighbour mask split by origin: pieces outside the Rubin footprints that touch none of them are
+    # "outside" (red in the viewer), the rim the segments add around a footprint stays with it. The rejection
+    # reason is the first cut failed, in the order of the final dataset.
+    sys.path.insert(0, str(ROOT / "scripts" / "hf"))
+    try:
+        dv = _module(ROOT / "scripts" / "hf" / "d1_views.py", "d1_views")
+    finally:
+        sys.path.pop(0)
+    need = np.zeros((20, 20), bool)
+    fp = np.zeros((20, 20), bool)
+    fp[2:6, 2:6] = True                 # a Rubin footprint
+    need[1:7, 1:7] = True               # its mask, with a rim from the Euclid segment
+    need[12:16, 12:16] = True           # a neighbour no Rubin footprint holds
+    rubin, outside = dv.split_mask(need, fp)
+    assert rubin[1:7, 1:7].all() and not rubin[12:16, 12:16].any()
+    assert outside[12:16, 12:16].all() and outside.sum() == 16 and not (rubin & outside).any()
+    t = pd.DataFrame(dict(cut1_pass=[True, False, True, True, True], cut2_pass=True, in_region=True,
+                          cut3_pass=True, cut4_pass=[True, True, False, True, True], cut5_pass=True,
+                          cut6_pass=[True, True, False, None, True], cut7_pass=True, cut8_pass=True,
+                          mask_pass=[True, True, True, True, False]))
+    assert dv.first_failure(t).tolist() == [None, "cut1", "cut4", "cut6", "mask"]

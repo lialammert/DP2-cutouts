@@ -195,6 +195,21 @@ def companion_mask_segmentation(detected, seg, shape, ox, oy, target, grow_px, s
     return m | neigh, info
 
 
+def rubin_footprint_mask(det, xt, yt, grow_px):
+    # The Rubin part of the "pipeline" masking: detection footprints (DETECTED in at least one band, 8-connected) of
+    # the stamp that do not hold the target, grown by grow_px, never into the target's footprint. det: the stamp's
+    # boolean detection map; (xt, yt): the target in stamp pixels. Returns (mask, target footprint).
+    h, w = det.shape
+    labels, _ = label(det, structure=np.ones((3, 3), int))
+    it, jt = int(np.floor(yt + 0.5)), int(np.floor(xt + 0.5))
+    lt = labels[it, jt] if (0 <= it < h and 0 <= jt < w) else 0
+    target_fp = labels == lt if lt > 0 else np.zeros((h, w), bool)
+    m = det & ~target_fp
+    if grow_px > 0 and m.any():
+        m = binary_dilation(m, iterations=int(grow_px)) & ~target_fp
+    return m, target_fp
+
+
 def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, comp, pad, grow_px, seg_grow_px,
                                         counterpart=None, keep_k=2.0, dedup_px=2.0):
     # "segmentation_catalog" method: the Euclid segmentation decides where the edges are, the catalogues decide who
@@ -216,15 +231,8 @@ def companion_mask_segmentation_catalog(detected, seg, shape, ox, oy, target, co
     # target: (x, y, a, b, theta[, flux]) in the box frame; comp: x, y (region frame), a, b, theta, survey[, visible,
     # flux], fluxes in the same unit.
     h, w = shape
-    det = detected[oy:oy + h, ox:ox + w]
-    labels, _ = label(det, structure=np.ones((3, 3), int))
     xt, yt, a, b, th = target[:5]
-    it, jt = int(np.floor(yt + 0.5)), int(np.floor(xt + 0.5))
-    lt = labels[it, jt] if (0 <= it < h and 0 <= jt < w) else 0
-    target_fp = labels == lt if lt > 0 else np.zeros(shape, bool)
-    m = det & ~target_fp
-    if grow_px > 0 and m.any():
-        m = binary_dilation(m, iterations=int(grow_px)) & ~target_fp
+    m, target_fp = rubin_footprint_mask(detected[oy:oy + h, ox:ox + w], xt, yt, grow_px)
 
     L = seg[:, oy:oy + h, ox:ox + w]
     lab = L[0].copy()

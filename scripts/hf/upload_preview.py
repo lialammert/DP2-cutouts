@@ -43,14 +43,15 @@ def main():
     if not args.no_dataset:
         ds = private_repo(api, f"{args.user}/{args.dataset_name}", "dataset")
         api.upload_folder(folder_path=str(data), repo_id=ds, repo_type="dataset",
-                          allow_patterns=["d1.parquet", "d2.parquet", "info.json", "README.md"],
+                          allow_patterns=["d1.parquet", "d2.parquet", "d1r.parquet", "info.json", "README.md"],
                           commit_message="DP2 x Euclid preview")
         print(f"dataset (private): https://huggingface.co/datasets/{ds}")
     if args.no_space:
         return
     site = build_site(data, data / "site")
     sp = private_repo(api, f"{args.user}/{args.space_name}", "space", space_sdk="static")
-    api.upload_folder(folder_path=str(site), repo_id=sp, repo_type="space", commit_message="viewer")
+    api.upload_folder(folder_path=str(site), repo_id=sp, repo_type="space", commit_message="viewer",
+                      delete_patterns=["data/*"])          # chunks of an earlier, larger export
     print(f"space (private): https://huggingface.co/spaces/{sp}")
 
 

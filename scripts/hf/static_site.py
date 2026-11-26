@@ -4,11 +4,12 @@
 # Turns the preview export (export_preview.py: d1.parquet, d2.parquet, info.json) into a static website for a free,
 # PRIVATE Hugging Face static Space (Gradio Spaces need a paid subscription): scripts/hf/static/index.html plus
 #   data/info.json                 export info (shapes, bands, pixel scales)
-#   data/<d1|d2>.json              layout of one object's binary record, chunk size, metadata rows (ids as strings:
-#                                  64-bit ids do not fit in JavaScript numbers)
-#   data/<d1|d2>_<k>.bin           objects k*CHUNK .. (k+1)*CHUNK-1, one fixed-size record each:
-#                                  rubin float16 (n_r, n_r, bands), vis float16 (n_e, n_e), [vis_masked float16
-#                                  (n_e, n_e), D2], fill packbits (n_e * n_e bits), zero padding to a multiple of 8
+#   data/<name>.json               layout of one object's binary record, chunk size, metadata rows (ids as strings:
+#                                  64-bit ids do not fit in JavaScript numbers); name = d1, d2, d1r (rejected)
+#   data/<name>_<k>.bin            objects k*CHUNK .. (k+1)*CHUNK-1, one fixed-size record each: every byte column
+#                                  of the export (rubin, rubin_raw, vis, vis_masked: float16; fill, need_rubin,
+#                                  need_euclid: packbits) at the offset the layout gives, zero padding to a multiple
+#                                  of 8 (index.html decodes them by name)
 # The page fetches only the chunks it shows. DP2 pixels: only for a PRIVATE Space.
 # Usage: python scripts/hf/static_site.py <export dir> <site dir>   (upload_preview.py calls it)
 
@@ -22,7 +23,6 @@ import numpy as np
 import pandas as pd
 
 CHUNK = 100
-IMAGES = ("rubin", "vis", "vis_masked", "fill")
 HERE = Path(__file__).resolve().parent
 
 SPACE_README = """---
@@ -43,15 +43,23 @@ repository.
 """
 
 
-def layout(info, name):
-    n_r, n_e, nb = int(info["rubin_px"]), int(info["euclid_px"]), len(info["rubin_bands"])
-    parts = [("rubin", n_r * n_r * nb * 2), ("vis", n_e * n_e * 2)]
-    if name == "d2":
-        parts.append(("vis_masked", n_e * n_e * 2))
-    parts.append(("fill", math.ceil(n_e * n_e / 8)))
+def byte_columns(t):
+    return [c for c in t.columns if len(t) and isinstance(t[c].iloc[0], (bytes, bytearray))]
+
+
+def layout(t):
+    # Offset and size of every byte column in a record (sizes must not vary between rows); float16 blocks start on
+    # even offsets since every size before them is even or they come first (fill-like bit blocks go last).
+    cols = byte_columns(t)
+    sizes = {c: {len(b) for b in t[c]} for c in cols}
+    bad = {c: v for c, v in sizes.items() if len(v) != 1}
+    if bad:
+        raise ValueError(f"byte columns of varying size: {bad}")
+    order = sorted(cols, key=lambda c: (next(iter(sizes[c])) % 2, cols.index(c)))
     out, pos = {}, 0
-    for k, size in parts:
-        out[k] = [pos, size]
+    for c in order:
+        size = next(iter(sizes[c]))
+        out[c] = [pos, size]
         pos += size
     return out, int(math.ceil(pos / 8) * 8)
 
@@ -78,13 +86,13 @@ def plain(v):
 
 def rows_json(t):
     rows = []
-    for rec in t.drop(columns=[c for c in IMAGES if c in t]).to_dict("records"):
+    for rec in t.drop(columns=byte_columns(t)).to_dict("records"):
         out = {}
         for k, v in rec.items():
             v = plain(v)
             if k.endswith("_id") or k == "objectId":
                 v = None if v is None else str(v)
-            elif k == "rubin_sigma" and isinstance(v, str):
+            elif k in ("rubin_sigma", "rubin_raw_sigma") and isinstance(v, str):
                 v = [round(x, 4) for x in json.loads(v)]
             out[k] = v
         rows.append(out)
@@ -97,9 +105,11 @@ def build_site(export_dir, site_dir):
     if site_dir.exists():
         shutil.rmtree(site_dir)
     (site_dir / "data").mkdir(parents=True)
-    for name in ("d1", "d2"):
+    for name in ("d1", "d2", "d1r"):
+        if name not in info or not (export_dir / f"{name}.parquet").exists():
+            continue
         t = pd.read_parquet(export_dir / f"{name}.parquet")
-        lay, size = layout(info[name], name)
+        lay, size = layout(t)
         for c in range(0, len(t), CHUNK):
             with open(site_dir / "data" / f"{name}_{c // CHUNK:03d}.bin", "wb") as f:
                 for _, row in t.iloc[c:c + CHUNK].iterrows():
