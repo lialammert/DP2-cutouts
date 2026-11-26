@@ -11,7 +11,8 @@
 #   fill         packed bits (n_e, n_e): Euclid pixels of other sources (euclid_fill)
 #   target_rubin_x/y  D2: position of the Euclid target on the Rubin stamp (pixels from its centre)
 #   selected     D2: kept by deblend.d2_selection (strict before/after test, VIS magnitude within D1)
-# The holdout split is left out. Works on the merged datasets, or on their finished shards before the merges.
+# The holdout split is left out. Reads the per-patch shards (light enough for a login node), the merged dataset only
+# when the shards are gone.
 # DP2 pixels: the output must only go to a PRIVATE repository (Rubin data rights).
 # Usage: python scripts/hf/export_preview.py <ML config> <out dir> [--n-d1 1500] [--n-d2 2500] [--seed 0]
 
@@ -38,11 +39,15 @@ META = {"d1": ["object_id", "objectId", "euclid_object_id", "split", "tract", "p
 
 
 def sources(cfg, name):
-    # The merged dataset, or its finished shards.
+    # The finished shards (one per patch: small enough for a login node, exact 64-bit ids), or the merged dataset
+    # when the shards are gone.
     d = cfg.dataset_dir(name)
-    if (d / "info.json").exists():
-        return [d]
-    return [s for s in sorted((d / "shards").glob("*")) if s.is_dir() and shard_done(s)]
+    shards = [s for s in sorted((d / "shards").glob("*")) if s.is_dir() and shard_done(s)]
+    return shards or ([d] if (d / "info.json").exists() else [])
+
+
+def n_rows(p):
+    return int(json.loads((Path(p) / "info.json").read_text())["n"])
 
 
 def noise(ivar, ok):
@@ -76,10 +81,10 @@ def sample(cfg, name, n, rng):
     # (store, row) pairs drawn uniformly over the non-holdout objects of all sources.
     pairs = []
     for p in sources(cfg, name):
-        m = Store(p).meta
-        if len(m):
-            rows = np.flatnonzero(m["split"].to_numpy() != "holdout")
-            pairs += [(p, int(r)) for r in rows]
+        if not n_rows(p):
+            continue
+        split = pd.read_parquet(Path(p) / "meta.parquet", columns=["split"])["split"].to_numpy()
+        pairs += [(p, int(r)) for r in np.flatnonzero(split != "holdout")]
     if not pairs:
         raise SystemExit(f"no {name} object found under {cfg.dataset_dir(name)}")
     pick = rng.permutation(len(pairs))[:n]
@@ -176,7 +181,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
     d1, i1 = export(cfg, "d1", args.n_d1, rng)
-    d1_meta = pd.concat([Store(p).meta[["split", "euclid_vis_mag"]] for p in sources(cfg, "d1") if len(Store(p).meta)])
+    d1_meta = pd.concat([m for m in (pd.read_parquet(Path(p) / "meta.parquet", columns=["split", "euclid_vis_mag"])
+                                     if n_rows(p) else None for p in sources(cfg, "d1")) if m is not None])
     d2, i2 = export(cfg, "d2", args.n_d2, rng, d1_meta)
     d1.to_parquet(out / "d1.parquet", index=False)
     d2.to_parquet(out / "d2.parquet", index=False)
