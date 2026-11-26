@@ -10,7 +10,8 @@
 #   vis_masked   D2 only: VIS after masking (euclid_flux, the teacher's E_c)
 #   fill         packed bits (n_e, n_e): Euclid pixels of other sources (euclid_fill)
 #   target_rubin_x/y  D2: position of the Euclid target on the Rubin stamp (pixels from its centre)
-#   selected     D2: kept by deblend.d2_selection (strict before/after test, VIS magnitude within D1)
+#   selected     D2: kept by deblend.d2_selection (strict before/after test, VIS magnitude within D1, D1's cut 1);
+#                with the target's Euclid point-like / spurious flags when d2/euclid_flags.parquet exists
 # The holdout split is left out. Reads the per-patch shards (light enough for a login node), the merged dataset only
 # when the shards are gone.
 # DP2 pixels: the output must only go to a PRIVATE repository (Rubin data rights).
@@ -34,7 +35,7 @@ META = {"d1": ["object_id", "objectId", "euclid_object_id", "split", "tract", "p
         "d2": ["group_id", "euclid_object_id", "rubin_object_id", "split", "tract", "patch", "euclid_ra",
                "euclid_dec", "rubin_ra", "rubin_dec", "euclid_vis_mag", "rubin_i_cModel_mag", "sb_rubin",
                "n_euclid_in_group", "partner_vis_mag", "partner_sep_arcsec", "sep_delta_e",
-               "sep_centroid_shift_arcsec", "sep_rel_size_change", "sep_rel_flux_change", "snr_vis",
+               "sep_centroid_shift_arcsec", "sep_rel_size_change", "sep_rel_flux_change", "hsm_vis_ok", "snr_vis",
                "halo_ring_z", "euclid_masked_fraction", "rc_offset_x_px", "rc_offset_y_px"]}
 
 
@@ -103,6 +104,11 @@ def export(cfg, name, n, rng, d1_meta=None):
     vis = list(cfg["euclid"]["bands"]).index("VIS")
     picks, total = sample(cfg, name, n, rng)
     recs = []
+    flags = {}
+    fpath = cfg.dataset_dir("d2") / "euclid_flags.parquet"
+    if name == "d2" and fpath.exists():           # Euclid flags of the targets (dp2-ml d2-flags), shown with the metadata
+        f = pd.read_parquet(fpath, columns=["euclid_object_id", "euclid_point_like_flag", "euclid_spurious_flag"])
+        flags = {int(i): (pl, sp) for i, pl, sp in f.itertuples(index=False)}
     for p, rows in picks.items():
         st = Store(p)
         rows = np.asarray(rows)
@@ -139,6 +145,10 @@ def export(cfg, name, n, rng, d1_meta=None):
                 rec["target_rubin_x"] = -float(meta.at[j, "rc_offset_x_px"])
                 rec["target_rubin_y"] = -float(meta.at[j, "rc_offset_y_px"])
                 rec["selected"] = bool(keep[j])
+                if flags:
+                    pl, sp = flags.get(int(meta.at[j, "euclid_object_id"]), (None, None))
+                    rec["euclid_point_like_flag"] = None if pd.isna(pl) else int(pl)
+                    rec["euclid_spurious_flag"] = None if pd.isna(sp) else int(sp)
             recs.append(rec)
         print(f"{name} {Path(p).name}: {len(rows)} objects", flush=True)
     info = dict(n_total_non_holdout=total, n_exported=len(recs), rubin_px=int(rf.shape[1]),
