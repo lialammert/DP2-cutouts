@@ -295,3 +295,15 @@ def test_evaluations_run_on_the_trained_campaign(cfg):
     assert set(d2["runs"]) == {"A", "B", "C"} and "A_minus_B" in d2["paired"]
     d1 = json.loads((evaluate.out_dir(cfg, "d1", "val", None) / "summary.json").read_text())
     assert {"rvae", "k1k2", "c1"} <= set(d1["paths"]) and set(d1["probabilistic"]) == {"A", "B", "C"}
+
+
+def test_block_order_reads_consecutive_rows():
+    # deblend.train.read_block: a training epoch visits every row once, in shuffled blocks of consecutive rows.
+    from dp2_cutouts.deblend.data import Batches
+    rows = np.arange(5, 101)                            # 96 rows: 12 full blocks of 8
+    b = Batches(rows, 16, True, 3, block=8)
+    assert sorted(b.order.tolist()) == rows.tolist()
+    assert all((np.diff(b.order[k:k + 8]) == 1).all() for k in range(0, 96, 8))
+    assert not (b.order == rows).all()                  # shuffled
+    one = Batches(rows, 16, True, 3).order              # read_block 1: rows one by one
+    assert sorted(one.tolist()) == rows.tolist() and (np.diff(one) != 1).sum() > 48

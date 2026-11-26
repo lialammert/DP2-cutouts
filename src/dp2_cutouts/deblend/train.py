@@ -121,9 +121,11 @@ def latent_stats(sampler, ds, max_batches):
 
 
 # ----------------------------------------------------------------------------- lambda_D1 of C2 (JAX)
-def calibrate_lambda(model, ds, n_batches=8):
+def calibrate_lambda(model, ds, n_batches=8, fallback=1.0):
     # Ratio of the gradient norms of the D2 objective and of the D1 preservation term on the shared Rubin backbone,
     # median over a few batches, at initialisation. JAX backend only (diagnostic; other backends: set a value).
+    # Batches whose norms are not finite and positive are skipped; with none left (the pilot of 2026-11-26 found
+    # none), the fallback value is used and the per-batch numbers are printed and returned for the diagnosis.
     if keras.backend.backend() != "jax":
         raise RuntimeError("deblend.c2.lambda_d1 = auto needs the JAX backend: give a number instead")
     import jax
@@ -139,26 +141,31 @@ def calibrate_lambda(model, ds, n_batches=8):
             return t["d2_nll_e"] + t["d2_kl_rs"]
         return 0.5 * t["d1_kl_s"] + 0.5 * t["d1_kl_r"]
 
-    ratios = []
+    ratios, seen = [], []
     for i in range(min(n_batches, len(ds))):
         x, _ = ds[i]
         x = {k: jax.numpy.asarray(v) for k, v in x.items()}
-        norms = []
+        rec = {}
         for which in ("d2", "d1"):
+            rec[f"{which}_loss"] = float(term(tv, x, which))
             g = jax.grad(lambda p: term(p, x, which))(tv)
-            norms.append(float(np.sqrt(sum(float(jax.numpy.sum(g[k] ** 2)) for k in sel))))
-        if norms[1] > 0:
-            ratios.append(norms[0] / norms[1])
+            rec[f"{which}_grad"] = float(np.sqrt(sum(float(jax.numpy.sum(g[k] ** 2)) for k in sel)))
+        seen.append(rec)
+        if all(np.isfinite(v) for v in rec.values()) and rec["d1_grad"] > 0:
+            ratios.append(rec["d2_grad"] / rec["d1_grad"])
+    print(f"lambda_d1 calibration: {len(sel)} shared variables; per batch {seen}", flush=True)
     if not ratios:
-        raise RuntimeError("lambda_d1 calibration: no usable batch")
-    return float(np.median(ratios)), [float(r) for r in ratios]
+        print(f"lambda_d1 calibration: no usable batch, lambda_d1 = {fallback} (fallback)", flush=True)
+        return float(fallback), [], seen
+    return float(np.median(ratios)), [float(r) for r in ratios], seen
 
 
 # ----------------------------------------------------------------------------- stage builders
-def _loaders(cfg, s, which, seed, workers=4):
+def _loaders(cfg, s, which, seed, workers=None):
     tr = s["train"]
     bs = int(tr["batch_size"])
-    kw = dict(workers=workers, use_multiprocessing=False, max_queue_size=8)
+    workers = int(workers or tr.get("workers", 4))
+    kw = dict(workers=workers, use_multiprocessing=False, max_queue_size=8, block=int(tr.get("read_block", 1)))
     if which == "d1":
         st = data.Store(cfg.dataset_dir("d1"))
         vidx = validation_indices(st.meta, "val", tr.get("val_max_examples"), seed)
@@ -183,7 +190,8 @@ def _loaders(cfg, s, which, seed, workers=4):
         d2_tr, d2_va = _loaders(cfg, s, "d2", seed, workers)
         s1 = dict(s, train=dict(tr, batch_size=b1))
         d1_tr, d1_va = _loaders(cfg, s1, "d1", seed + 1, workers)
-        return data.Mixed(d2_tr, d1_tr, **kw), data.Mixed(d2_va, d1_va)
+        mkw = {k: v for k, v in kw.items() if k != "block"}
+        return data.Mixed(d2_tr, d1_tr, **mkw), data.Mixed(d2_va, d1_va)
     raise ValueError(which)
 
 
@@ -248,9 +256,10 @@ def build(cfg, stage, s, seed, deps):
         model.branches.e_embed.set_weights(enc.e_embed.get_weights())
         frozen, subs = dict(c1_encoder=enc, c1_dec_e=dec_e), dict(branches=model.branches)
         if lam == "auto":
-            val, ratios = calibrate_lambda(model, loaders[0], int(m.get("lambda_batches", 8)))
+            val, ratios, seen = calibrate_lambda(model, loaders[0], int(m.get("lambda_batches", 8)),
+                                                 float(m.get("lambda_fallback", 1.0)))
             model.lambda_d1 = val
-            s["lambda_d1_calibration"] = dict(value=val, ratios=ratios)
+            s["lambda_d1_calibration"] = dict(value=val, ratios=ratios, fallback=not ratios, batches=seen)
     elif stage == "c3":
         s_c1 = json.loads((deps["c1"] / "run.json").read_text())["settings"]
         s_c2 = json.loads((deps["c2"] / "run.json").read_text())["settings"]

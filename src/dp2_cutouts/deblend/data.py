@@ -174,9 +174,14 @@ def d2_keep(cfg, meta):
 
 class Batches(keras.utils.PyDataset):
     # Common machinery: row order, epoch shuffling, augmentation draw.
-    def __init__(self, rows, batch_size, train, seed, **kw):
+    # block (deblend.train.read_block): training batches are made of blocks of `block` consecutive rows of the
+    # store, the blocks shuffled. Rows drawn one by one meant hundreds of scattered reads per batch in arrays of
+    # ~1 TB on Lustre (the pilot of 2026-11-26 ran at 5-9 s per step, the GPU waiting); consecutive rows are read
+    # in one go. A batch of 128 in blocks of 16 still mixes 8 places of the store (patches).
+    def __init__(self, rows, batch_size, train, seed, block=1, **kw):
         super().__init__(**kw)
-        self.rows_all = np.asarray(rows, np.int64)
+        self.rows_all = np.sort(np.asarray(rows, np.int64)) if train else np.asarray(rows, np.int64)
+        self.block = max(int(block or 1), 1)
         self.batch_size = int(batch_size)
         self.train = bool(train)
         self.seed = int(seed)
@@ -184,10 +189,16 @@ class Batches(keras.utils.PyDataset):
         self._order()
 
     def _order(self):
-        if self.train:
-            self.order = np.random.default_rng([self.seed, self.epoch]).permutation(self.rows_all)
-        else:
+        if not self.train:
             self.order = self.rows_all
+            return
+        rng = np.random.default_rng([self.seed, self.epoch])
+        if self.block == 1:
+            self.order = rng.permutation(self.rows_all)
+            return
+        n, k = len(self.rows_all), self.block
+        idx = (rng.permutation(-(-n // k))[:, None] * k + np.arange(k)).ravel()
+        self.order = self.rows_all[idx[idx < n]]
 
     def __len__(self):
         n = len(self.rows_all) // self.batch_size if self.train else -(-len(self.rows_all) // self.batch_size)
