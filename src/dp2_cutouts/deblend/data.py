@@ -128,7 +128,7 @@ def d2_rows(meta, split, centering, keep=None):
 
 def d1_vis_mag_limit(cfg, quantile):
     # VIS magnitude below which a fraction `quantile` of the D1 train galaxies lie (D1 is selected on Rubin S/N).
-    m = Store(cfg.dataset_dir("d1")).meta
+    m = pd.read_parquet(cfg.dataset_dir("d1") / "meta.parquet", columns=["split", "euclid_vis_mag"])
     v = m.loc[m["split"] == "train", "euclid_vis_mag"].to_numpy(float)
     v = v[np.isfinite(v)]
     if len(v) == 0:

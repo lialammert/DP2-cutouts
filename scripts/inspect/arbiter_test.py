@@ -18,6 +18,7 @@
 
 import argparse
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -43,9 +44,10 @@ def run_patch(cfg, pcfg, patch, max_faint, rng):
     from dp2_cutouts.sources.rubin_soda import BANDS
     from dp2_cutouts.stages import stamps
     case = patch_case(pcfg, patch)
-    d1_meta = cfg.dataset_dir("d1") / "shards" / patch["name"] / "meta.parquet"
-    if not d1_meta.exists():
-        return None
+    shard = cfg.dataset_dir("d1") / "shards" / patch["name"]
+    d1_meta = shard / "meta.parquet"
+    if not d1_meta.exists() or not json.loads((shard / "info.json").read_text()).get("n"):
+        return None                                     # no D1 pair in this patch (empty shard, no columns)
     ids = set(pd.read_parquet(d1_meta, columns=["object_id"])["object_id"].astype("int64"))
     if not ids:
         return None

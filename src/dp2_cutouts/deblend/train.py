@@ -121,6 +121,24 @@ def latent_stats(sampler, ds, max_batches):
 
 
 # ----------------------------------------------------------------------------- lambda_D1 of C2 (JAX)
+def nonfinite_report(model, x):
+    # Which inputs, outputs and loss terms of one batch are not finite (C2 gave NaN from its first batch on real
+    # data, 2026-11-26): printed, nothing changed.
+    bad_in = {k: int((~np.isfinite(np.asarray(v))).sum()) for k, v in x.items()
+              if np.issubdtype(np.asarray(v).dtype, np.floating)}
+    out = model(x, training=False)
+    t = model.loss_terms(x, out)
+    bad_out = {k: int((~np.isfinite(np.asarray(v))).sum()) for k, v in out.items()}
+    ext = {k: [float(np.nanmin(np.asarray(v))), float(np.nanmax(np.asarray(v)))] for k, v in out.items()
+           if k.startswith(("L_", "mu_")) or k == "mean_e"}
+    terms = {k: float(v) for k, v in t.items()}
+    print(f"nonfinite inputs {bad_in}", flush=True)
+    print(f"nonfinite outputs {bad_out}", flush=True)
+    print(f"loss terms {terms}", flush=True)
+    print(f"output ranges {ext}", flush=True)
+
+
+
 def calibrate_lambda(model, ds, n_batches=8, fallback=1.0):
     # Ratio of the gradient norms of the D2 objective and of the D1 preservation term on the shared Rubin backbone,
     # median over a few batches, at initialisation. JAX backend only (diagnostic; other backends: set a value).
@@ -144,6 +162,8 @@ def calibrate_lambda(model, ds, n_batches=8, fallback=1.0):
     ratios, seen = [], []
     for i in range(min(n_batches, len(ds))):
         x, _ = ds[i]
+        if i == 0:
+            nonfinite_report(model, x)
         x = {k: jax.numpy.asarray(v) for k, v in x.items()}
         rec = {}
         for which in ("d2", "d1"):

@@ -90,7 +90,9 @@ def main():
     pcfg = cfg.pipeline()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    d1 = Store(Path(args.d1) if args.d1 else cfg.dataset_dir("d1")).meta
+    # D1: only the column used (its full metadata, 1.5 M rows, did not fit in a 10-core job).
+    d1 = pd.read_parquet((Path(args.d1) if args.d1 else cfg.dataset_dir("d1")) / "meta.parquet",
+                         columns=["euclid_object_id"])
     d2 = Store(Path(args.d2) if args.d2 else cfg.dataset_dir("d2")).meta
 
     props, members = [], {s: set() for s in SETS}
