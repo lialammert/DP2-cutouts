@@ -85,8 +85,9 @@
     <div class="group" id="haloGroup" title="halo_ring_z: light measured just outside the masks; above 10 a mask sits on real light (often the halo of a bright target)"><b>Light under masks (halo_ring_z &gt; 10)</b>
       <select id="halo"><option value="all">all</option><option value="yes">yes</option>
         <option value="no">no</option></select></div>
-    <div class="group" id="lostGroup" title="lost_flux_frac: share of the target's own Rubin light hidden by the masks, estimated by point symmetry (scripts/inspect/d1_truncation.py)"><b>Target light under masks</b>
-      <select id="lost"><option value="all">all</option><option value="0.03">&gt; 3 %</option>
+    <div class="group" id="lostGroup" title="lost_flux_frac: share of the target's own Rubin light hidden by the masks, estimated by point symmetry, and its uncertainty lost_flux_sigma (scripts/inspect/d1_truncation.py)"><b>Target light under masks</b>
+      <select id="lost"><option value="all">all</option><option value="sig">&gt; 3 % and &gt; 3&sigma; (really cut)</option>
+        <option value="nosig">&gt; 3 % but &lt; 3&sigma; (could be noise)</option><option value="0.03">&gt; 3 %</option>
         <option value="0.01">&gt; 1 %</option><option value="-0.01">&le; 1 %</option></select></div>
     <div class="group" id="selGroup"><b>D2 selection</b>
       <select id="selection"><option value="all">all</option><option value="selected">selected</option>
@@ -301,7 +302,7 @@ function filter() {
   const splits = checked("split"), fields = checked("field");
   const lo = parseFloat($("magLo").value), hi = parseFloat($("magHi").value);
   const sel = $("selection").value, eo = $("euclidOnly").value, reason = $("reason").value, halo = $("halo").value,
-    lost = parseFloat($("lost").value);
+    lostSel = $("lost").value, lost = parseFloat(lostSel);
   $("selGroup").hidden = kind !== "d2";
   $("eoGroup").hidden = kind === "d2";
   $("haloGroup").hidden = kind === "d2";
@@ -321,6 +322,12 @@ function filter() {
       if ((eo === "yes") !== !!r.euclid_only_mask) return;
     }
     if (kind === "d1r" && reason !== "all" && r.reason !== reason) return;
+    if (kind !== "d2" && (lostSel === "sig" || lostSel === "nosig")) {
+      const f = r.lost_flux_frac, s = r.lost_flux_sigma;
+      if (f === null || f === undefined || s === null || s === undefined) return;
+      const big = f > 0.03, sure = f > 3 * s;
+      if (lostSel === "sig" ? !(big && sure) : !(big && !sure)) return;
+    }
     if (kind !== "d2" && !isNaN(lost)) {
       const f = r.lost_flux_frac;
       if (f === null || f === undefined) return;
