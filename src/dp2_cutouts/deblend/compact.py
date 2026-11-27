@@ -15,13 +15,20 @@
 #         <= 0 or not finite, flux not finite, and for Euclid the neighbour fill)
 # The likelihood ignores the pixels of weight 0, so the loaders lose nothing: same weights, same flux where w > 0,
 # only the noise draw of the masked pixels is fixed instead of new at every epoch (tests/test_deblend.py).
-#   d1   <d1>/compact/euclid.npy (n, 119, 119, 2), every D1 row in D1's order (the selection can change without a new
-#        copy); optional rubin.npy (n, 59, 59, 12) with deblend.data.compact_d1: [euclid, rubin]
-#   d2   <d2>/compact/rows.npy (the D2 rows: targets of deblend.d2_selection in every split, for the centring of
-#        deblend.d2_centering), rubin.npy (m, 59, 59, 12) from the stamps of that centring, euclid.npy (m, 119, 119, 2)
+#   d1   <d1>/compact/euclid.npy (n, 119, 119, 2) and rubin.npy (n, 59, 59, 12) (deblend.data.compact_d1), every D1
+#        row (the selection can change without a new copy)
+#   d2   euclid.npy (m, 119, 119, 2) and rubin.npy (m, 59, 59, 12) of the targets of deblend.d2_selection in every
+#        split, the Rubin stamp of the centring of deblend.d2_centering
+#   rows.npy  the dataset row held at each position of the copy.
+# Layout (version 3, 2026-11-27): the rows are grouped by split (train, val, test, holdout, ...) and shuffled once
+# within each split (fixed seed). Consecutive positions are then unrelated galaxies, so that a loader reads its
+# training batches as a few long contiguous runs, mixed: deblend-bench showed that reading through memory maps,
+# page by page, row by row, capped the reading at ~90 MB/s (325 examples per second with 10 threads); the read side
+# here (Side) reads runs of rows with one pread each.
 # info.json is written last: a copy without it is unfinished. It records the source (rows, size and date of
-# meta.parquet) so that a copy of an older dataset is refused. The copy runs in chunks over `workers` processes and
-# resumes after a walltime cut (<name>.done lists the finished chunks).
+# meta.parquet) so that a copy of an older dataset is refused. The copy runs in chunks over `workers` processes (each
+# reads consecutive dataset rows and writes them to their shuffled positions) and resumes after a walltime cut
+# (progress_*.done lists the finished chunks).
 # Sizes: D1 Euclid 113 kB per row (168 GB for 1.49 M rows; the full Euclid arrays hold 524 kB per row), Rubin
 # 167 kB per row (248 GB); D2 280 kB per target (~40 GB for ~144 000 targets).
 
@@ -34,8 +41,10 @@ from pathlib import Path
 import numpy as np
 
 CHUNK = 2048
-VERSION = 2          # 2: flux of the pixels of weight 0 replaced by a fixed sky-noise draw (copies of version 1 refused)
+VERSION = 3          # 2: weight-0 pixels filled with a fixed sky-noise draw; 3: rows grouped by split and shuffled
 FILL_SEED = 20261127
+LAYOUT_SEED = 20261128
+SPLIT_ORDER = ("train", "val", "test", "holdout")
 
 
 def sky_sigma(w, bad):
@@ -74,6 +83,34 @@ def euclid_fw(f, iv, m, fill, band):
     return np.nan_to_num(f).astype(np.float32), np.where(bad, 0.0, iv).astype(np.float32)
 
 
+def npy_layout(path):
+    # (offset of the data, shape, dtype) of a .npy file, to read or write rows by offset.
+    with open(path, "rb") as f:
+        version = np.lib.format.read_magic(f)
+        if version == (1, 0):
+            shape, _, dtype = np.lib.format.read_array_header_1_0(f)
+        elif version == (2, 0):
+            shape, _, dtype = np.lib.format.read_array_header_2_0(f)
+        else:
+            shape, _, dtype = np.lib.format._read_array_header(f, version)
+        return f.tell(), tuple(shape), np.dtype(dtype)
+
+
+def split_layout(rows, splits, seed=LAYOUT_SEED):
+    # Dataset rows -> the order of the copy: grouped by split (SPLIT_ORDER first, others after, by name), shuffled
+    # within each. Returns (rows in copy order, {split: [first position, end)}).
+    rows, splits = np.asarray(rows, np.int64), np.asarray(splits).astype(str)
+    names = [n for n in SPLIT_ORDER if n in set(splits)] + sorted(set(splits) - set(SPLIT_ORDER))
+    rng = np.random.default_rng(seed)
+    parts, ranges, p0 = [], {}, 0
+    for n in names:
+        r = rows[splits == n]
+        parts.append(rng.permutation(r))
+        ranges[n] = [p0, p0 + len(r)]
+        p0 += len(r)
+    return (np.concatenate(parts) if parts else rows[:0]), ranges
+
+
 def compact_dir(cfg, which):
     return Path(cfg.dataset_dir(which)) / "compact"
 
@@ -102,10 +139,25 @@ def read_info(cfg, which):
 
 
 # ----------------------------------------------------------------------------- copy
+def _write_rows(path, rec, pos):
+    # rec (k, ...) float32 written at positions pos of the .npy file `path` (one pwrite per row).
+    off, shape, _ = npy_layout(path)
+    rb = int(np.prod(shape[1:])) * 4
+    fd = os.open(path, os.O_WRONLY)
+    try:
+        for j, q in enumerate(pos):
+            buf = np.ascontiguousarray(rec[j], np.float32).tobytes()
+            done = 0
+            while done < len(buf):
+                done += os.pwrite(fd, buf[done:], off + int(q) * rb + done)
+    finally:
+        os.close(fd)
+
+
 def _chunk(job):
-    # One chunk: reads the source rows through memory maps (never the Store: it would load the whole metadata in
-    # every process) and writes positions [p0, p0 + len(rows)) of the outputs.
-    k, src, out, rows, p0, sides, band, rkeys = job
+    # One chunk: reads consecutive source rows through memory maps (never the Store: it would load the whole
+    # metadata in every process) and writes each at its position `pos` of the outputs.
+    k, src, out, rows, pos, sides, band, rkeys = job
     src, out = Path(src), Path(out)
     load = {}
 
@@ -119,31 +171,28 @@ def _chunk(job):
         f, iv, m = (np.asarray(a(n)[rows]) for n in ("euclid_flux", "euclid_ivar", "euclid_mask"))
         fill = np.asarray(a("euclid_fill")[rows]) if has_fill else None
         fl, w = euclid_fw(f, iv, m, fill, band)
-        fl = noise_fill(fl, w, ~(w > 0), np.random.default_rng([FILL_SEED, p0, 0]))
-        o = np.load(out / "euclid.npy.tmp", mmap_mode="r+")
-        o[p0:p0 + len(rows)] = np.concatenate([fl, w], axis=-1)
-        o.flush()
-        del o
+        fl = noise_fill(fl, w, ~(w > 0), np.random.default_rng([FILL_SEED, k, 0]))
+        _write_rows(out / "euclid.npy.tmp", np.concatenate([fl, w], axis=-1), pos)
     if "rubin" in sides:
         f, iv, m = (np.asarray(a(n)[rows]) for n in rkeys)
         fl, w = rubin_fw(f, iv, m)
-        fl = noise_fill(fl, w, ~(w > 0), np.random.default_rng([FILL_SEED, p0, 1]))
-        o = np.load(out / "rubin.npy.tmp", mmap_mode="r+")
-        o[p0:p0 + len(rows)] = np.concatenate([fl, w], axis=-1)
-        o.flush()
-        del o
+        fl = noise_fill(fl, w, ~(w > 0), np.random.default_rng([FILL_SEED, k, 1]))
+        _write_rows(out / "rubin.npy.tmp", np.concatenate([fl, w], axis=-1), pos)
     return k
 
 
-def copy(src, out, rows, sides, band, rkeys, shapes, workers, extra_info):
-    # rows: sorted source rows; sides: ("euclid",) / ("euclid", "rubin"); shapes: side -> per-row output shape.
+def copy(src, out, layout, sides, band, rkeys, shapes, workers, extra_info):
+    # layout: the source row of each position of the copy (split_layout); sides: ("euclid", "rubin"); shapes: side ->
+    # per-row output shape. Chunks run over the source rows in increasing order (consecutive reads).
     src, out = Path(src), Path(out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "info.json").unlink(missing_ok=True)
-    rows = np.asarray(rows, np.int64)
-    m = len(rows)
+    layout = np.asarray(layout, np.int64)
+    m = len(layout)
+    order = np.argsort(layout, kind="stable")
+    rows, pos_sorted = layout[order], order            # source rows increasing, and their positions
     n_chunks = -(-m // CHUNK)
-    tag = f"{len(rows)}_{int(rows[0]) if m else 0}_{int(rows[-1]) if m else 0}_{'-'.join(sides)}"
+    tag = f"v{VERSION}_{m}_{int(layout[0]) if m else 0}_{int(layout[-1]) if m else 0}_{'-'.join(sides)}"
     done_file = out / f"progress_{tag}.done"
     done = set()
     for side in sides:
@@ -154,9 +203,9 @@ def copy(src, out, rows, sides, band, rkeys, shapes, workers, extra_info):
     if done_file.exists():
         done = {int(s) for s in done_file.read_text().split()}
         print(f"compact: resuming, {len(done)}/{n_chunks} chunks already copied", flush=True)
-    np.save(out / "rows.npy.tmp.npy", rows)
-    jobs = [(k, str(src), str(out), rows[k * CHUNK:(k + 1) * CHUNK], k * CHUNK, tuple(sides), band, tuple(rkeys))
-            for k in range(n_chunks) if k not in done]
+    np.save(out / "rows.npy.tmp.npy", layout)
+    jobs = [(k, str(src), str(out), rows[k * CHUNK:(k + 1) * CHUNK], pos_sorted[k * CHUNK:(k + 1) * CHUNK],
+             tuple(sides), band, tuple(rkeys)) for k in range(n_chunks) if k not in done]
     t0 = time.time()
     step = max(n_chunks // 50, 1)
     with open(done_file, "a") as log:
@@ -198,15 +247,16 @@ def build(cfg, which, workers=8):
     n_r, b_r, n_e = int(cfg["rubin"]["stamp_px"]), len(cfg["rubin"]["bands"]), int(cfg["euclid"]["stamp_px"])
     shapes = dict(euclid=(n_e, n_e, 2), rubin=(n_r, n_r, 2 * b_r))
     extra = dict(euclid_band=cfg["deblend"]["euclid_band"])
+    import pandas as pd
     if which == "d1":
-        sides = tuple((cfg["deblend"].get("data") or {}).get("compact_d1", ["euclid"]))
-        rows = np.arange(source_stamp(root)["n"], dtype=np.int64)
+        sides = tuple((cfg["deblend"].get("data") or {}).get("compact_d1", ["euclid", "rubin"]))
+        split = pd.read_parquet(root / "meta.parquet", columns=["split"])["split"].to_numpy()
+        rows = np.arange(len(split), dtype=np.int64)
         rkeys = ("rubin_flux", "rubin_ivar", "rubin_mask")
     elif which == "d2":
-        import pandas as pd
-
         from . import data
-        meta = pd.read_parquet(root / "meta.parquet")
+        from ..pairs.store import read_meta
+        meta = read_meta(root, data.D2_TRAIN_COLUMNS)              # the columns present
         keep, sel = data.d2_keep(cfg, meta)
         centering = cfg["deblend"]["d2_centering"]
         rows = np.unique(np.concatenate([data.d2_rows(meta, s, centering, keep) for s in meta["split"].unique()]))
@@ -216,13 +266,16 @@ def build(cfg, which, workers=8):
         extra.update(centering=centering, d2_selection=sel,
                      rows_per_split={str(s): int((meta["split"].to_numpy()[rows] == s).sum())
                                      for s in meta["split"].unique()})
+        split = meta["split"].to_numpy()
         del meta
     else:
         raise ValueError(which)
+    layout, ranges = split_layout(rows, split[rows])
+    extra["split_ranges"] = ranges
     gb = len(rows) * sum(4 * np.prod(shapes[s]) for s in sides) / 1e9
-    print(f"compact {which}: {len(rows):,} rows, sides {list(sides)}, {gb:.0f} GB -> {compact_dir(cfg, which)}",
-          flush=True)
-    return copy(root, compact_dir(cfg, which), rows, sides, band, rkeys, shapes, workers, extra)
+    print(f"compact {which}: {len(rows):,} rows, sides {list(sides)}, {gb:.0f} GB, splits {ranges} -> "
+          f"{compact_dir(cfg, which)}", flush=True)
+    return copy(root, compact_dir(cfg, which), layout, sides, band, rkeys, shapes, workers, extra)
 
 
 # ----------------------------------------------------------------------------- read side
@@ -266,37 +319,100 @@ def memory_limit_bytes():
 
 
 class Side:
-    # Rows of one compact array: memory-mapped, or the rows a loader needs copied into memory.
-    def __init__(self, path, rows_of_copy, need_rows, in_memory, label):
-        arr = np.load(path, mmap_mode="r")
-        self.pos_of = None
-        if rows_of_copy is None:                     # D1: position = row
-            pos = np.asarray(need_rows, np.int64)
-        else:
-            pos = np.searchsorted(rows_of_copy, need_rows)
-        self.rows_copy = rows_of_copy
+    # Rows of one compact array, read with one pread per run of close positions (a gap of at most GAP unneeded rows is
+    # read through), each read at most MAX_READ bytes; or the rows a loader needs, loaded in memory the same way.
+    # Thread-safe (pread takes its offset; no shared file position).
+    GAP = 32
+    MAX_READ = 128 << 20
+
+    def __init__(self, path, pos_of_row, need_rows, in_memory, label):
+        self.path = str(path)
+        self.offset, shape, self.dtype = npy_layout(path)
+        self.row_shape = tuple(shape[1:])
+        self.row_bytes = int(np.prod(self.row_shape)) * self.dtype.itemsize
+        self.fd = os.open(self.path, os.O_RDONLY)
+        self.pos_of = pos_of_row
+        self.local = None
         if in_memory:
-            order = np.sort(np.unique(pos))
+            pos = np.unique(pos_of_row[np.asarray(need_rows, np.int64)])
             t0 = time.time()
-            self.arr = np.empty((len(order), *arr.shape[1:]), arr.dtype)
-            for s in range(0, len(order), 4096):
-                self.arr[s:s + 4096] = arr[order[s:s + 4096]]
-            self.local = order                       # position in the copy -> index in self.arr (searchsorted)
-            print(f"{label}: {len(order):,} rows loaded in memory ({self.arr.nbytes / 1e9:.1f} GB, "
+            self.arr = self.read_positions(pos)
+            self.local = pos                         # position in the copy -> index in self.arr (searchsorted)
+            print(f"{label}: {len(pos):,} rows loaded in memory ({self.arr.nbytes / 1e9:.1f} GB, "
                   f"{time.time() - t0:.0f} s)", flush=True)
-        else:
-            self.arr, self.local = arr, None
+
+    def __del__(self):
+        try:
+            os.close(self.fd)
+        except (OSError, AttributeError):
+            pass
+
+    def _pread_into(self, out, off):
+        # Fills the bytes of the C-contiguous array `out` from file offset `off`.
+        mv = memoryview(out).cast("B")
+        done = 0
+        while done < len(mv):
+            if hasattr(os, "preadv"):
+                n = os.preadv(self.fd, [mv[done:]], off + done)
+            else:
+                b = os.pread(self.fd, len(mv) - done, off + done)
+                mv[done:done + len(b)] = b
+                n = len(b)
+            if n <= 0:
+                raise IOError(f"{self.path}: short read at offset {off + done}")
+            done += n
+
+    def read_positions(self, pos):
+        # pos: sorted unique positions -> (len(pos), *row_shape).
+        pos = np.asarray(pos, np.int64)
+        out = np.empty((len(pos), *self.row_shape), self.dtype)
+        if not len(pos):
+            return out
+        cut = np.flatnonzero(np.diff(pos) > self.GAP + 1) + 1
+        max_rows = max(1, self.MAX_READ // self.row_bytes)
+        for s0, e0 in zip(np.concatenate([[0], cut]), np.concatenate([cut, [len(pos)]])):
+            i = int(s0)
+            while i < e0:
+                j = i + int(np.searchsorted(pos[i:e0], pos[i] + max_rows))
+                a, b = int(pos[i]), int(pos[j - 1])
+                off = self.offset + a * self.row_bytes
+                if b - a == j - 1 - i:                   # dense run: straight into the output
+                    self._pread_into(out[i:j], off)
+                else:
+                    tmp = np.empty((b - a + 1, *self.row_shape), self.dtype)
+                    self._pread_into(tmp, off)
+                    out[i:j] = tmp[pos[i:j] - a]
+                i = j
+        return out
 
     def take(self, rows):
-        rows = np.asarray(rows, np.int64)
-        pos = rows if self.rows_copy is None else np.searchsorted(self.rows_copy, rows)
+        pos = self.pos_of[np.asarray(rows, np.int64)]
         if self.local is not None:
             return self.arr[np.searchsorted(self.local, pos)]
-        order = np.argsort(pos, kind="stable")
-        out = np.asarray(self.arr[pos[order]])
-        back = np.empty_like(order)
-        back[order] = np.arange(len(order))
-        return out[back]
+        u, inv = np.unique(pos, return_inverse=True)
+        return self.read_positions(u)[inv.reshape(-1)]
+
+
+_POS_CACHE = {}
+
+
+def position_key(cfg, which):
+    # Position in the compact copy of every dataset row (-1: not in it), or None when the copy is off or unusable.
+    # Shared by the loaders of a process; their training order follows it so that blocks are contiguous runs.
+    if not (cfg["deblend"].get("data") or {}).get("compact", False):
+        return None
+    info = read_info(cfg, which)
+    if info is None:
+        return None
+    p = compact_dir(cfg, which) / "rows.npy"
+    key = (str(p), p.stat().st_mtime_ns)
+    if key not in _POS_CACHE:
+        layout = np.load(p)
+        pos = np.full(int(info["source"]["n"]), -1, np.int64)
+        pos[layout] = np.arange(len(layout))
+        _POS_CACHE.clear()
+        _POS_CACHE[key] = pos
+    return _POS_CACHE[key]
 
 
 def open_sides(cfg, which, need_rows, train):
@@ -314,15 +430,12 @@ def open_sides(cfg, which, need_rows, train):
         print(f"{which}: no up-to-date compact copy in {d}, reading the original arrays", flush=True)
         return {}
     need = np.asarray(need_rows, np.int64)
-    rows_copy = None
-    if which == "d2":
-        rows_copy = np.load(d / "rows.npy")
-        pos = np.searchsorted(rows_copy, need)
-        ok = (pos < len(rows_copy)) & (rows_copy[np.minimum(pos, len(rows_copy) - 1)] == need)
-        if not ok.all():
-            print(f"d2: {int((~ok).sum()):,} of the {len(need):,} rows are not in the compact copy (another selection?):"
-                  " reading the original arrays", flush=True)
-            return {}
+    pos_of = position_key(cfg, which)
+    ok = pos_of[need] >= 0
+    if not ok.all():
+        print(f"{which}: {int((~ok).sum()):,} of the {len(need):,} rows are not in the compact copy (another "
+              "selection?): reading the original arrays", flush=True)
+        return {}
     mem = train and which in (opt.get("in_memory") or [])
     if mem:
         size = len(np.unique(need)) * int(info["bytes_per_row"])
@@ -332,4 +445,4 @@ def open_sides(cfg, which, need_rows, train):
             print(f"{which}: {size / 1e9:.1f} GB to load > {frac:.0%} of the {lim / 1e9:.0f} GB this job may use: "
                   "kept memory-mapped", flush=True)
             mem = False
-    return {s: Side(d / f"{s}.npy", rows_copy, need, mem, f"{which} compact {s}") for s in info["sides"]}
+    return {s: Side(d / f"{s}.npy", pos_of, need, mem, f"{which} compact {s}") for s in info["sides"]}

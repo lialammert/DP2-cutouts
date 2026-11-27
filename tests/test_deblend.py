@@ -307,6 +307,20 @@ def test_evaluations_run_on_the_trained_campaign(cfg):
     assert {"rvae", "k1k2", "c1"} <= set(d1["paths"]) and set(d1["probabilistic"]) == {"A", "B", "C"}
 
 
+def test_side_reads_runs_of_positions_with_pread(tmp_path):
+    # compact.Side: any set of positions, dense runs, gaps read through or skipped, long runs cut: same rows as numpy.
+    from dp2_cutouts.deblend import compact
+    a = np.arange(500 * 3 * 3 * 2, dtype=np.float32).reshape(500, 3, 3, 2)
+    np.save(tmp_path / "x.npy", a)
+    pos_of = np.arange(500)[::-1].copy()                  # row r is at position 499 - r
+    side = compact.Side(tmp_path / "x.npy", pos_of, [], False, "t")
+    side.MAX_READ = 7 * side.row_bytes                    # force cut runs
+    for rows in ([3], [0, 1, 2, 3], [5, 400, 6, 499, 7], list(range(0, 500, 3)), list(range(100, 160))):
+        np.testing.assert_array_equal(side.take(rows), a[pos_of[rows]])
+    mem = compact.Side(tmp_path / "x.npy", pos_of, list(range(50, 90)), True, "t")
+    np.testing.assert_array_equal(mem.take([60, 50, 89]), a[pos_of[[60, 50, 89]]])
+
+
 def test_block_order_reads_consecutive_rows():
     # deblend.train.read_block: a training epoch visits every row once, in shuffled blocks of consecutive rows.
     from dp2_cutouts.deblend.data import Batches
@@ -427,6 +441,11 @@ def test_compact_copies_give_the_same_batches_up_to_the_fixed_noise_draw(cfg, tm
     info1 = compact.build(on, "d1", workers=1)
     info2 = compact.build(on, "d2", workers=2)                # through the process pool
     assert info1["rows"] == 24 and set(info1["sides"]) == {"euclid", "rubin"}
+    # Layout: grouped by split (train first), shuffled within each.
+    lay = np.load(root / "datasets" / "d1" / "compact" / "rows.npy")
+    assert info1["split_ranges"] == {"train": [0, 16], "val": [16, 24]}
+    assert sorted(lay[:16]) == list(range(16)) and sorted(lay[16:]) == list(range(16, 24))
+    assert not (lay[:16] == np.arange(16)).all()
     assert info2["rows"] == len(np.unique(np.concatenate([data.D2Batches(off, s, 4, False).rows_all
                                                           for s in ("train", "val")])))
     for train in (True, False):
@@ -434,6 +453,12 @@ def test_compact_copies_give_the_same_batches_up_to_the_fixed_noise_draw(cfg, tm
             a, b = cls(off, split, 4, train, seed=2), cls(on, split, 4, train, seed=2)
             assert not a.sides and set(b.sides) == {"euclid", "rubin"}
             assert (b.sides["euclid"].local is not None) == train
+            assert sorted(a.rows_all) == sorted(b.rows_all)
+            if train:
+                # Training order follows the positions in the (shuffled) copy; same rows, same draws per batch.
+                key = compact.position_key(on, "d1" if cls is data.D1Batches else "d2")
+                assert (np.diff(key[b.rows_all]) > 0).all()
+                a.order = b.order.copy()
             for i in range(len(a)):
                 xa, xb = a[i][0], b[i][0]
                 assert set(xa) == set(xb)

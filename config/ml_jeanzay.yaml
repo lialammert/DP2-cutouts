@@ -360,7 +360,8 @@ deblend:
     early_stopping_patience: 3     # in epochs (an epoch of the full D1 is ~9 000 steps)
     backup_every_steps: 2000       # resumable backups: 2 h dev-QoS jobs chained
     val_max_examples: 20000
-    read_block: 16                 # training batches from blocks of 16 consecutive rows (deblend/data.py Batches):
+    read_block: auto               # compact copy (shuffled): batch / 4 consecutive rows per read; else 16 rows
+                                   # (deblend/data.py Batches). Before: blocks of 16 consecutive rows:
                                    # the pilot read rows one by one, 5-9 s per step on Lustre
     workers: 8                     # threads preparing batches ahead of the GPU
   rubin_vae: {beta: 1.0}

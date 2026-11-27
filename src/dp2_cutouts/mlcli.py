@@ -140,7 +140,7 @@ def main(argv=None):
     ap.add_argument("--time-budget-min", type=float,
                     help="deblend-train: stop after that many minutes without finishing, resumable (default: "
                          "$DEBLEND_TIME_BUDGET_MIN, set by deblend.slurm)")
-    ap.add_argument("--stages", nargs="+", help="deblend-bench: stages to time (default: all trainable)")
+    ap.add_argument("--stages", nargs="+", help="deblend-bench: stages to time (default: all trainable; none: loaders only)")
     ap.add_argument("--batch-sizes", nargs="+", type=int, help="deblend-bench: batch sizes (default 32 ... 2048)")
     ap.add_argument("--loader-batches", type=int, default=30, help="deblend-bench: batches read per loader timing")
     ap.add_argument("--steps", type=int, default=20, help="deblend-bench: timed optimisation steps per batch size")

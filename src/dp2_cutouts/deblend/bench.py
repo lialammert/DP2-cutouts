@@ -143,7 +143,8 @@ def loaders(cfg, sizes, n_batches, workers):
         c = _cfg(cfg, **opts)
         cls, cols = (data.D1Batches, data.D1_TRAIN_COLUMNS) if which == "d1" else \
             (data.D2Batches, data.D2_TRAIN_COLUMNS)
-        kw = dict(seed=0, block=int(cfg["deblend"]["train"].get("read_block", 1)), meta_columns=cols)
+        blk = cfg["deblend"]["train"].get("read_block", 1)
+        kw = dict(seed=0, block=blk if blk == "auto" else int(blk or 1), meta_columns=cols)
         if label == "compact, in memory":
             # 20 000 training targets copied into memory (5.6 GB): the speed of in-memory reading without the
             # whole D2 train split, which may not fit the job (40 GB on a V100 job of 10 cores).
@@ -164,7 +165,7 @@ def loaders(cfg, sizes, n_batches, workers):
 
 
 def run(cfg, stages=None, sizes=None, loader_batches=30, steps=20):
-    stages = list(stages or train.STAGES)
+    stages = [] if list(stages or []) == ["none"] else list(stages or train.STAGES)   # --stages none: loaders only
     sizes = [int(b) for b in (sizes or BATCH_SIZES)]
     workers = int(os.environ.get("SLURM_CPUS_PER_TASK") or cfg["deblend"]["train"].get("workers", 8))
     lim = compact.memory_limit_bytes()

@@ -37,7 +37,7 @@ import pandas as pd
 
 from ..ml.data import aug_images, aug_mask2d
 from ..pairs.store import Store
-from .compact import euclid_fw, noise_fill, open_sides, rubin_fw  # noqa: F401 (noise_fill: also used by callers)
+from .compact import euclid_fw, noise_fill, open_sides, position_key, rubin_fw  # noqa: F401 (noise_fill: callers)
 
 
 def asinh_norm(f, s):
@@ -198,11 +198,22 @@ class Batches(keras.utils.PyDataset):
     # store, the blocks shuffled. Rows drawn one by one meant hundreds of scattered reads per batch in arrays of
     # ~1 TB on Lustre (the pilot of 2026-11-26 ran at 5-9 s per step, the GPU waiting); consecutive rows are read
     # in one go. A batch of 128 in blocks of 16 still mixes 8 places of the store (patches).
-    def __init__(self, rows, batch_size, train, seed, block=1, **kw):
+    # key: position of every dataset row in the compact copy (compact.position_key): training rows are then ordered
+    # by position, so that a block is one contiguous run of an already shuffled copy. block "auto": batch_size / 4
+    # (a batch mixes 4 runs; with the compact copy only, consecutive rows of the original arrays are one patch).
+    def __init__(self, rows, batch_size, train, seed, block=1, key=None, **kw):
         super().__init__(**kw)
-        self.rows_all = np.sort(np.asarray(rows, np.int64)) if train else np.asarray(rows, np.int64)
-        self.block = max(int(block or 1), 1)
+        rows = np.asarray(rows, np.int64)
+        if not train:
+            self.rows_all = rows
+        elif key is not None:
+            self.rows_all = rows[np.argsort(key[rows], kind="stable")]
+        else:
+            self.rows_all = np.sort(rows)
         self.batch_size = int(batch_size)
+        if block == "auto":
+            block = max(self.batch_size // 4, 1) if key is not None else 16
+        self.block = max(int(block or 1), 1)
         self.train = bool(train)
         self.seed = int(seed)
         self.epoch = 0
@@ -315,7 +326,7 @@ class D1Batches(Batches):
         self.st = Store(cfg.dataset_dir("d1"), meta_columns, shared=True)
         self.keep, self.selection = d1_keep(cfg, self.st.meta)
         rows = np.flatnonzero((self.st.meta["split"] == split).to_numpy() & self.keep) if indices is None else indices
-        super().__init__(rows, batch_size, train, seed, **kw)
+        super().__init__(rows, batch_size, train, seed, key=position_key(cfg, "d1"), **kw)
         self.prep = Prepare(cfg, load_norm_stats(cfg))
         self.fields = tuple(fields)
         self.has_fill = "euclid_fill" in self.st.names()
@@ -381,7 +392,7 @@ class D2Batches(Batches):
         self.centering = cfg["deblend"]["d2_centering"]
         keep, self.selection = d2_keep(cfg, self.st.meta)
         rows = d2_rows(self.st.meta, split, self.centering, keep) if indices is None else indices
-        super().__init__(rows, batch_size, train, seed, **kw)
+        super().__init__(rows, batch_size, train, seed, key=position_key(cfg, "d2"), **kw)
         self.prep = Prepare(cfg, load_norm_stats(cfg))
         self.fields = tuple(fields)
         sfx = "_rc" if self.centering == "rubin" else ""

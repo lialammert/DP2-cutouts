@@ -205,7 +205,9 @@ def _loaders(cfg, s, which, seed, workers=None):
     tr = s["train"]
     bs = int(tr["batch_size"])
     workers = int(workers or tr.get("workers", 4))
-    kw = dict(workers=workers, use_multiprocessing=False, max_queue_size=8, block=int(tr.get("read_block", 1)))
+    blk = tr.get("read_block", 1)
+    kw = dict(workers=workers, use_multiprocessing=False, max_queue_size=8,
+              block=blk if blk == "auto" else int(blk or 1))
     if which == "d1":
         cols = data.D1_TRAIN_COLUMNS
         st = data.Store(cfg.dataset_dir("d1"), cols, shared=True)
