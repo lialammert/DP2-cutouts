@@ -139,7 +139,17 @@ class TriLGaussianHead(layers.Layer):
     def __init__(self, d, **kw):
         super().__init__(**kw)
         self.d = int(d)
-        self.dense = layers.Dense(self.d + tril_size(self.d))
+        # Starts at L = identity, mu = 0: a zero kernel (it learns from the first step on) and a bias putting every
+        # diagonal at softplus(0.5413) = 1. With a
+        # default initialisation, real-data embeddings gave off-diagonal entries of +-7 over diagonals down to 1e-4;
+        # the triangular solves of the KL divergences then amplified by ~(7 / 1e-4)^k and C2 started at KL ~1e35 / inf
+        # (pilot of 2026-11-27).
+        rows, cols = np.tril_indices(self.d)
+        bias = np.zeros(self.d + tril_size(self.d), np.float32)
+        bias[self.d + np.flatnonzero(rows == cols)] = np.log(np.e - 1.0)
+        self.dense = layers.Dense(self.d + tril_size(self.d),
+                                  kernel_initializer="zeros",
+                                  bias_initializer=keras.initializers.Constant(bias))
 
     def call(self, h):
         p = self.dense(h)

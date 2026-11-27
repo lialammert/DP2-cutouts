@@ -321,3 +321,20 @@ def test_d1_vis_mag_limit_reads_the_d1_metadata(tmp_path):
     c = MLConfig(raw=dict(ml_root=str(tmp_path)), path=tmp_path / "cfg.yaml")
     assert c.dataset_dir("d1") == d
     assert d1_vis_mag_limit(c, 1.0) == 24.0 and d1_vis_mag_limit(c, 0.0) == 22.0
+
+
+def test_full_covariance_head_starts_well_conditioned():
+    # TriLGaussianHead starts near L = identity even on large embeddings, so that the KL divergences between two
+    # freshly initialised heads (C2 teacher / student) are finite and moderate (C2 started at KL ~1e35 on real data).
+    from dp2_cutouts.deblend.layers import TriLGaussianHead
+    from dp2_cutouts.deblend.likelihood import kl_tril_tril
+    rng = np.random.default_rng(0)
+    h = rng.normal(0, 10, (16, 256)).astype(np.float32)
+    a, b = TriLGaussianHead(32), TriLGaussianHead(32)
+    (mu_a, La), (mu_b, Lb) = a(h), b(h)
+    La, Lb = np.asarray(La), np.asarray(Lb)
+    diag = np.diagonal(La, axis1=1, axis2=2)
+    off = La - np.einsum("bi,ij->bij", diag, np.eye(32))
+    assert np.allclose(diag, 1.0, atol=0.1) and np.abs(off).max() < 0.1
+    kl = np.asarray(kl_tril_tril(mu_a, La, mu_b, Lb))
+    assert np.isfinite(kl).all() and kl.max() < 10.0

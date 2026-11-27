@@ -184,6 +184,8 @@ def rejected_candidates(cfg, pcfg, patches, d1_shards):
         names = set(pq.read_schema(path).names)
         t = pd.read_parquet(path, columns=[c for c in keep_cols if c in names])
         t = t[owned(t, p).to_numpy()].reset_index(drop=True)
+        if "euclid_object_id" in t:                     # nullable 64-bit: concatenating with an all-missing column
+            t["euclid_object_id"] = t["euclid_object_id"].astype("Int64")   # of another patch made it float64
         t["reason"] = first_failure(t)
         rej = d1_shards / p["name"] / "rejected.parquet"
         if rej.exists():
