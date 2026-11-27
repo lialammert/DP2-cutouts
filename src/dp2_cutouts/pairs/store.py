@@ -155,14 +155,37 @@ def repair_meta(shard_dirs, out_dir):
     return fixed
 
 
+_META_CACHE = {}
+
+
+def read_meta(path, columns=None, shared=False):
+    # meta.parquet of a dataset, all columns or `columns` (those present). shared: one DataFrame per process for the
+    # same file and columns, never modified by its users (the deblending loaders and evaluations: the full D1
+    # metadata, 1.5 M rows, read three times by one training did not fit the 40 GB of a V100 job, 2026-11-27).
+    path = Path(path) / "meta.parquet"
+    if columns is not None:
+        import pyarrow.parquet as pq
+        have = set(pq.read_schema(path).names)
+        columns = [c for c in dict.fromkeys(columns) if c in have]
+    st = path.stat()
+    key = (str(path), None if columns is None else tuple(columns), st.st_mtime_ns, st.st_size)
+    if shared and key in _META_CACHE:
+        return _META_CACHE[key]
+    meta = pd.read_parquet(path, columns=columns)
+    if shared:
+        _META_CACHE[key] = meta
+    return meta
+
+
 class Store:
-    # Read side: memory-mapped arrays, metadata in RAM (one row of scalars per example).
-    def __init__(self, path):
+    # Read side: memory-mapped arrays, metadata in RAM (one row of scalars per example; `columns`: only those;
+    # `shared`: see read_meta).
+    def __init__(self, path, columns=None, shared=False):
         self.path = Path(path)
         if not (self.path / "info.json").exists():
             raise FileNotFoundError(f"{self.path} is not a finished dataset (no info.json)")
         self.info = json.loads((self.path / "info.json").read_text())
-        self.meta = pd.read_parquet(self.path / "meta.parquet")
+        self.meta = read_meta(self.path, columns, shared)
         self._arrays = {}
 
     def __len__(self):

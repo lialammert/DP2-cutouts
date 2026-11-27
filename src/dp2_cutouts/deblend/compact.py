@@ -8,11 +8,13 @@
 # likelihood weight. On Lustre the reads, not the GPU, set the pace (2-3 s per step after the block reading).
 #
 # What: per example and side, two quantities only, in one float32 array (..., [flux channels, weight channels]):
-#   flux  the stored flux with NaN / inf set to 0 (as the loaders already returned it)
+#   flux  the stored flux on the pixels of weight > 0; on the others (masked, neighbours) a sky-noise draw at the
+#         median sky sigma of that image and band, made once here (fixed seed) instead of at every batch: the
+#         network input is then asinh(flux) only
 #   w     the likelihood weight: ivar on the pixels that are observations of the target, 0 elsewhere (MMU mask, ivar
 #         <= 0 or not finite, flux not finite, and for Euclid the neighbour fill)
-# This loses nothing the loaders use: they derive every input from (flux, w) (data.Prepare.rubin_w / euclid_w,
-# tests/test_deblend.py checks that the batches are identical, bit for bit).
+# The likelihood ignores the pixels of weight 0, so the loaders lose nothing: same weights, same flux where w > 0,
+# only the noise draw of the masked pixels is fixed instead of new at every epoch (tests/test_deblend.py).
 #   d1   <d1>/compact/euclid.npy (n, 119, 119, 2), every D1 row in D1's order (the selection can change without a new
 #        copy); optional rubin.npy (n, 59, 59, 12) with deblend.data.compact_d1: [euclid, rubin]
 #   d2   <d2>/compact/rows.npy (the D2 rows: targets of deblend.d2_selection in every split, for the centring of
@@ -32,7 +34,29 @@ from pathlib import Path
 import numpy as np
 
 CHUNK = 2048
-VERSION = 1
+VERSION = 2          # 2: flux of the pixels of weight 0 replaced by a fixed sky-noise draw (copies of version 1 refused)
+FILL_SEED = 20261127
+
+
+def sky_sigma(w, bad):
+    # Median sky sigma 1 / sqrt(w) of the valid pixels, per image and band: (..., H, W, C) -> (..., C); 0 if none.
+    ok = ~bad & (w > 0) & np.isfinite(w)
+    s = np.where(ok, 1.0 / np.sqrt(np.where(ok, w, 1.0)), np.nan)
+    with np.errstate(all="ignore"):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            sig = np.nanmedian(s, axis=(-3, -2))
+    return np.nan_to_num(sig, nan=0.0).astype(np.float32)
+
+
+def noise_fill(flux, ivar, bad, rng):
+    # flux, ivar (..., H, W, C), bad (..., H, W, C) bool -> copy of flux with the bad pixels drawn from N(0, sigma),
+    # sigma = median sky sigma of the valid pixels of the same image and band (0 if none). Vectorised.
+    noise = rng.standard_normal(flux.shape).astype(np.float32) * sky_sigma(ivar, bad)[..., None, None, :]
+    f = np.where(bad, noise, flux).astype(np.float32)
+    f[~np.isfinite(f)] = 0.0
+    return f
 
 
 def rubin_fw(f, iv, m):
@@ -95,6 +119,7 @@ def _chunk(job):
         f, iv, m = (np.asarray(a(n)[rows]) for n in ("euclid_flux", "euclid_ivar", "euclid_mask"))
         fill = np.asarray(a("euclid_fill")[rows]) if has_fill else None
         fl, w = euclid_fw(f, iv, m, fill, band)
+        fl = noise_fill(fl, w, ~(w > 0), np.random.default_rng([FILL_SEED, p0, 0]))
         o = np.load(out / "euclid.npy.tmp", mmap_mode="r+")
         o[p0:p0 + len(rows)] = np.concatenate([fl, w], axis=-1)
         o.flush()
@@ -102,6 +127,7 @@ def _chunk(job):
     if "rubin" in sides:
         f, iv, m = (np.asarray(a(n)[rows]) for n in rkeys)
         fl, w = rubin_fw(f, iv, m)
+        fl = noise_fill(fl, w, ~(w > 0), np.random.default_rng([FILL_SEED, p0, 1]))
         o = np.load(out / "rubin.npy.tmp", mmap_mode="r+")
         o[p0:p0 + len(rows)] = np.concatenate([fl, w], axis=-1)
         o.flush()
@@ -160,8 +186,8 @@ def copy(src, out, rows, sides, band, rkeys, shapes, workers, extra_info):
     info = dict(version=VERSION, source=source_stamp(src), rows=int(m), sides=list(sides),
                 arrays={s: [m, *shapes[s]] for s in sides},
                 bytes_per_row=int(sum(4 * np.prod(shapes[s]) for s in sides)),
-                content="float32 (..., [flux channels, weight channels]); weight = ivar on observed target pixels, "
-                        "0 elsewhere", **extra_info)
+                filled=True, content="float32 (..., [flux channels, weight channels]); weight = ivar on observed target pixels, "
+                        "0 elsewhere, where the flux is a fixed sky-noise draw", **extra_info)
     (out / "info.json").write_text(json.dumps(info, indent=2))
     return info
 

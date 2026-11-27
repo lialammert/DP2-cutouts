@@ -29,6 +29,7 @@
 # copied into memory when they fit.
 
 import json
+import time
 
 import keras
 import numpy as np
@@ -36,27 +37,11 @@ import pandas as pd
 
 from ..ml.data import aug_images, aug_mask2d
 from ..pairs.store import Store
-from .compact import euclid_fw, open_sides, rubin_fw
+from .compact import euclid_fw, noise_fill, open_sides, rubin_fw  # noqa: F401 (noise_fill: also used by callers)
 
 
 def asinh_norm(f, s):
     return np.tanh(np.arcsinh(2.5 * f / s)).astype(np.float32)
-
-
-def noise_fill(flux, ivar, bad, rng):
-    # flux, ivar (..., H, W, C), bad (..., H, W, C) bool -> copy of flux with bad pixels drawn from N(0, sigma),
-    # sigma = median sky sigma of the valid pixels of the same image and band (0 if none).
-    f = flux.copy()
-    good = ~bad & (ivar > 0) & np.isfinite(ivar)
-    sig = np.zeros(flux.shape[:-3] + (flux.shape[-1],), np.float32)
-    for idx in np.ndindex(*flux.shape[:-3], flux.shape[-1]):
-        lead, c = idx[:-1], idx[-1]
-        iv = ivar[lead][..., c][good[lead][..., c]]
-        sig[idx] = float(np.median(1.0 / np.sqrt(iv))) if iv.size else 0.0
-    noise = rng.standard_normal(flux.shape).astype(np.float32) * sig[..., None, None, :]
-    f[bad] = noise[bad]
-    f[~np.isfinite(f)] = 0.0
-    return f
 
 
 def compute_norm_stats(cfg, max_examples=20000, seed=0):
@@ -221,7 +206,15 @@ class Batches(keras.utils.PyDataset):
         self.train = bool(train)
         self.seed = int(seed)
         self.epoch = 0
+        self.timers = None                  # {phase: seconds} when profiling (deblend-bench, one thread)
         self._order()
+
+    def tick(self, name, t0):
+        # Adds the time since t0 to phase `name` when profiling; returns now.
+        t = time.perf_counter()
+        if self.timers is not None:
+            self.timers[name] = self.timers.get(name, 0.0) + t - t0
+        return t
 
     def _order(self):
         if not self.train:
@@ -256,8 +249,18 @@ class Batches(keras.utils.PyDataset):
 
 
 def _apply_aug(a, ks, flips, two_d=False):
+    # The same rotation / flip on every image of an example; applied per group of examples sharing it (8 groups at
+    # most, square stamps) instead of example by example.
     f = aug_mask2d if two_d else aug_images
-    return np.stack([f(a[j], int(ks[j]), bool(flips[j])) for j in range(len(a))]).copy()
+    a = np.asarray(a)
+    out = np.empty_like(a)
+    ks, flips = np.asarray(ks, int), np.asarray(flips, bool)
+    for k in np.unique(ks):
+        for fl in (False, True):
+            sel = np.flatnonzero((ks == k) & (flips == fl))
+            if len(sel):
+                out[sel] = f(a[sel], int(k), bool(fl))
+    return out
 
 
 class Prepare:
@@ -269,13 +272,14 @@ class Prepare:
 
     # Everything derives from (flux, w), w = likelihood weight (compact.py): the stored arrays and the compact copies
     # give the same batches.
-    def rubin_w(self, f, w, rng):
-        x = asinh_norm(noise_fill(f, w, ~(w > 0), rng), self.norm.r_scale)
+    # filled: the pixels of weight 0 already hold a sky-noise draw (compact copies): the input is asinh(flux) only.
+    def rubin_w(self, f, w, rng, filled=False):
+        x = asinh_norm(f if filled else noise_fill(f, w, ~(w > 0), rng), self.norm.r_scale)
         return x, f, w
 
-    def euclid_w(self, f, w, rng):
+    def euclid_w(self, f, w, rng, filled=False):
         ok = w > 0
-        x = asinh_norm(noise_fill(f, w, ~ok, rng), self.norm.e_scale)
+        x = asinh_norm(f if filled else noise_fill(f, w, ~ok, rng), self.norm.e_scale)
         return np.concatenate([x, ok.astype(np.float32)], axis=-1), f, w
 
     def rubin(self, f, iv, m, rng):
@@ -285,11 +289,18 @@ class Prepare:
         return self.euclid_w(*euclid_fw(f, iv, m, fill, self.vis), rng)
 
 
+# Metadata columns a training needs (the evaluations read every column): split, the selections, the D2 targets.
+D1_TRAIN_COLUMNS = ("split", "object_id")
+D2_TRAIN_COLUMNS = ("split", "group_id", "euclid_object_id", "rc_offset_x_px", "rc_offset_y_px", "euclid_vis_mag",
+                    "sep_delta_e", "sep_centroid_shift_arcsec", "sep_rel_size_change", "sep_rel_flux_change")
+
+
 class D1Batches(Batches):
     # D1 examples: Rubin isolated R and Euclid isolated E. fields: which of "rubin", "euclid" to read.
+    # meta_columns: metadata columns to load (None: all), shared between the loaders of one process.
     def __init__(self, cfg, split, batch_size, train, seed=0, indices=None, fields=("rubin", "euclid"),
-                 mask_pool=None, mask_prob=0.0, **kw):
-        self.st = Store(cfg.dataset_dir("d1"))
+                 mask_pool=None, mask_prob=0.0, meta_columns=None, **kw):
+        self.st = Store(cfg.dataset_dir("d1"), meta_columns, shared=True)
         self.keep, self.selection = d1_keep(cfg, self.st.meta)
         rows = np.flatnonzero((self.st.meta["split"] == split).to_numpy() & self.keep) if indices is None else indices
         super().__init__(rows, batch_size, train, seed, **kw)
@@ -310,16 +321,26 @@ class D1Batches(Batches):
         x = {}
         if "rubin" in self.fields:
             if "rubin" in self.sides:
-                fw = _apply_aug(self.sides["rubin"].take(rows), ks, fl)
+                t = time.perf_counter()
+                fw = self.sides["rubin"].take(rows)
+                t = self.tick("read", t)
+                fw = _apply_aug(fw, ks, fl)
+                t = self.tick("augment", t)
                 h = fw.shape[-1] // 2
-                x["r_in"], x["r_flux"], x["r_w"] = self.prep.rubin_w(fw[..., :h], fw[..., h:], rng)
+                x["r_in"], x["r_flux"], x["r_w"] = self.prep.rubin_w(fw[..., :h], fw[..., h:], rng, filled=True)
+                self.tick("prepare", t)
             else:
                 f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl)
                             for k in ("rubin_flux", "rubin_ivar", "rubin_mask"))
                 x["r_in"], x["r_flux"], x["r_w"] = self.prep.rubin(f, iv, m, rng)
         if "euclid" in self.fields:
-            if "euclid" in self.sides:
-                fw = _apply_aug(self.sides["euclid"].take(rows), ks, fl)
+            filled = "euclid" in self.sides
+            if filled:
+                t = time.perf_counter()
+                fw = self.sides["euclid"].take(rows)
+                t = self.tick("read", t)
+                fw = _apply_aug(fw, ks, fl)
+                self.tick("augment", t)
                 f, w = fw[..., :1], fw[..., 1:]
             else:
                 f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in ("euclid_flux", "euclid_ivar",
@@ -333,14 +354,18 @@ class D1Batches(Batches):
                 extra = np.where(use[:, None, None], self.mask_pool[pick], False)
                 w = np.where(extra[..., None], 0.0, w).astype(np.float32)
                 x["e_aug_masked"] = use.astype(np.float32)
-            x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid_w(f, w, rng)
+                filled = filled and not use.any()        # the added masked pixels need their noise draw
+            t = time.perf_counter()
+            x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid_w(f, w, rng, filled=filled)
+            self.tick("prepare", t)
         return x, np.zeros((len(rows),), np.float32)
 
 
 class D2Batches(Batches):
     # D2 examples: Rubin blend X (input) and the masked Euclid central E_c (teacher input / likelihood target).
-    def __init__(self, cfg, split, batch_size, train, seed=0, indices=None, fields=("blend", "euclid"), **kw):
-        self.st = Store(cfg.dataset_dir("d2"))
+    def __init__(self, cfg, split, batch_size, train, seed=0, indices=None, fields=("blend", "euclid"),
+                 meta_columns=None, **kw):
+        self.st = Store(cfg.dataset_dir("d2"), meta_columns, shared=True)
         self.centering = cfg["deblend"]["d2_centering"]
         keep, self.selection = d2_keep(cfg, self.st.meta)
         rows = d2_rows(self.st.meta, split, self.centering, keep) if indices is None else indices
@@ -358,16 +383,26 @@ class D2Batches(Batches):
         x = {}
         if "blend" in self.fields:
             if "rubin" in self.sides:
-                fw = _apply_aug(self.sides["rubin"].take(rows), ks, fl)
+                t = time.perf_counter()
+                fw = self.sides["rubin"].take(rows)
+                t = self.tick("read", t)
+                fw = _apply_aug(fw, ks, fl)
+                t = self.tick("augment", t)
                 h = fw.shape[-1] // 2
-                x["x_in"], x["x_flux"], x["x_w"] = self.prep.rubin_w(fw[..., :h], fw[..., h:], rng)
+                x["x_in"], x["x_flux"], x["x_w"] = self.prep.rubin_w(fw[..., :h], fw[..., h:], rng, filled=True)
+                self.tick("prepare", t)
             else:
                 f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in self.rkeys)
                 x["x_in"], x["x_flux"], x["x_w"] = self.prep.rubin(f, iv, m, rng)
         if "euclid" in self.fields:
             if "euclid" in self.sides:
-                fw = _apply_aug(self.sides["euclid"].take(rows), ks, fl)
-                x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid_w(fw[..., :1], fw[..., 1:], rng)
+                t = time.perf_counter()
+                fw = self.sides["euclid"].take(rows)
+                t = self.tick("read", t)
+                fw = _apply_aug(fw, ks, fl)
+                t = self.tick("augment", t)
+                x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid_w(fw[..., :1], fw[..., 1:], rng, filled=True)
+                self.tick("prepare", t)
             else:
                 f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in ("euclid_flux", "euclid_ivar",
                                                                               "euclid_mask"))

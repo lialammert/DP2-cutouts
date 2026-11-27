@@ -207,7 +207,8 @@ def _loaders(cfg, s, which, seed, workers=None):
     workers = int(workers or tr.get("workers", 4))
     kw = dict(workers=workers, use_multiprocessing=False, max_queue_size=8, block=int(tr.get("read_block", 1)))
     if which == "d1":
-        st = data.Store(cfg.dataset_dir("d1"))
+        cols = data.D1_TRAIN_COLUMNS
+        st = data.Store(cfg.dataset_dir("d1"), cols, shared=True)
         keep, info = data.d1_keep(cfg, st.meta)
         if info:
             print(f"D1 selection (deblend.d1_selection): {info}")
@@ -217,18 +218,20 @@ def _loaders(cfg, s, which, seed, workers=None):
         fields = s.get("fields", ("rubin", "euclid"))
         pool = s.get("mask_pool")
         prob = float(s["model"].get("mask_augment_prob", 0.0))
-        return (data.D1Batches(cfg, "train", bs, True, seed, fields=fields, mask_pool=pool, mask_prob=prob, **kw),
-                data.D1Batches(cfg, "val", bs, False, seed, indices=vidx, fields=fields))
+        return (data.D1Batches(cfg, "train", bs, True, seed, fields=fields, mask_pool=pool, mask_prob=prob,
+                               meta_columns=cols, **kw),
+                data.D1Batches(cfg, "val", bs, False, seed, indices=vidx, fields=fields, meta_columns=cols))
     if which == "d2":
-        st = data.Store(cfg.dataset_dir("d2"))
+        cols = data.D2_TRAIN_COLUMNS
+        st = data.Store(cfg.dataset_dir("d2"), cols, shared=True)
         keep, info = data.d2_keep(cfg, st.meta)
         print(f"D2 selection (deblend.d2_selection): {info or 'none'}")
         rows = data.d2_rows(st.meta, "val", cfg["deblend"]["d2_centering"], keep)
         mx = tr.get("val_max_examples")
         if mx and len(rows) > int(mx):
             rows = np.sort(np.random.default_rng(seed).choice(rows, int(mx), replace=False))
-        return (data.D2Batches(cfg, "train", bs, True, seed, **kw), data.D2Batches(cfg, "val", bs, False, seed,
-                                                                                    indices=rows))
+        return (data.D2Batches(cfg, "train", bs, True, seed, meta_columns=cols, **kw),
+                data.D2Batches(cfg, "val", bs, False, seed, indices=rows, meta_columns=cols))
     if which == "mixed":
         # Balanced D2 / D1 batches (deblend.<stage>.d1_batch_size, default = batch_size).
         b1 = int(s["model"].get("d1_batch_size", bs))

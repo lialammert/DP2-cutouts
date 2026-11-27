@@ -103,45 +103,60 @@ def gpu_stage(cfg, stage, sizes, steps):
 
 
 def loader_rate(ds, n_batches, workers):
+    # One thread first, phase by phase (read, augment, prepare: compact copies only), then `workers` threads.
     n = int(n_batches)
+    k = min(5, len(ds))
+    ds.timers = {}
     t0 = time.perf_counter()
-    ds[0]
-    one = time.perf_counter() - t0
+    for i in range(k):
+        ds[i]
+    one = (time.perf_counter() - t0) / k
+    phases = {name: v / k for name, v in ds.timers.items()}
+    ds.timers = None
     t0 = time.perf_counter()
     with ThreadPoolExecutor(workers) as ex:
-        for _ in ex.map(lambda i: ds[(i + 1) % len(ds)], range(n)):
+        for _ in ex.map(lambda i: ds[(i + k) % len(ds)], range(n)):
             pass
     dt = time.perf_counter() - t0
-    return dict(examples_per_s=n * ds.batch_size / dt, s_per_batch_one_thread=one, workers=workers,
-                batches=n)
+    return dict(examples_per_s=n * ds.batch_size / dt, s_per_batch_one_thread=one, phases_one_thread=phases,
+                workers=workers, batches=n)
 
 
-def loaders(cfg, b, n_batches, workers):
+def loaders(cfg, sizes, n_batches, workers):
     out = {}
     have = {w: compact.read_info(cfg, w) is not None for w in ("d1", "d2")}
     modes = [("original", dict(compact=False))]
     modes.append(("compact, memory-mapped", dict(compact=True, require_compact=False, in_memory=[])))
-    modes.append(("compact, in memory", dict(compact=True, require_compact=False, in_memory=["d1", "d2"])))
-    for which in ("d1", "d2"):
-        for label, opts in modes:
-            if opts["compact"] and not have[which]:
-                out[f"{which} {label}"] = dict(skipped="no compact copy (dp2-ml deblend-compact)")
-                continue
-            if label == "compact, in memory" and which == "d1":
-                continue                                 # 1.4 M rows: never in memory
-            c = _cfg(cfg, **opts)
-            t0 = time.perf_counter()
-            ds = (data.D1Batches if which == "d1" else data.D2Batches)(c, "train", b, True, seed=0,
-                                                                         block=int(cfg["deblend"]["train"].get(
-                                                                             "read_block", 1)))
-            setup = time.perf_counter() - t0
-            r = dict(loader_rate(ds, n_batches, workers), setup_s=setup)
-            out[f"{which} {label}"] = r
-            print(f"  {which} {label:24s}: {r['examples_per_s']:8.0f} ex/s with {workers} threads "
-                  f"({r['s_per_batch_one_thread']:.2f} s per batch of {b} on one thread; set-up {setup:.0f} s)",
-                  flush=True)
-            del ds
-            gc.collect()
+    modes.append(("compact, in memory", dict(compact=True, require_compact=False, in_memory=["d1", "d2"],
+                                             memory_fraction=0.9)))
+    for which, b, (label, opts) in [(w, b, m) for w in ("d1", "d2") for b in sizes for m in modes]:
+        if opts["compact"] and not have[which]:
+            out[f"{which} {label}"] = dict(skipped="no compact copy (dp2-ml deblend-compact)")
+            continue
+        if label == "compact, in memory" and which == "d1":
+            continue                                 # 1.4 M rows: never in memory
+        if label == "original" and b > min(sizes):
+            continue                                 # the slow path, once
+        c = _cfg(cfg, **opts)
+        cls, cols = (data.D1Batches, data.D1_TRAIN_COLUMNS) if which == "d1" else \
+            (data.D2Batches, data.D2_TRAIN_COLUMNS)
+        kw = dict(seed=0, block=int(cfg["deblend"]["train"].get("read_block", 1)), meta_columns=cols)
+        if label == "compact, in memory":
+            # 20 000 training targets copied into memory (5.6 GB): the speed of in-memory reading without the
+            # whole D2 train split, which may not fit the job (40 GB on a V100 job of 10 cores).
+            rows = cls(c, "train", b, False, meta_columns=cols).rows_all
+            kw["indices"] = np.sort(np.random.default_rng(0).choice(rows, min(20000, len(rows)), replace=False))
+        t0 = time.perf_counter()
+        ds = cls(c, "train", b, True, **kw)
+        setup = time.perf_counter() - t0
+        r = dict(loader_rate(ds, n_batches, workers), setup_s=setup, batch=b)
+        out[f"{which} {label} batch {b}"] = r
+        ph = ", ".join(f"{k} {v:.3f}" for k, v in r["phases_one_thread"].items())
+        print(f"  {which} {label:24s} batch {b:5d}: {r['examples_per_s']:8.0f} ex/s with {workers} threads; one "
+              f"thread {r['s_per_batch_one_thread']:.3f} s per batch ({ph or 'no phase timing'}); "
+              f"set-up {setup:.0f} s", flush=True)
+        del ds
+        gc.collect()
     return out
 
 
@@ -154,6 +169,12 @@ def run(cfg, stages=None, sizes=None, loader_batches=30, steps=20):
                memory_limit_gb=lim / 1e9 if lim else None, stages={}, loaders={})
     print(f"deblend bench on {res['host']}: {res['device']}, {workers} CPU threads, memory limit "
           f"{res['memory_limit_gb'] or float('nan'):.0f} GB", flush=True)
+    # Loaders first (the question of 2026-11-27: what limits the speed), at the recipe's batch and a large one.
+    b = int(cfg["deblend"]["train"]["batch_size"])
+    lsizes = sorted({b, 1024})
+    print(f"loaders (training, batches {lsizes}, {loader_batches} batches; one-thread phases in s per batch):",
+          flush=True)
+    res["loaders"] = loaders(cfg, lsizes, loader_batches, workers)
     # The GPU part reads one batch per stage: no copy into memory.
     cg = _cfg(cfg, require_compact=False, in_memory=[])
     for st in stages:
@@ -161,9 +182,6 @@ def run(cfg, stages=None, sizes=None, loader_batches=30, steps=20):
         res["stages"][st] = gpu_stage(cg, st, sizes, steps)
         if "skipped" in res["stages"][st]:
             print(f"  skipped: {res['stages'][st]['skipped']}", flush=True)
-    b = int(cfg["deblend"]["train"]["batch_size"])
-    print(f"loaders (training, batch {b}, {loader_batches} batches):", flush=True)
-    res["loaders"] = loaders(cfg, b, loader_batches, workers)
     print("\nsummary: examples per second, GPU (best batch size) against the loaders", flush=True)
     for st, r in res["stages"].items():
         ok = {bs: v for bs, v in r.get("sizes", {}).items() if "examples_per_s" in v}

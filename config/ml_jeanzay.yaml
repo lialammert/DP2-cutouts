@@ -330,7 +330,8 @@ deblend:
     compact: true                  # from the compact copies (flux + weight, VIS only; identical batches): dp2-ml
                                    # deblend-compact d1 / d2 first. The pilot read 712 kB per D1 pair, 4 Euclid bands
     require_compact: true          # refuse to train without an up-to-date copy (else: original arrays, slow)
-    compact_d1: [euclid]           # D1 sides copied (rubin too: +248 GB, one read instead of three per block)
+    compact_d1: [euclid, rubin]    # D1 sides copied (rubin: +248 GB, but one read instead of three and no
+                                   # noise fill per batch: every loader path is then the fast one)
     in_memory: [d2]                # training rows copied into memory (D2 train ~32 GB) when they fit
     memory_fraction: 0.6           # ... in this fraction of the job's memory limit, else kept memory-mapped
   stats_max_examples: 20000

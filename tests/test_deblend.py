@@ -393,9 +393,10 @@ def test_lost_flux_selection_of_d1_and_d2(cfg):
         f2.unlink()
 
 
-def test_compact_copies_give_identical_batches(cfg, tmp_path):
-    # deblend-compact d1 / d2 (flux and weight, VIS only), read memory-mapped or in memory: the batches are the same,
-    # bit for bit, as from the original arrays, with masked, NaN and ivar <= 0 pixels and the neighbour fill.
+def test_compact_copies_give_the_same_batches_up_to_the_fixed_noise_draw(cfg, tmp_path):
+    # deblend-compact d1 / d2 (flux and weight, VIS only, masked pixels filled once with sky noise), read memory-mapped
+    # or in memory: same weights, same flux and network input wherever the weight is > 0 (masked, NaN and ivar <= 0
+    # pixels and the neighbour fill included), finite noise elsewhere; the copy is reproducible.
     import shutil
 
     from dp2_cutouts.deblend import compact, data
@@ -436,8 +437,23 @@ def test_compact_copies_give_identical_batches(cfg, tmp_path):
             for i in range(len(a)):
                 xa, xb = a[i][0], b[i][0]
                 assert set(xa) == set(xb)
-                for k in xa:
-                    np.testing.assert_array_equal(xa[k], xb[k], err_msg=f"{cls.__name__} {split} {k}")
+                for pre in ("r", "x", "e"):
+                    if f"{pre}_w" not in xa:
+                        continue
+                    w = xa[f"{pre}_w"]
+                    np.testing.assert_array_equal(w, xb[f"{pre}_w"])
+                    ok = w > 0
+                    np.testing.assert_array_equal(xa[f"{pre}_flux"][ok], xb[f"{pre}_flux"][ok])
+                    nb = xa[f"{pre}_in"].shape[-1] - (1 if pre == "e" else 0)
+                    np.testing.assert_array_equal(xa[f"{pre}_in"][..., :nb][ok], xb[f"{pre}_in"][..., :nb][ok])
+                    if pre == "e":
+                        np.testing.assert_array_equal(xa["e_in"][..., 1], xb["e_in"][..., 1])
+                    assert np.isfinite(xb[f"{pre}_flux"]).all() and np.isfinite(xb[f"{pre}_in"]).all()
+                    assert (~ok).any()
+    # The copy is reproducible (fixed noise draw).
+    first = np.load(root / "datasets" / "d2" / "compact" / "rubin.npy")
+    compact.build(on, "d2", workers=1)
+    np.testing.assert_array_equal(first, np.load(root / "datasets" / "d2" / "compact" / "rubin.npy"))
     # A copy of an older dataset is not used.
     (root / "datasets" / "d2" / "meta.parquet").touch()
     import os
@@ -454,7 +470,7 @@ def test_bench_times_every_trained_stage_and_the_loaders(cfg):
     for st, r in res["stages"].items():
         assert set(r["sizes"]) == {2, 4} and r["sizes"][4]["examples_per_s"] > 0, st
         assert r["saturation_batch"] in (2, 4)
-    assert res["loaders"]["d1 original"]["examples_per_s"] > 0
+    assert res["loaders"]["d1 original batch 4"]["examples_per_s"] > 0
     assert "skipped" in res["loaders"]["d2 compact, memory-mapped"]
 
 
