@@ -40,13 +40,16 @@ export PYTHONUNBUFFERED=1
 export KERAS_BACKEND="${KERAS_BACKEND:-jax}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.9}"
-# V100 (Volta, sm_70): XLA's cuDNN convolution autotuning profiles engines that fail on this GPU
-# (CUDNN_STATUS_EXECUTION_FAILED, even with cuDNN 9.6 and jax 0.4.38); without autotuning the convolutions run
-# (scripts/inspect/gpu_probe.py, job 899355, 2026-11-27). Set on V100 nodes only.
+# V100 (Volta, sm_70): XLA's default cuDNN convolution autotuning (level 4) profiles engines that fail on this GPU
+# (CUDNN_STATUS_EXECUTION_FAILED, even with cuDNN 9.6 and jax 0.4.38; gpu_probe.py, job 899355). Level 0 (no
+# autotuning) always runs but picks slow kernels; levels 2 and 3 ran C1 and K1 twice as fast (speed_probe.py, job
+# 902315: C1 279 -> 567, K1 358 -> 743 examples per second; level 1 failed on K1; float16 fails). Level 3 here;
+# dp2-ml restarts itself at level 0 if a cuDNN engine still fails (mlcli.py, DP2_AUTOTUNE_FALLBACK).
+# Set on V100 nodes only.
 if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -q "V100"; then
     case " ${XLA_FLAGS:-} " in
         *xla_gpu_autotune_level*) ;;
-        *) export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_autotune_level=0" ;;
+        *) export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_autotune_level=${DP2_V100_AUTOTUNE:-3}" ;;
     esac
     echo "[env] V100: XLA_FLAGS=$XLA_FLAGS"
 fi

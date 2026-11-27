@@ -46,6 +46,20 @@ COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-
             "deblend-compact", "deblend-bench", "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance")
 
 
+def autotune_fallback_env(error_text, env):
+    # Environment to restart with when a cuDNN engine failed under XLA convolution autotuning (V100, see
+    # scripts/jeanzay/ml/env.sh): the same flags at --xla_gpu_autotune_level=0. None when the error is another one,
+    # autotuning is already off, or this process is already the restart.
+    import re
+    flags = env.get("XLA_FLAGS", "")
+    m = re.search(r"--xla_gpu_autotune_level=(\d+)", flags)
+    if "CUDNN_STATUS_EXECUTION_FAILED" not in error_text or env.get("DP2_AUTOTUNE_FALLBACK") or \
+            (m is not None and m.group(1) == "0"):
+        return None
+    flags = re.sub(r"--xla_gpu_autotune_level=\d+", "", flags).strip()
+    return dict(env, XLA_FLAGS=f"{flags} --xla_gpu_autotune_level=0".strip(), DP2_AUTOTUNE_FALLBACK="1")
+
+
 def _debvader_run(args):
     run = args.debvader_run or os.environ.get("DEBVADER_RUN")
     if not run:
@@ -256,6 +270,14 @@ def main(argv=None):
         try:
             return _deblend(cfg, args, c)
         except BaseException as e:  # noqa: BLE001 (SystemExit from argument checks included)
+            new_env = autotune_fallback_env("".join(traceback.format_exception(type(e), e, e.__traceback__)),
+                                            dict(os.environ))
+            if new_env is not None:
+                # A training resumes from its backup: restarting the whole command loses nothing.
+                print("[dp2-ml] cuDNN engine failure under convolution autotuning: restarting with "
+                      f"XLA_FLAGS={new_env['XLA_FLAGS']!r}", file=sys.stderr, flush=True)
+                os.execve(sys.executable, [sys.executable, "-m", "dp2_cutouts.mlcli"] + list(argv or sys.argv[1:]),
+                          new_env)
             if not (isinstance(e, SystemExit) and e.code in (0, None)):
                 from .deblend import campaign
                 campaign.mark_failed(cfg, "".join(traceback.format_exception(type(e), e, e.__traceback__)))

@@ -564,3 +564,16 @@ def test_a_stage_trains_data_parallel_on_two_devices(cfg, tmp_path):
     tr = json.loads((Path(rd) / "run.json").read_text())["settings"]["train"]
     assert tr["batch_size"] == 8 and tr["batch_size_per_device"] == 4
     assert tr["learning_rate"] == pytest.approx(tr["learning_rate_reference"] * 2 ** 0.5)
+
+
+def test_cudnn_failure_under_autotuning_restarts_at_level_zero():
+    from dp2_cutouts.mlcli import autotune_fallback_env
+    err = "XlaRuntimeError: UNKNOWN: CUDNN_STATUS_EXECUTION_FAILED in cuda_dnn.cc"
+    env = dict(XLA_FLAGS="--foo --xla_gpu_autotune_level=3", PATH="p")
+    new = autotune_fallback_env(err, env)
+    assert new["XLA_FLAGS"] == "--foo --xla_gpu_autotune_level=0" and new["DP2_AUTOTUNE_FALLBACK"] == "1"
+    assert new["PATH"] == "p"
+    assert autotune_fallback_env(err, new) is None                     # never twice
+    assert autotune_fallback_env("ValueError: other", env) is None
+    assert autotune_fallback_env(err, dict(XLA_FLAGS="--xla_gpu_autotune_level=0")) is None
+    assert autotune_fallback_env(err, {})["XLA_FLAGS"] == "--xla_gpu_autotune_level=0"
