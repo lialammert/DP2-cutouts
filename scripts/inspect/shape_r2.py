@@ -9,7 +9,7 @@
 #   ref   the same read through the D1 Rubin / VIS relation (ref_e*), the evaluation's own reference
 # Prints n, R^2 = 1 - SS_res / SS_tot (about the reference's mean; negative = worse than the mean), Pearson r, the
 # slope m and offset c of a least-squares fit run = (1 + m) ref + c, with all targets and with S/N_i >= 10 (as
-# weak-lensing samples). Shapes beyond |e| > 1.5 (failed measurements) are left out.
+# weak-lensing samples) and S/N_i >= 50 (where REGAUSS is reliable on both). |e| >= 1 (failed) left out.
 # Usage: python scripts/inspect/shape_r2.py <evaluation dir, e.g. $DP2_ML_ROOT/deblend/evaluations/d2_val_pilot>
 
 import re
@@ -21,7 +21,7 @@ import pandas as pd
 
 
 def stats(y, x):
-    ok = np.isfinite(y) & np.isfinite(x) & (np.abs(y) < 1.5) & (np.abs(x) < 1.5)
+    ok = np.isfinite(y) & np.isfinite(x) & (np.abs(y) < 1.0) & (np.abs(x) < 1.0)   # |e| >= 1: failed REGAUSS
     y, x = y[ok], x[ok]
     if len(y) < 10:
         return dict(n=int(len(y)))
@@ -39,6 +39,7 @@ def main():
     for col in ("snr_i", "rubin_snr_i"):
         if col in df:
             subsets["S/N_i>=10"] = df[col].to_numpy(float) >= 10
+            subsets["S/N_i>=50"] = df[col].to_numpy(float) >= 50       # shapes reliable (shape_relation.py)
             break
     rows = []
     for run in runs:

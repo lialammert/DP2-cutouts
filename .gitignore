@@ -26,3 +26,7 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 .pytest_cache/
+
+# Figures copied back from Jean Zay to look at (DP2 pixels: never committed)
+/*.pdf
+/*.png

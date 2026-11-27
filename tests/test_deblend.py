@@ -288,10 +288,20 @@ def test_a_training_stopped_on_its_time_budget_resumes_the_cut_epoch(cfg):
 def test_evaluations_run_on_the_trained_campaign(cfg):
     # After the stage test (same module fixture): every evaluation produces its summary.
     from dp2_cutouts.deblend import evaluate
+    from dp2_cutouts.mlconfig import MLConfig
+    # The synthetic galaxies have no reliable high-S/N shapes: on them the D1 relation guard stops the evaluation
+    # (checked below); the end-to-end run relaxes it.
+    with pytest.raises(RuntimeError, match="D1 relation"):
+        evaluate.run(cfg, "d2", split="val")
+    raw = json.loads(json.dumps(cfg.raw))
+    raw["deblend"].setdefault("eval", {}).update(relation_min_snr=0, relation_min_pairs=0, relation_max_slope_dev=100,
+                                                  relation_max_offset=100)
+    loose = MLConfig(raw=raw, path=cfg.path)
     for what in ("d1", "masking", "d2", "cost", "latent"):
-        summ = evaluate.run(cfg, what, split="val")
+        summ = evaluate.run(loose, what, split="val")
         assert summ, what
     d2 = json.loads((evaluate.out_dir(cfg, "d2", "val", None) / "summary.json").read_text())
+    assert d2["d1_relation"]["reference"] == "vis"
     assert set(d2["runs"]) == {"A", "B", "C"} and "A_minus_B" in d2["paired"]
     d1 = json.loads((evaluate.out_dir(cfg, "d1", "val", None) / "summary.json").read_text())
     assert {"rvae", "k1k2", "c1"} <= set(d1["paths"]) and set(d1["probabilistic"]) == {"A", "B", "C"}

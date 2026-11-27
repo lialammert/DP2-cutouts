@@ -385,24 +385,59 @@ def eval_masking(cfg, split, seed):
 
 
 # ----------------------------------------------------------------------------- D2
+E_MAX = 1.0          # |e| >= 1 is a failed REGAUSS correction (physically impossible): left out of every comparison
+
+
+def valid_e(e):
+    e = np.asarray(e, float)
+    return np.where(np.abs(e) < E_MAX, e, np.nan)
+
+
 def d1_relation(cfg, ev):
     # Rubin i REGAUSS shape vs Euclid VIS REGAUSS shape on D1 (val split: never the evaluation split), per
-    # component: e_R = a e_VIS + b, residual scatter s; in bins of Rubin resolution when enough objects.
-    ds = data.D1Batches(cfg, "val", int(ev.get("batch_size", 64)), False)
-    meta = ds.st.meta
+    # component: e_R = a e_VIS + b (Theil-Sen), residual scatter. Only where both measurements are reliable: S/N_i >=
+    # eval.relation_min_snr (default 50) and |e| < 1. Measured on 3000 D1 val pairs (scripts/inspect/
+    # shape_relation.py, 2026-11-27): slope 1.00 / 0.96-1.00 and r = 0.82-0.88 at S/N_i >= 50, while below S/N_i ~50
+    # REGAUSS on Rubin fails for 25-31 % of the pairs; the least-squares fit on all pairs that the first version used
+    # gave slopes of -0.6 / -3.6. Raises when the slope departs from 1 by more than eval.relation_max_slope_dev or the
+    # offset exceeds eval.relation_max_offset: the reference would not be the same shape.
+    from scipy.stats import theilslopes
+    bs = int(ev.get("batch_size", 64))
+    min_snr = float(ev.get("relation_min_snr", 50))
+    ds0 = data.D1Batches(cfg, "val", bs, False)
+    meta = ds0.st.meta
+    pool = ds0.rows_all[meta["snr_i"].to_numpy(float)[ds0.rows_all] >= min_snr]
+    nmax = int(ev.get("relation_max_examples", 3000))
+    if len(pool) > nmax:
+        pool = np.sort(np.random.default_rng(0).choice(pool, nmax, replace=False))
+    ds = data.D1Batches(cfg, "val", bs, False, indices=pool)
     rows = []
-    for x, idx in _iterate(ds, int(ev.get("relation_max_examples", 3000))):
+    for x, idx in _iterate(ds, nmax):
         mrows = meta.iloc[idx].reset_index(drop=True)
         r = measure_rubin(x["r_flux"], x["r_w"] > 0, mrows, cfg, "r", 6.0)
         v = measure_vis(x["e_flux"], x["e_w"] > 0, cfg, "v")
         rows.append(pd.concat([r, v], axis=1))
     df = pd.concat(rows, ignore_index=True)
-    rel = {}
+    rel = dict(min_snr_i=min_snr, method="Theil-Sen, |e| < 1, both REGAUSS measurements valid")
+    ok = df["r_ok_rg"].astype(bool).to_numpy() & df["v_ok_rg"].astype(bool).to_numpy()
+    dev, off = float(ev.get("relation_max_slope_dev", 0.2)), float(ev.get("relation_max_offset", 0.05))
     for q in ("e1", "e2"):
-        ok = df["r_ok_rg"].astype(bool) & df["v_ok_rg"].astype(bool)
-        a, b = np.polyfit(df[f"v_{q}_rg"][ok], df[f"r_{q}_rg"][ok], 1) if ok.sum() > 20 else (np.nan, np.nan)
-        res = df[f"r_{q}_rg"][ok] - (a * df[f"v_{q}_rg"][ok] + b)
-        rel[q] = dict(a=float(a), b=float(b), scatter=robust_scatter(res), n=int(ok.sum()))
+        xv, yr = valid_e(df[f"v_{q}_rg"]), valid_e(df[f"r_{q}_rg"])
+        good = ok & np.isfinite(xv) & np.isfinite(yr)
+        min_pairs = int(ev.get("relation_min_pairs", 30))
+        if good.sum() < max(min_pairs, 3):
+            if min_pairs == 0:                          # check disabled (synthetic tests): no relation, no guard
+                rel[q] = dict(a=np.nan, b=np.nan, scatter=np.nan, n=int(good.sum()))
+                continue
+            raise RuntimeError(f"D1 relation: only {int(good.sum())} reliable pairs at S/N_i >= {min_snr:g}")
+        a, b, _, _ = theilslopes(yr[good], xv[good])
+        res = yr[good] - (a * xv[good] + b)
+        rel[q] = dict(a=float(a), b=float(b), scatter=robust_scatter(res), n=int(good.sum()),
+                      r=float(np.corrcoef(xv[good], yr[good])[0, 1]),
+                      failed_fraction=float(1 - good.sum() / max(int(ok.sum()), 1)))
+        if abs(a - 1) > dev or abs(b) > off:
+            raise RuntimeError(f"D1 relation {q}: slope {a:.3f}, offset {b:.3f} (allowed 1 +- {dev}, |b| <= {off}): "
+                               "the Rubin and VIS shapes do not agree; check shape_relation.py before evaluating")
     rel["size_ratio_median"] = float(np.nanmedian(df["r_sigma"] / (df["v_sigma"] * float(cfg["euclid"]["pixel_scale"])
                                                                    / common.RUBIN_SCALE)))
     return rel
@@ -440,7 +475,10 @@ def eval_d2(cfg, split, seed):
             for k in range(K):
                 m = measure_rubin(imgs[:, k], valid, mrows, cfg, "s", ap)
                 e1s[:, k], e2s[:, k], sz[:, k] = m["s_e1"], m["s_e2"], m["s_sigma"]
-                e1r[:, k], e2r[:, k] = m["s_e1_rg"], m["s_e2_rg"]
+                g1, g2 = m["s_e1_rg"].to_numpy(float), m["s_e2_rg"].to_numpy(float)
+                bad = ~(np.abs(g1) < E_MAX) | ~(np.abs(g2) < E_MAX)       # failed corrections left out
+                e1r[:, k] = np.where(bad, np.nan, g1)
+                e2r[:, k] = np.where(bad, np.nan, g2)
             # Over-subtraction: central pixels where the blend lies below the reconstructed central by > 3 sigma.
             res = (x["x_flux"] - mean_img) * np.sqrt(x["x_w"])
             over = ((res < -3) & valid & apm[None, :, :, None]).sum((1, 2, 3)) / np.maximum(
@@ -459,9 +497,15 @@ def eval_d2(cfg, split, seed):
                                                f"{run}_{q}_rg_hi{int(lv*100)}": hi}))
         tables.append(pd.concat(parts, axis=1))
     df = pd.concat(tables, ignore_index=True)
-    # Euclid reference read through the D1 relation (Rubin-like PSF-corrected shape expected from VIS).
+    # Euclid reference: the target's PSF-corrected VIS shape (eval.reference: vis, the default, as the D1 relation is
+    # the identity where both measurements are reliable), or read through the fitted relation (fit). Failed VIS
+    # corrections (|e| >= 1) give no reference.
+    mode = ev.get("reference", "vis")
+    bad_vis = ~(np.abs(df["vis_e1_rg"]) < E_MAX) | ~(np.abs(df["vis_e2_rg"]) < E_MAX)
     for q in ("e1", "e2"):
-        df[f"ref_{q}"] = rel[q]["a"] * df[f"vis_{q}_rg"] + rel[q]["b"]
+        a, b = (rel[q]["a"], rel[q]["b"]) if mode == "fit" else (1.0, 0.0)
+        df[f"ref_{q}"] = np.where(bad_vis, np.nan, a * df[f"vis_{q}_rg"] + b)
+    rel["reference"] = mode
     if "euclid_dec" in df:
         df["field"] = np.where(df["euclid_dec"] > -38, "EDF-F", "EDF-S")
     if "partner_vis_mag" in df:
@@ -544,6 +588,27 @@ def eval_d2(cfg, split, seed):
             summ["paired"][f"{a}_minus_{b}"] = dict(median_abs_error_difference=float(np.nanmedian(diff)),
                                                     ci68_patch_bootstrap=bootstrap(stat, len(ug), B, 0),
                                                     n_objects=int(np.isfinite(diff).sum()), n_patches=int(len(ug)))
+    # Core shape metrics again on the weak-lensing-like sample (S/N_i >= 10) and on the targets whose shapes are
+    # reliable (S/N_i >= eval.reliable_snr, default 50): R^2, m, c, bias, coverages against the reference.
+    hi = float(ev.get("reliable_snr", 50))
+    for label, lo in (("snr_i_ge_10", 10.0), ("snr_i_ge_%d" % int(hi), hi)):
+        if "snr_i" not in df:
+            break
+        g = df[df["snr_i"].astype(float) >= lo]
+        summ[label] = {"n": int(len(g))}
+        for run in runs:
+            s = {}
+            for q in ("e1", "e2"):
+                y, x = g[f"{run}_{q}_rg_mos"].to_numpy(float), g[f"ref_{q}"].to_numpy(float)
+                ok = np.isfinite(y) & np.isfinite(x)
+                ss = float(((x[ok] - x[ok].mean()) ** 2).sum()) if ok.sum() > 2 else np.nan
+                r2 = float(1 - ((y[ok] - x[ok]) ** 2).sum() / ss) if ss and np.isfinite(ss) else np.nan
+                s[q] = dict(n=int(ok.sum()), R2=r2, mc_vs_ref=linear_mc(y, x), bias=summary_stats(y - x))
+                for lv in (68, 90):
+                    inside = (g[f"ref_{q}"] >= g[f"{run}_{q}_rg_lo{lv}"]) & (g[f"ref_{q}"] <= g[f"{run}_{q}_rg_hi{lv}"])
+                    fin = np.isfinite(g[f"ref_{q}"])
+                    s[q][f"coverage{lv}"] = float(inside[fin].mean()) if fin.any() else np.nan
+            summ[label][run] = s
     write_json(out / "summary.json", summ)
     figures_d2(df, out, runs)
     return summ
