@@ -15,8 +15,10 @@
 #            [--split val] [--seed 0]
 
 import argparse
+import os
 
-import matplotlib
+os.environ.setdefault("KERAS_BACKEND", "jax")            # keras is imported below, before dp2_cutouts.deblend
+import matplotlib  # noqa: E402
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
