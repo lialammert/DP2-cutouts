@@ -11,8 +11,8 @@ data/
 *.npz
 *.pkl
 copaings_runs/
-# Slurm logs on Jean Zay (written next to the scripts by every job)
-logs/
+# Slurm logs on Jean Zay (written next to the scripts by every job; on Jean Zay a link to $SCRATCH/dp2-logs)
+logs
 
 # tokens and secrets
 .rsp_token

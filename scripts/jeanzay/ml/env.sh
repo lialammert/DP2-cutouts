@@ -40,8 +40,9 @@ export PYTHONUNBUFFERED=1
 export KERAS_BACKEND="${KERAS_BACKEND:-jax}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.9}"
-# Caches out of $HOME (3 GiB quota on Jean Zay).
-_cache="${WORK:-$DP2_ML_ROOT}/.cache"
+# Caches out of $HOME (3 GiB quota on Jean Zay) and out of $WORK (shared by the lab, its file count is the tight
+# limit: it filled up on 2026-11-27): on $SCRATCH.
+_cache="${SCRATCH:-${DP2_ML_ROOT:-$WORK}}/.cache"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$_cache}"
 export HF_HOME="${HF_HOME:-$XDG_CACHE_HOME/huggingface}"
 export KERAS_HOME="${KERAS_HOME:-$XDG_CACHE_HOME/keras}"
