@@ -94,14 +94,25 @@ def patch_masks(pcfg, patch, object_ids):
     return {int(r.object_id): np.asarray(r.companion_mask, bool).reshape(n, n) for r in t.itertuples(index=False)}
 
 
+_ARRAYS = {}
+
+
+def _array(root, name):
+    # Memory map of one array of a store, opened once per process. Not through Store: it reads the whole metadata
+    # table (1.5 M rows for D1) on every call, which made the first D1 run crawl (2026-11-27).
+    key = (str(root), name)
+    if key not in _ARRAYS:
+        from pathlib import Path
+        _ARRAYS[key] = np.load(Path(root) / f"{name}.npy", mmap_mode="r")
+    return _ARRAYS[key]
+
+
 def _d1_shard(job):
     root, ib, rows, ids, pcfg, patch, masks_for = job
     masks = masks_for(pcfg, patch, ids)                  # read here: all of D1's masks would not fit in one process
-    from .store import Store
-    st = Store(root)
     sel = np.asarray(rows)
-    flux = np.asarray(st.array("rubin_flux")[sel[0]:sel[-1] + 1])[sel - sel[0], ..., ib]
-    ivar = np.asarray(st.array("rubin_ivar")[sel[0]:sel[-1] + 1])[sel - sel[0], ..., ib]
+    flux = np.asarray(_array(root, "rubin_flux")[sel[0]:sel[-1] + 1])[sel - sel[0], ..., ib]
+    ivar = np.asarray(_array(root, "rubin_ivar")[sel[0]:sel[-1] + 1])[sel - sel[0], ..., ib]
     n = flux.shape[1]
     fill = np.stack([masks.get(int(i), np.zeros((n, n), bool)) for i in ids])
     have = np.array([int(i) in masks for i in ids])
@@ -122,7 +133,7 @@ def build_d1(cfg, workers=8, masks_for=patch_masks):
         ids = g["object_id"].astype("int64").to_numpy()
         jobs.append((str(root), ib, g.index.to_numpy(), ids, pcfg, patches[name], masks_for))
         order.append(g.index.to_numpy())
-    res = _run(_d1_shard, jobs, workers)
+    res = _run(_d1_shard, jobs, workers, root / (FILE + ".partial.npz"))
     out = np.full((len(meta), 3), np.nan)
     for rows, r in zip(order, res):
         out[rows] = r
@@ -132,13 +143,11 @@ def build_d1(cfg, workers=8, masks_for=patch_masks):
 # ----------------------------------------------------------------------------- D2 (VIS)
 def _d2_chunk(job):
     root, vis, rows = job
-    from .store import Store
-    st = Store(root)
     sel = np.asarray(rows)
     lo, hi = int(sel[0]), int(sel[-1]) + 1
-    flux = np.asarray(st.array("euclid_flux_unmasked")[lo:hi])[sel - lo, ..., vis]
-    ivar = np.asarray(st.array("euclid_ivar")[lo:hi])[sel - lo, ..., vis]
-    fill = np.asarray(st.array("euclid_fill")[lo:hi])[sel - lo]
+    flux = np.asarray(_array(root, "euclid_flux_unmasked")[lo:hi])[sel - lo, ..., vis]
+    ivar = np.asarray(_array(root, "euclid_ivar")[lo:hi])[sel - lo, ..., vis]
+    fill = np.asarray(_array(root, "euclid_fill")[lo:hi])[sel - lo]
     return stamp_losses(flux, ivar, fill)
 
 
@@ -149,21 +158,53 @@ def build_d2(cfg, rows, workers=8, chunk=2048):
     vis = list(cfg["euclid"]["bands"]).index("VIS")
     rows = np.sort(np.asarray(rows, np.int64))
     jobs = [(str(root), vis, rows[k:k + chunk]) for k in range(0, len(rows), chunk)]
-    out = np.concatenate(_run(_d2_chunk, jobs, workers)) if jobs else np.zeros((0, 3))
+    out = np.concatenate(_run(_d2_chunk, jobs, workers, root / (FILE + ".partial.npz"))) if jobs else np.zeros((0, 3))
     ids = pd.DataFrame(dict(euclid_object_id=meta["euclid_object_id"].iloc[rows].astype("int64").to_numpy()))
     return _write(root, ids, out)
 
 
-def _run(fn, jobs, workers):
-    if workers <= 1 or len(jobs) <= 1:
-        return [fn(j) for j in jobs]
+def _indexed(arg):
+    fn, k, job = arg
+    return k, fn(job)
+
+
+def _run(fn, jobs, workers, partial=None):
+    # Results in job order. partial: a file where finished jobs are saved every ~2 %, so that a run stopped by its
+    # walltime resumes where it was (same jobs: same command on the same datasets); removed at the end.
     res = [None] * len(jobs)
-    # spawn: the parent may have imported JAX (deblend selection), which must not be forked.
-    with mp.get_context("spawn").Pool(int(workers)) as pool:
-        for k, r in enumerate(pool.imap(fn, jobs, chunksize=1)):
-            res[k] = r
-            if (k + 1) % max(len(jobs) // 20, 1) == 0:
-                print(f"mask loss: {k + 1}/{len(jobs)}", flush=True)
+    if partial is not None and partial.exists():
+        z = np.load(partial, allow_pickle=True)
+        if int(z["n_jobs"]) == len(jobs):
+            for k, r in zip(z["done"], z["results"]):
+                res[int(k)] = r
+            print(f"mask loss: resuming, {int(len(z['done']))}/{len(jobs)} jobs already done", flush=True)
+    todo = [k for k in range(len(jobs)) if res[k] is None]
+    step = max(len(jobs) // 50, 1)
+
+    def save():
+        if partial is not None:
+            done = [k for k in range(len(jobs)) if res[k] is not None]
+            tmp = partial.with_name(partial.name + ".tmp.npz")
+            np.savez(tmp, n_jobs=len(jobs), done=np.array(done), results=np.array([res[k] for k in done], dtype=object))
+            tmp.replace(partial)
+
+    def progress(n):
+        if n % step == 0 or n == len(todo):
+            print(f"mask loss: {len(jobs) - len(todo) + n}/{len(jobs)}", flush=True)
+            save()
+
+    if workers <= 1 or len(todo) <= 1:
+        for n, k in enumerate(todo, 1):
+            res[k] = fn(jobs[k])
+            progress(n)
+    else:
+        # spawn: the parent may have imported JAX (deblend selection), which must not be forked.
+        with mp.get_context("spawn").Pool(int(workers)) as pool:
+            for n, (k, r) in enumerate(pool.imap_unordered(_indexed, [(fn, k, jobs[k]) for k in todo]), 1):
+                res[k] = r
+                progress(n)
+    if partial is not None and partial.exists():
+        partial.unlink()
     return res
 
 

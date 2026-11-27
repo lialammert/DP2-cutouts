@@ -725,3 +725,21 @@ def test_mask_loss_matches_mask_damage_and_selects(tmp_path):
     assert t["object_id"].tolist() == rows
     assert np.isfinite(t["lost_flux_frac"].iloc[0]) and np.isnan(t["lost_flux_frac"].iloc[1])
     assert t["lost_flux_frac"].iloc[0] > 0.05 and (tmp_path / mask_loss.FILE).exists()
+
+
+def test_mask_loss_run_resumes_from_its_partial_file(tmp_path):
+    # A run stopped by its walltime resumes: finished jobs read back from the partial file, the others computed,
+    # results in job order, the partial file removed at the end.
+    from dp2_cutouts.pairs import mask_loss
+    partial = tmp_path / "x.partial.npz"
+    calls = []
+
+    def fn(j):
+        calls.append(j)
+        return np.full((2, 3), float(j))
+
+    np.savez(partial, n_jobs=4, done=np.array([1, 3]),
+             results=np.array([np.full((2, 3), 10.0), np.full((2, 3), 30.0)], dtype=object))
+    res = mask_loss._run(fn, [0, 1, 2, 3], 1, partial)
+    assert sorted(calls) == [0, 2] and [r[0, 0] for r in res] == [0.0, 10.0, 2.0, 30.0]
+    assert not partial.exists()
