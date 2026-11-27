@@ -85,6 +85,9 @@
     <div class="group" id="haloGroup" title="halo_ring_z: light measured just outside the masks; above 10 a mask sits on real light (often the halo of a bright target)"><b>Light under masks (halo_ring_z &gt; 10)</b>
       <select id="halo"><option value="all">all</option><option value="yes">yes</option>
         <option value="no">no</option></select></div>
+    <div class="group" id="lostGroup" title="lost_flux_frac: share of the target's own Rubin light hidden by the masks, estimated by point symmetry (scripts/inspect/d1_truncation.py)"><b>Target light under masks</b>
+      <select id="lost"><option value="all">all</option><option value="0.03">&gt; 3 %</option>
+        <option value="0.01">&gt; 1 %</option><option value="-0.01">&le; 1 %</option></select></div>
     <div class="group" id="selGroup"><b>D2 selection</b>
       <select id="selection"><option value="all">all</option><option value="selected">selected</option>
         <option value="rejected">rejected</option></select></div>
@@ -297,10 +300,12 @@ function filter() {
   const kind = currentKind(), set = state.sets[kind];
   const splits = checked("split"), fields = checked("field");
   const lo = parseFloat($("magLo").value), hi = parseFloat($("magHi").value);
-  const sel = $("selection").value, eo = $("euclidOnly").value, reason = $("reason").value, halo = $("halo").value;
+  const sel = $("selection").value, eo = $("euclidOnly").value, reason = $("reason").value, halo = $("halo").value,
+    lost = parseFloat($("lost").value);
   $("selGroup").hidden = kind !== "d2";
   $("eoGroup").hidden = kind === "d2";
   $("haloGroup").hidden = kind === "d2";
+  $("lostGroup").hidden = kind === "d2" || !set.rows.some(r => r.lost_flux_frac !== undefined && r.lost_flux_frac !== null);
   $("reasonGroup").hidden = kind !== "d1r";
   $("splitGroup").hidden = kind === "d1r";
   if (buildPanels.kind !== kind) { buildPanels(kind); buildPanels.kind = kind; }
@@ -316,6 +321,11 @@ function filter() {
       if ((eo === "yes") !== !!r.euclid_only_mask) return;
     }
     if (kind === "d1r" && reason !== "all" && r.reason !== reason) return;
+    if (kind !== "d2" && !isNaN(lost)) {
+      const f = r.lost_flux_frac;
+      if (f === null || f === undefined) return;
+      if (lost > 0 ? !(f > lost) : !(f <= -lost)) return;
+    }
     if (kind !== "d2" && halo !== "all") {
       const z = r.halo_ring_z;
       if (z === null || z === undefined) return;
