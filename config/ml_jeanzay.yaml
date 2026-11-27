@@ -318,6 +318,13 @@ deblend:
     vis_mag_quantile: 0.95         # so that D2 targets are galaxies Rubin detects; null: no magnitude cut
     euclid_cut1: true              # D1's cut 1 on the target: Euclid object neither point-like nor spurious (copaings
                                    # removes Rubin point sources only); needs d2/euclid_flags.parquet (dp2-ml d2-flags)
+    max_lost_flux_frac: 0.03       # 2026-11-27: target VIS light hidden by the neighbour masks (point symmetry,
+    lost_sigma: 3.0                # pairs/mask_loss.py) above 3 % and above 3 uncertainties: left out. Needs
+                                   # d2/mask_loss.parquet (dp2-ml mask-loss d2). null: off
+  d1_selection:                    # D1 pairs used for training and evaluation (D1 itself unchanged), 2026-11-27
+    max_lost_flux_frac: 0.03       # Rubin i light of the target hidden by the neighbour masks (replaced by sky in D1),
+    lost_sigma: 3.0                # same rule as D2; ~9 % of D1 on the preview sample. Needs d1/mask_loss.parquet
+                                   # (dp2-ml mask-loss d1). null: off
   require_d1_euclid_fill: true     # refuse a D1 built without dataset1.euclid_neighbour_mask
   stats_max_examples: 20000
   seed: 20261124
@@ -334,7 +341,8 @@ deblend:
     batch_size: 128
     learning_rate: 1.0e-4          # debvader-keras real stage 1 (Adam, batch 128)
     clipnorm: 1.0
-    train_steps: 100000            # step budget (epochs derived from it); provisional until the pilot
+    train_steps: 40000             # step budget (epochs derived from it). Pilot of 2026-11-27: ~2-3 s per step with
+                                   # the block reading, so ~1-1.5 day per stage (13-17 chained 2 h jobs, max_jobs_train 30)
     epochs: 100                    # used when train_steps is null
     early_stopping_patience: 3     # in epochs (an epoch of the full D1 is ~9 000 steps)
     backup_every_steps: 2000       # resumable backups: 2 h dev-QoS jobs chained
@@ -342,15 +350,15 @@ deblend:
     read_block: 16                 # training batches from blocks of 16 consecutive rows (deblend/data.py Batches):
                                    # the pilot read rows one by one, 5-9 s per step on Lustre
     workers: 8                     # threads preparing batches ahead of the GPU
-  rubin_vae: {beta: 1.0, train: {train_steps: 150000}}
-  k1: {beta: 1.0, mask_augment_prob: 0.0, mask_pool_size: 5000, train: {train_steps: 150000}}
+  rubin_vae: {beta: 1.0}
+  k1: {beta: 1.0, mask_augment_prob: 0.0, mask_pool_size: 5000}
   k2: {}
   A: {embed: 128, dropout: 0.1}
   B: {context: 128, hidden: [128, 128], standardise: true, stats_batches: 100}
-  c1: {embed: 128, fusion: [256], beta: 1.0, weight_r: 1.0, weight_e: 1.0, train: {train_steps: 150000}}
+  c1: {embed: 128, fusion: [256], beta: 1.0, weight_r: 1.0, weight_e: 1.0}
   c2: {embed: 128, fusion: [256], lambda_d1: auto, lambda_batches: 8}
   c3: {context: 128, hidden: [128, 128], standardise: true, stats_batches: 100, lambda_replay: 1.0,
-       init_context_from_c2: true, train: {train_steps: 150000}}
+       init_context_from_c2: true}
   eval:
     k_samples: 10                  # posterior samples per galaxy (50 / 100 with --set deblend.eval.k_samples=...)
     nfe: 20

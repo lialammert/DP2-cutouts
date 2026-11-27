@@ -661,3 +661,67 @@ def test_d2_euclid_flags_cut1(tmp_path, monkeypatch):
         root / "meta.parquet")
     with pytest.raises(RuntimeError):
         euclid_flags.build(Cfg())
+
+
+def test_mask_loss_matches_mask_damage_and_selects(tmp_path):
+    # pairs/mask_loss: the same estimate as scripts/inspect/mask_damage.lost_sym (validated on D2), its uncertainty,
+    # the selection rule, and the D1 build (row-aligned with D1, masks from the patches).
+    import importlib.util
+    import sys as _sys
+    from pathlib import Path
+
+    from dp2_cutouts.pairs import mask_loss
+    here = Path(__file__).resolve().parents[1] / "scripts" / "inspect"
+    _sys.path.insert(0, str(here))
+    try:
+        spec = importlib.util.spec_from_file_location("mask_damage", here / "mask_damage.py")
+        md = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(md)
+    finally:
+        _sys.path.pop(0)
+    rng = np.random.default_rng(3)
+    n = 59
+    y, x = np.mgrid[:n, :n] - 29
+    gal = 40 * np.exp(-np.hypot(x, y) / 3.0)
+    fill = np.zeros((n, n), bool)
+    fill[25:40, 31:44] = True
+    img = gal + rng.normal(0, 1, (n, n))
+    f, u, s = mask_loss.lost_light(img, np.ones((n, n), bool), fill, 1.0)
+    ref = md.lost_sym(img, np.ones((n, n), bool), fill, 1.0)
+    assert np.isclose(f, ref[0]) and np.isclose(u, ref[1]) and 0 < s < f
+    keep = mask_loss.cut_pass([0.10, 0.10, 0.01, np.nan], [0.01, 0.05, 0.001, np.nan], 0.03, 3.0)
+    assert keep.tolist() == [False, True, True, True]
+
+    # D1 build: two shards, one object without a mask record (unknown, kept).
+    m = np.zeros((n, n), bool)
+    m[25:40, 31:44] = True
+    rows = []
+    for k, ids in (("p0", [11, 12]), ("p1", [21])):
+        fl = np.stack([np.repeat((gal + rng.normal(0, 1, (n, n)))[..., None], 6, -1) for _ in ids]).astype(np.float32)
+        store.write_shard(tmp_path / "shards" / k, pd.DataFrame(dict(object_id=ids)),
+                          dict(rubin_flux=fl, rubin_ivar=np.ones_like(fl)))
+        rows += ids
+    store.merge_shards(sorted((tmp_path / "shards").glob("*")), tmp_path, dict(name="d1"))
+
+    class Cfg:
+        raw = {}
+
+        def __getitem__(self, k):
+            return dict(rubin=dict(bands=list("ugrizy")))[k]
+
+        def dataset_dir(self, name):
+            return tmp_path
+
+        def pipeline(self):
+            return None
+
+    import dp2_cutouts.pipeline.patches as P
+    P_load = P.load_patches
+    P.load_patches = lambda pc: [{"name": "p0"}, {"name": "p1"}]
+    try:
+        t = mask_loss.build_d1(Cfg(), workers=1, masks_for=lambda pc, p, ids: {11: m, 21: m} if p["name"] else {})
+    finally:
+        P.load_patches = P_load
+    assert t["object_id"].tolist() == rows
+    assert np.isfinite(t["lost_flux_frac"].iloc[0]) and np.isnan(t["lost_flux_frac"].iloc[1])
+    assert t["lost_flux_frac"].iloc[0] > 0.05 and (tmp_path / mask_loss.FILE).exists()

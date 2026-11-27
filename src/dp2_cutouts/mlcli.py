@@ -10,6 +10,8 @@
 #   d2-flags                        Euclid point-like / spurious flags of the D2 targets (d2/euclid_flags.parquet),
 #                                   for deblend.d2_selection.euclid_cut1 (D1's cut 1); catalogues only, a few minutes
 #   quality d1|d2                   quality report of a merged dataset
+#   mask-loss d1|d2                 target light hidden by the neighbour masks (<dataset>/mask_loss.parquet), for
+#                                   deblend.d1_selection / d2_selection.max_lost_flux_frac (pairs/mask_loss.py)
 #   repair-meta d1|d2               rewrite meta.parquet of a merged dataset from its shards, arrays untouched
 #                                   (datasets merged before the empty-shard fix: identifiers rounded to float64)
 #   blends                          controlled blends from D1 (val, test)
@@ -35,7 +37,7 @@ import os
 import sys
 import traceback
 
-COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "d2-flags", "quality", "repair-meta", "blends",
+COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "d2-flags", "mask-loss", "quality", "repair-meta", "blends",
             "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2", "deblend-stats",
             "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance")
 
@@ -153,6 +155,33 @@ def main(argv=None):
     if c == "d2-merge":
         from .pairs import dataset2
         dataset2.merge(cfg)
+        return
+    if c == "mask-loss":
+        from .pairs import mask_loss
+        workers = int(os.environ.get("SLURM_CPUS_PER_TASK") or 8)
+        if args.what == "d1":
+            t = mask_loss.build_d1(cfg, workers)
+        elif args.what == "d2":
+            # Measured on the targets the rest of deblend.d2_selection keeps (the VIS reads of all D2 are ~4x longer).
+            import copy
+
+            import numpy as np
+
+            from .deblend import data
+            from .mlconfig import MLConfig
+            from .pairs.store import Store
+            raw = copy.deepcopy(cfg.raw)
+            for k in ("max_lost_flux_frac", "lost_sigma"):
+                (raw["deblend"].get("d2_selection") or {}).pop(k, None)
+            keep, info = data.d2_keep(MLConfig(raw=raw, path=cfg.path), Store(cfg.dataset_dir("d2")).meta)
+            print(f"d2: measured on the {int(keep.sum()):,} targets of the other criteria ({info})", flush=True)
+            t = mask_loss.build_d2(cfg, np.flatnonzero(keep), workers)
+        else:
+            sys.exit("mask-loss needs d1 or d2")
+        sel = cfg["deblend"].get(f"{args.what}_selection") or {}
+        s = mask_loss.summary(t, float(sel.get("max_lost_flux_frac") or 0.03), float(sel.get("lost_sigma", 3.0)))
+        print(f"{args.what}: {s['n']:,} rows, {s['measured']:,} measured; loss > threshold {s['above_frac']:.1%}, "
+              f"cut (also > lost_sigma) {s['cut']:.1%} -> {cfg.dataset_dir(args.what) / mask_loss.FILE}")
         return
     if c == "d2-flags":
         from .pairs import euclid_flags

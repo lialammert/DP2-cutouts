@@ -169,8 +169,38 @@ def d2_keep(cfg, meta):
         ok = euclid_flags.cut1_for(cfg, meta["euclid_object_id"])
         info["pass_euclid_cut1"] = float(ok.mean())
         keep &= ok
+    if sel.get("max_lost_flux_frac") is not None:
+        # Target VIS light hidden by the neighbour masks (pairs/mask_loss.py, dp2-ml mask-loss d2): a target losing
+        # more than max_lost_flux_frac, by more than lost_sigma uncertainties, is left out. Targets not measured
+        # (outside the rows mask-loss d2 was run on) are kept.
+        from ..pairs import mask_loss
+        t = mask_loss.read(cfg, "d2").set_index("euclid_object_id")
+        ids = meta["euclid_object_id"].astype("int64").to_numpy()
+        frac = t["lost_flux_frac"].reindex(ids).to_numpy(float)
+        sig = t["lost_flux_sigma"].reindex(ids).to_numpy(float)
+        ok = mask_loss.cut_pass(frac, sig, sel["max_lost_flux_frac"], sel.get("lost_sigma", 3.0))
+        info["pass_lost_flux"] = float(ok[keep].mean()) if keep.any() else 1.0
+        keep &= ok
     info["kept"] = float(keep.mean())
     return keep, info
+
+
+def d1_keep(cfg, meta):
+    # Selection of the D1 pairs used for training and evaluation (deblend.d1_selection; absent or null: all), on
+    # the Rubin light the neighbour masks hide (pairs/mask_loss.py, dp2-ml mask-loss d1). D1 itself is not changed.
+    # Returns (boolean array over meta, description).
+    sel = cfg["deblend"].get("d1_selection") or {}
+    keep = np.ones(len(meta), bool)
+    if sel.get("max_lost_flux_frac") is None:
+        return keep, {}
+    from ..pairs import mask_loss
+    t = mask_loss.read(cfg, "d1")
+    if len(t) != len(meta) or not (t["object_id"].to_numpy() == meta["object_id"].astype("int64").to_numpy()).all():
+        raise RuntimeError("d1/mask_loss.parquet does not match D1's rows: run dp2-ml mask-loss d1 again")
+    keep = mask_loss.cut_pass(t["lost_flux_frac"], t["lost_flux_sigma"], sel["max_lost_flux_frac"],
+                              sel.get("lost_sigma", 3.0))
+    return keep, dict(max_lost_flux_frac=float(sel["max_lost_flux_frac"]), lost_sigma=float(sel.get("lost_sigma", 3.0)),
+                      kept=float(keep.mean()))
 
 
 class Batches(keras.utils.PyDataset):
@@ -256,7 +286,8 @@ class D1Batches(Batches):
     def __init__(self, cfg, split, batch_size, train, seed=0, indices=None, fields=("rubin", "euclid"),
                  mask_pool=None, mask_prob=0.0, **kw):
         self.st = Store(cfg.dataset_dir("d1"))
-        rows = np.flatnonzero((self.st.meta["split"] == split).to_numpy()) if indices is None else indices
+        self.keep, self.selection = d1_keep(cfg, self.st.meta)
+        rows = np.flatnonzero((self.st.meta["split"] == split).to_numpy() & self.keep) if indices is None else indices
         super().__init__(rows, batch_size, train, seed, **kw)
         self.prep = Prepare(cfg, load_norm_stats(cfg))
         self.fields = tuple(fields)

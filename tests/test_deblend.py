@@ -338,3 +338,46 @@ def test_full_covariance_head_starts_well_conditioned():
     assert np.allclose(diag, 1.0, atol=0.1) and np.abs(off).max() < 0.1
     kl = np.asarray(kl_tril_tril(mu_a, La, mu_b, Lb))
     assert np.isfinite(kl).all() and kl.max() < 10.0
+
+
+def test_full_covariance_head_passes_gradients_at_start():
+    # A tiny but non-zero kernel: the output depends on the embedding from the first step on (the lambda_D1
+    # calibration of C2 found zero gradients with an exactly zero kernel).
+    import jax
+    from dp2_cutouts.deblend.layers import TriLGaussianHead
+    h = np.random.default_rng(1).normal(0, 1, (4, 64)).astype(np.float32)
+    head = TriLGaussianHead(8)
+    head(h)
+    g = jax.grad(lambda x: float(0) + jax.numpy.sum(head(x)[1] ** 2) + jax.numpy.sum(head(x)[0] ** 2))(h)
+    assert np.abs(np.asarray(g)).max() > 0
+
+
+def test_lost_flux_selection_of_d1_and_d2(cfg):
+    # deblend.d1_selection / d2_selection.max_lost_flux_frac: a pair whose masks hide more than 3 % of the target's
+    # light, by more than 3 uncertainties, is left out of every read (D1 rows aligned, D2 by Euclid id).
+    from dp2_cutouts.deblend.data import D1Batches, d1_keep, d2_keep
+    from dp2_cutouts.mlconfig import MLConfig
+    from dp2_cutouts.pairs.store import Store
+    raw = json.loads(json.dumps(cfg.raw))
+    raw["deblend"]["d1_selection"] = dict(max_lost_flux_frac=0.03, lost_sigma=3.0)
+    raw["deblend"]["d2_selection"] = dict(max_lost_flux_frac=0.03, lost_sigma=3.0)
+    c = MLConfig(raw=raw, path=cfg.path)
+    m1 = Store(cfg.dataset_dir("d1")).meta
+    m2 = Store(cfg.dataset_dir("d2")).meta
+    f1, f2 = cfg.dataset_dir("d1") / "mask_loss.parquet", cfg.dataset_dir("d2") / "mask_loss.parquet"
+    frac = np.zeros(len(m1))
+    frac[0], frac[1] = 0.5, 0.05                       # row 0 cut; row 1 above 3 % but within 3 sigma: kept
+    pd.DataFrame(dict(object_id=m1["object_id"].astype("int64"), lost_flux_frac=frac,
+                      lost_flux_sigma=[0.01, 0.05] + [0.001] * (len(m1) - 2), lost_unknown=0.0)).to_parquet(f1)
+    pd.DataFrame(dict(euclid_object_id=m2["euclid_object_id"].astype("int64")[:3], lost_flux_frac=[0.2, 0.0, 0.0],
+                      lost_flux_sigma=0.01, lost_unknown=0.0)).to_parquet(f2)
+    try:
+        keep1, info1 = d1_keep(c, m1)
+        assert not keep1[0] and keep1[1:].all() and info1["kept"] == pytest.approx(1 - 1 / len(m1))
+        assert 0 not in D1Batches(c, m1["split"].iloc[0], 4, False).rows_all
+        keep2, info2 = d2_keep(c, m2)
+        assert not keep2[0] and keep2[1:].all()          # rows not measured are kept
+        assert d1_keep(cfg, m1)[0].all()                  # no d1_selection: everything
+    finally:
+        f1.unlink()
+        f2.unlink()

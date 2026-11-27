@@ -188,7 +188,12 @@ def _loaders(cfg, s, which, seed, workers=None):
     kw = dict(workers=workers, use_multiprocessing=False, max_queue_size=8, block=int(tr.get("read_block", 1)))
     if which == "d1":
         st = data.Store(cfg.dataset_dir("d1"))
+        keep, info = data.d1_keep(cfg, st.meta)
+        if info:
+            print(f"D1 selection (deblend.d1_selection): {info}")
         vidx = validation_indices(st.meta, "val", tr.get("val_max_examples"), seed)
+        if vidx is not None:
+            vidx = vidx[keep[vidx]]
         fields = s.get("fields", ("rubin", "euclid"))
         pool = s.get("mask_pool")
         prob = float(s["model"].get("mask_augment_prob", 0.0))
