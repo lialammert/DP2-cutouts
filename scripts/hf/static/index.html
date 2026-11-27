@@ -82,6 +82,9 @@
     <div class="group" id="eoGroup"><b>Masks outside Rubin footprints</b>
       <select id="euclidOnly"><option value="all">all</option><option value="yes">yes</option>
         <option value="no">no</option></select></div>
+    <div class="group" id="haloGroup" title="halo_ring_z: light measured just outside the masks; above 10 a mask sits on real light (often the halo of a bright target)"><b>Light under masks (halo_ring_z &gt; 10)</b>
+      <select id="halo"><option value="all">all</option><option value="yes">yes</option>
+        <option value="no">no</option></select></div>
     <div class="group" id="selGroup"><b>D2 selection</b>
       <select id="selection"><option value="all">all</option><option value="selected">selected</option>
         <option value="rejected">rejected</option></select></div>
@@ -294,9 +297,10 @@ function filter() {
   const kind = currentKind(), set = state.sets[kind];
   const splits = checked("split"), fields = checked("field");
   const lo = parseFloat($("magLo").value), hi = parseFloat($("magHi").value);
-  const sel = $("selection").value, eo = $("euclidOnly").value, reason = $("reason").value;
+  const sel = $("selection").value, eo = $("euclidOnly").value, reason = $("reason").value, halo = $("halo").value;
   $("selGroup").hidden = kind !== "d2";
   $("eoGroup").hidden = kind === "d2";
+  $("haloGroup").hidden = kind === "d2";
   $("reasonGroup").hidden = kind !== "d1r";
   $("splitGroup").hidden = kind === "d1r";
   if (buildPanels.kind !== kind) { buildPanels(kind); buildPanels.kind = kind; }
@@ -312,6 +316,11 @@ function filter() {
       if ((eo === "yes") !== !!r.euclid_only_mask) return;
     }
     if (kind === "d1r" && reason !== "all" && r.reason !== reason) return;
+    if (kind !== "d2" && halo !== "all") {
+      const z = r.halo_ring_z;
+      if (z === null || z === undefined) return;
+      if ((halo === "yes") !== (z > 10)) return;
+    }
     state.rows.push(i);
   });
   state.pos = 0;
