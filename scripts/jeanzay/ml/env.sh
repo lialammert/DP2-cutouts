@@ -40,6 +40,16 @@ export PYTHONUNBUFFERED=1
 export KERAS_BACKEND="${KERAS_BACKEND:-jax}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.9}"
+# V100 (Volta, sm_70): XLA's cuDNN convolution autotuning profiles engines that fail on this GPU
+# (CUDNN_STATUS_EXECUTION_FAILED, even with cuDNN 9.6 and jax 0.4.38); without autotuning the convolutions run
+# (scripts/inspect/gpu_probe.py, job 899355, 2026-11-27). Set on V100 nodes only.
+if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -q "V100"; then
+    case " ${XLA_FLAGS:-} " in
+        *xla_gpu_autotune_level*) ;;
+        *) export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_autotune_level=0" ;;
+    esac
+    echo "[env] V100: XLA_FLAGS=$XLA_FLAGS"
+fi
 # Caches out of $HOME (3 GiB quota on Jean Zay) and out of $WORK (shared by the lab, its file count is the tight
 # limit: it filled up on 2026-11-27): on $SCRATCH.
 _cache="${SCRATCH:-${DP2_ML_ROOT:-$WORK}}/.cache"

@@ -304,6 +304,12 @@ def eval_d1(cfg, split, seed):
             s[f"{q}_mc"] = linear_mc(df[f"{name}_{q}"][ok].to_numpy(), df[f"obs_{q}"][ok].to_numpy())
             okr = df[f"{name}_ok_rg"].astype(bool) & df["obs_ok_rg"].astype(bool)
             s[f"{q}_regauss"] = summary_stats((df[f"{name}_{q}_rg"] - df[f"obs_{q}_rg"])[okr])
+            if "snr_i" in df:
+                # PSF-corrected shape of the reconstruction against the observed one, by S/N_i: m < 0 at high S/N
+                # = shapes pulled towards the prior (the beta = 1 checkpoint of 2026-11-27).
+                sub = df[okr]
+                s[f"{q}_regauss_by_snr"] = by_snr(sub, f"{name}_{q}_rg", f"obs_{q}_rg",
+                                                  cfg["deblend"].get("eval", {}).get("snr_bins"))
         s["size"] = summary_stats((df[f"{name}_sigma"] / df["obs_sigma"] - 1)[ok])
         for b in cfg["rubin"]["bands"]:
             s[f"flux_{b}"] = summary_stats(df[f"{name}_flux_{b}"] / df[f"obs_flux_{b}"] - 1)
@@ -391,6 +397,36 @@ E_MAX = 1.0          # |e| >= 1 is a failed REGAUSS correction (physically impos
 def valid_e(e):
     e = np.asarray(e, float)
     return np.where(np.abs(e) < E_MAX, e, np.nan)
+
+
+SNR_BINS = [0, 10, 20, 50, 80, 100, 1e9]   # S/N_i bins of the shape summaries (shapes reliable from ~50-80)
+
+
+def shape_metrics(y, x):
+    # Shape y against reference x (one component), failed measurements (|e| >= 1, NaN) left out: n, R^2 (about the
+    # reference's mean), multiplicative / additive bias (y = (1 + m) x + c), median offset.
+    y, x = valid_e(y), valid_e(x)
+    ok = np.isfinite(y) & np.isfinite(x)
+    out = dict(n=int(ok.sum()))
+    if ok.sum() < 10:
+        return out
+    ss = float(((x[ok] - x[ok].mean()) ** 2).sum())
+    out["R2"] = float(1 - ((y[ok] - x[ok]) ** 2).sum() / ss) if ss > 0 else np.nan
+    out["m"], out["c"] = linear_mc(y[ok], x[ok])
+    out["median_offset"] = float(np.median(y[ok] - x[ok]))
+    return out
+
+
+def by_snr(df, ycol, xcol, edges=None):
+    # shape_metrics of ycol against xcol in bins of snr_i, and on S/N_i >= each edge.
+    edges = list(edges or SNR_BINS)
+    snr = df["snr_i"].to_numpy(float)
+    res = {}
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        sel = (snr >= lo) & (snr < hi)
+        res[f"{lo:g}-{hi:g}" if hi < 1e9 else f">={lo:g}"] = shape_metrics(df[ycol].to_numpy(float)[sel],
+                                                                         df[xcol].to_numpy(float)[sel])
+    return res
 
 
 def d1_relation(cfg, ev):
@@ -550,7 +586,7 @@ def eval_d2(cfg, split, seed):
         summ["runs"][run] = s
         edges = (ev.get("bins") or {})
         bins = dict(sb_rubin=edges.get("sb_rubin", [0, 0.1, 0.3, 0.6, 10]),
-                    snr_i=edges.get("snr_i", [0, 10, 20, 50, 1e9]),
+                    snr_i=edges.get("snr_i", ev.get("snr_bins") or SNR_BINS),
                     rubin_i_cModel_mag=edges.get("mag", [15, 22, 23, 24, 25, 30]),
                     partner_sep_arcsec=edges.get("sep", [0, 0.5, 1.0, 1.5, 3, 10]),
                     contrast_mag=edges.get("contrast", [-10, -1, 0, 1, 10]),
@@ -588,9 +624,13 @@ def eval_d2(cfg, split, seed):
             summ["paired"][f"{a}_minus_{b}"] = dict(median_abs_error_difference=float(np.nanmedian(diff)),
                                                     ci68_patch_bootstrap=bootstrap(stat, len(ug), B, 0),
                                                     n_objects=int(np.isfinite(diff).sum()), n_patches=int(len(ug)))
+    # R^2, m, c of every run against the reference in S/N_i bins (where each run starts to fail).
+    if "snr_i" in df:
+        summ["shape_by_snr"] = {run: {q: by_snr(df, f"{run}_{q}_rg_mos", f"ref_{q}", ev.get("snr_bins"))
+                                      for q in ("e1", "e2")} for run in runs}
     # Core shape metrics again on the weak-lensing-like sample (S/N_i >= 10) and on the targets whose shapes are
-    # reliable (S/N_i >= eval.reliable_snr, default 50): R^2, m, c, bias, coverages against the reference.
-    hi = float(ev.get("reliable_snr", 50))
+    # reliable (S/N_i >= eval.reliable_snr, default 80): R^2, m, c, bias, coverages against the reference.
+    hi = float(ev.get("reliable_snr", 80))
     for label, lo in (("snr_i_ge_10", 10.0), ("snr_i_ge_%d" % int(hi), hi)):
         if "snr_i" not in df:
             break

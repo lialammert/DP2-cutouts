@@ -301,7 +301,7 @@ def test_evaluations_run_on_the_trained_campaign(cfg):
         summ = evaluate.run(loose, what, split="val")
         assert summ, what
     d2 = json.loads((evaluate.out_dir(cfg, "d2", "val", None) / "summary.json").read_text())
-    assert d2["d1_relation"]["reference"] == "vis"
+    assert d2["d1_relation"]["reference"] == "vis" and set(d2["shape_by_snr"]) == {"A", "B", "C"}
     assert set(d2["runs"]) == {"A", "B", "C"} and "A_minus_B" in d2["paired"]
     d1 = json.loads((evaluate.out_dir(cfg, "d1", "val", None) / "summary.json").read_text())
     assert {"rvae", "k1k2", "c1"} <= set(d1["paths"]) and set(d1["probabilistic"]) == {"A", "B", "C"}

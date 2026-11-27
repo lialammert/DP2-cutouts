@@ -380,7 +380,8 @@ deblend:
     relation_max_slope_dev: 0.2    # slope 1.00 at S/N_i >= 50, 25-31 % failures below); the evaluation stops if the
     relation_max_offset: 0.05      # slope or offset departs from the identity (scripts/inspect/shape_relation.py)
     reference: vis                 # shape reference on D2: the target's REGAUSS VIS shape (vis), or through the fit (fit)
-    reliable_snr: 50               # summaries also on S/N_i >= 50 (reliable shapes) and S/N_i >= 10 (weak-lensing sample)
+    reliable_snr: 80               # main sample (2026-11-27: shapes below S/N_i ~80 not reliable), and S/N_i >= 10
+    snr_bins: [0, 10, 20, 50, 80, 100, 1.0e9]   # R2, m, c per S/N_i bin (D1 reconstructions and D2 runs)
     latent_max_examples: 5000
     jacobian_n: 32
     mask_pool: 2000
