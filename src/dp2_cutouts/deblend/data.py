@@ -269,17 +269,29 @@ class Prepare:
         self.norm = Norm(stats)
         e_bands = list(cfg["euclid"]["bands"])
         self.vis = e_bands.index(cfg["deblend"]["euclid_band"])
+        # deblend.data.normalise_on: cpu (here, default) or gpu (in the encoders, layers.normalise_input).
+        where = str((cfg["deblend"].get("data") or {}).get("normalise_on", "cpu"))
+        if where not in ("cpu", "gpu"):
+            raise ValueError(f"deblend.data.normalise_on must be cpu or gpu, not {where!r}")
+        self.on_gpu = where == "gpu"
+        from . import layers as _layers
+        _layers.INPUT_NORM.clear()
+        if self.on_gpu:
+            _layers.INPUT_NORM.update(rubin=self.norm.r_scale, euclid=self.norm.e_scale)
+
+    def _norm(self, f, scale):
+        return f.astype(np.float32) if self.on_gpu else asinh_norm(f, scale)
 
     # Everything derives from (flux, w), w = likelihood weight (compact.py): the stored arrays and the compact copies
     # give the same batches.
     # filled: the pixels of weight 0 already hold a sky-noise draw (compact copies): the input is asinh(flux) only.
     def rubin_w(self, f, w, rng, filled=False):
-        x = asinh_norm(f if filled else noise_fill(f, w, ~(w > 0), rng), self.norm.r_scale)
+        x = self._norm(f if filled else noise_fill(f, w, ~(w > 0), rng), self.norm.r_scale)
         return x, f, w
 
     def euclid_w(self, f, w, rng, filled=False):
         ok = w > 0
-        x = asinh_norm(f if filled else noise_fill(f, w, ~ok, rng), self.norm.e_scale)
+        x = self._norm(f if filled else noise_fill(f, w, ~ok, rng), self.norm.e_scale)
         return np.concatenate([x, ok.astype(np.float32)], axis=-1), f, w
 
     def rubin(self, f, iv, m, rng):

@@ -129,6 +129,9 @@ def loaders(cfg, sizes, n_batches, workers):
     modes.append(("compact, memory-mapped", dict(compact=True, require_compact=False, in_memory=[])))
     modes.append(("compact, in memory", dict(compact=True, require_compact=False, in_memory=["d1", "d2"],
                                              memory_fraction=0.9)))
+    # The same, tanh(arcsinh) left to the encoders (deblend.data.normalise_on: gpu): what the loader threads save.
+    modes.append(("compact, mmap, norm on GPU", dict(compact=True, require_compact=False, in_memory=[],
+                                                     normalise_on="gpu")))
     for which, b, (label, opts) in [(w, b, m) for w in ("d1", "d2") for b in sizes for m in modes]:
         if opts["compact"] and not have[which]:
             out[f"{which} {label}"] = dict(skipped="no compact copy (dp2-ml deblend-compact)")
@@ -175,7 +178,7 @@ def run(cfg, stages=None, sizes=None, loader_batches=30, steps=20):
     print(f"loaders (training, batches {lsizes}, {loader_batches} batches; one-thread phases in s per batch):",
           flush=True)
     res["loaders"] = loaders(cfg, lsizes, loader_batches, workers)
-    # The GPU part reads one batch per stage: no copy into memory.
+    # The GPU part reads one batch per stage: no copy into memory (and the configured normalisation).
     cg = _cfg(cfg, require_compact=False, in_memory=[])
     for st in stages:
         print(f"GPU, stage {st}:", flush=True)

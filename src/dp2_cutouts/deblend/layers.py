@@ -14,6 +14,28 @@ import numpy as np
 from keras import layers, ops
 
 
+# Input normalisation on the accelerator (deblend.data.normalise_on: gpu). The loaders then hand the encoders the
+# flux (masked pixels already filled with sky noise) and every ConvEmbedder applies DebVAder's tanh(arcsinh(2.5 f /
+# s_b)) itself, inside the compiled graph: the same function as the CPU path (data.asinh_norm), moved off the CPU
+# threads that prepare the batches. Set by data.Prepare from the configuration, so that the loaders and the models of
+# a process always agree; empty = the inputs arrive normalised. The side is recognised by its channels: the Rubin
+# bands, or 2 for Euclid (flux, validity; validity left as is).
+INPUT_NORM = {}
+
+
+def normalise_input(x):
+    if not INPUT_NORM:
+        return x
+    c = x.shape[-1]
+    r = INPUT_NORM["rubin"]
+    if c == len(r):
+        return ops.tanh(ops.arcsinh(2.5 * x / ops.convert_to_tensor(r, dtype=x.dtype)))
+    if c == 2:
+        f = ops.tanh(ops.arcsinh(2.5 * x[..., :1] / ops.convert_to_tensor(INPUT_NORM["euclid"], dtype=x.dtype)))
+        return ops.concatenate([f, x[..., 1:]], axis=-1)
+    raise ValueError(f"input with {c} channels: neither Rubin ({len(r)} bands) nor Euclid (2)")
+
+
 def tril_size(d):
     return d * (d + 1) // 2
 
@@ -76,6 +98,7 @@ class ConvEmbedder(keras.Model):
         self.drop = layers.Dropout(self.rate) if self.rate > 0 else None
 
     def call(self, x, training=False):
+        x = normalise_input(x)
         for b in self.blocks:
             x = b(x)
         h = self.act(self.dense(self.flat(self.sq_act(self.squeeze(x)))))

@@ -334,6 +334,8 @@ deblend:
                                    # noise fill per batch: every loader path is then the fast one)
     in_memory: [d2]                # training rows copied into memory (D2 train ~32 GB) when they fit
     memory_fraction: 0.6           # ... in this fraction of the job's memory limit, else kept memory-mapped
+    normalise_on: cpu              # gpu: tanh(arcsinh) in the encoders (layers.normalise_input), not in the loader
+                                   # threads; same function, choose after deblend-bench
   stats_max_examples: 20000
   seed: 20261124
   replicate_dependencies: false    # seeds replicate the students (A, B, C2, C3); K1, K2, C1 shared

@@ -472,6 +472,8 @@ def test_bench_times_every_trained_stage_and_the_loaders(cfg):
         assert r["saturation_batch"] in (2, 4)
     assert res["loaders"]["d1 original batch 4"]["examples_per_s"] > 0
     assert "skipped" in res["loaders"]["d2 compact, memory-mapped"]
+    from dp2_cutouts.deblend import layers
+    assert not layers.INPUT_NORM                                  # the GPU part ran with the configured (CPU) path
 
 
 def test_larger_batches_scale_the_learning_rate_and_keep_the_examples_budget():
@@ -483,3 +485,29 @@ def test_larger_batches_scale_the_learning_rate_and_keep_the_examples_budget():
     big = scale_for_batch(dict(base, batch_size=1024))
     assert big["learning_rate"] == pytest.approx(1e-4 * 8 ** 0.5) and big["train_steps"] == 5000
     assert scale_for_batch(dict(base, batch_size=1024, lr_scaling="none"))["learning_rate"] == 1e-4
+
+
+def test_input_normalisation_on_the_gpu_gives_the_same_encodings(cfg):
+    # deblend.data.normalise_on: gpu hands the encoders the filled flux and normalises inside them: same latent
+    # means as the CPU path, up to float rounding, for a Rubin and a Euclid encoder.
+    from dp2_cutouts.deblend import data, layers
+    from dp2_cutouts.deblend.models import ImageEncoder
+    from dp2_cutouts.mlconfig import MLConfig
+    raw = json.loads(json.dumps(cfg.raw))
+    raw["deblend"]["data"] = dict(normalise_on="gpu")
+    gpu = MLConfig(raw=raw, path=cfg.path)
+    try:
+        xc = data.D2Batches(cfg, "val", 4, False)[0][0]          # Prepare of cfg: normalised on the CPU
+        assert not layers.INPUT_NORM
+        enc_r, enc_e = ImageEncoder(4, name="r"), ImageEncoder(4, name="e")
+        mr, me = (np.asarray(ops.convert_to_numpy(e(ops.convert_to_tensor(xc[k]))[0]))
+                  for e, k in ((enc_r, "x_in"), (enc_e, "e_in")))
+        xg = data.D2Batches(gpu, "val", 4, False)[0][0]          # flux in, normalisation in the encoders
+        assert layers.INPUT_NORM and np.abs(xg["x_in"]).max() > 2  # raw flux, not tanh outputs
+        np.testing.assert_array_equal(xg["e_in"][..., 1], xc["e_in"][..., 1])
+        gr, ge = (np.asarray(ops.convert_to_numpy(e(ops.convert_to_tensor(xg[k]))[0]))
+                  for e, k in ((enc_r, "x_in"), (enc_e, "e_in")))
+        np.testing.assert_allclose(gr, mr, rtol=1e-4, atol=1e-5)
+        np.testing.assert_allclose(ge, me, rtol=1e-4, atol=1e-5)
+    finally:
+        layers.INPUT_NORM.clear()
