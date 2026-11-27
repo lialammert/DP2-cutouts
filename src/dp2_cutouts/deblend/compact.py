@@ -201,8 +201,29 @@ def build(cfg, which, workers=8):
 
 # ----------------------------------------------------------------------------- read side
 def memory_limit_bytes():
-    # Memory this job may use: the cgroup limit (Slurm), else the node's available memory.
-    for p in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+    # Memory this job may use: Slurm's allocation (SLURM_MEM_PER_NODE, or SLURM_MEM_PER_CPU x cpus, in MB), the
+    # job's own cgroup limit, else the node's available memory. (On Jean Zay the root cgroup files are not the job's:
+    # the first version read the node's 136 GB on a V100 job of 10 cores.)
+    env = os.environ
+    try:
+        if env.get("SLURM_MEM_PER_NODE"):
+            return int(env["SLURM_MEM_PER_NODE"]) * 1024 ** 2
+        if env.get("SLURM_MEM_PER_CPU"):
+            cpus = int(env.get("SLURM_CPUS_PER_TASK") or env.get("SLURM_CPUS_ON_NODE") or 1)
+            return int(env["SLURM_MEM_PER_CPU"]) * cpus * 1024 ** 2
+    except ValueError:
+        pass
+    paths = []
+    try:
+        for line in Path("/proc/self/cgroup").read_text().splitlines():
+            _, ctrl, rel = line.split(":", 2)
+            if ctrl == "":
+                paths.append(f"/sys/fs/cgroup{rel}/memory.max")
+            elif "memory" in ctrl.split(","):
+                paths.append(f"/sys/fs/cgroup/memory{rel}/memory.limit_in_bytes")
+    except (OSError, ValueError):
+        pass
+    for p in paths + ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]:
         try:
             v = Path(p).read_text().strip()
             if v != "max" and int(v) < 1 << 60:
