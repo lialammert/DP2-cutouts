@@ -307,3 +307,17 @@ def test_block_order_reads_consecutive_rows():
     assert not (b.order == rows).all()                  # shuffled
     one = Batches(rows, 16, True, 3).order              # read_block 1: rows one by one
     assert sorted(one.tolist()) == rows.tolist() and (np.diff(one) != 1).sum() > 48
+
+
+def test_d1_vis_mag_limit_reads_the_d1_metadata(tmp_path):
+    # The D2 selection's VIS limit read on the D1 metadata itself (a missing import once failed only on Jean Zay,
+    # where vis_mag_max: auto reaches this function; the selection test above replaces it).
+    from dp2_cutouts.deblend.data import d1_vis_mag_limit
+    from dp2_cutouts.mlconfig import MLConfig
+    d = tmp_path / "datasets" / "d1"
+    d.mkdir(parents=True)
+    pd.DataFrame(dict(split=["train", "train", "val", "train"], euclid_vis_mag=[22.0, 24.0, 30.0, np.nan],
+                      other=1)).to_parquet(d / "meta.parquet")
+    c = MLConfig(raw=dict(ml_root=str(tmp_path)), path=tmp_path / "cfg.yaml")
+    assert c.dataset_dir("d1") == d
+    assert d1_vis_mag_limit(c, 1.0) == 24.0 and d1_vis_mag_limit(c, 0.0) == 22.0

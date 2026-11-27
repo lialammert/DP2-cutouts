@@ -99,11 +99,11 @@ def main():
     for p in load_patches(pcfg):
         case = patch_case(pcfg, p)
         try:
+            cat = pd.read_parquet(case.data("30_processed", "catalog.parquet"))
             props.append(euclid_properties(case))
-        except FileNotFoundError as err:
+        except FileNotFoundError as err:                # patch without products (not processed, no target)
             print(f"{p['name']}: skipped ({err})", flush=True)
             continue
-        cat = pd.read_parquet(case.data("30_processed", "catalog.parquet"))
         cat = cat[owned(cat, p).to_numpy() & cat["has_euclid_counterpart"].astype(bool).to_numpy()]
         members["matches"] |= set(cat["euclid_object_id"].astype("int64"))
         cand, _ = dataset2.candidate_targets(case, cfg, p)

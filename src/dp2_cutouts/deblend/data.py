@@ -29,6 +29,7 @@ import json
 
 import keras
 import numpy as np
+import pandas as pd
 
 from ..ml.data import aug_images, aug_mask2d
 from ..pairs.store import Store
