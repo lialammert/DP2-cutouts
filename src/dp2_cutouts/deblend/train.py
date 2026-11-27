@@ -39,7 +39,27 @@ def settings(cfg, stage):
     st = dict(db.get(stage, db.get(stage.lower(), {})) or {})
     tr = dict(db["train"])
     tr.update(st.pop("train", {}) or {})
-    return dict(stage=stage, d=int(db["latent_dim"]), train=tr, model=st)
+    return dict(stage=stage, d=int(db["latent_dim"]), train=scale_for_batch(tr), model=st)
+
+
+def scale_for_batch(tr):
+    # Batch sizes larger than the recipe's (to fill the GPU): the learning rate follows lr_scaling (sqrt: x
+    # sqrt(B / lr_reference_batch), linear, or none) and a budget in examples (train_examples) sets the number of
+    # steps, so that a larger batch sees the same data in fewer, larger steps. At B = lr_reference_batch nothing
+    # changes.
+    tr = dict(tr)
+    b = int(tr["batch_size"])
+    ref = tr.get("lr_reference_batch")
+    mode = str(tr.get("lr_scaling") or "none")
+    if ref and mode != "none":
+        f = {"sqrt": (b / int(ref)) ** 0.5, "linear": b / int(ref)}.get(mode)
+        if f is None:
+            raise ValueError(f"deblend.train.lr_scaling must be sqrt, linear or none, not {mode!r}")
+        tr["learning_rate_reference"] = float(tr["learning_rate"])
+        tr["learning_rate"] = float(tr["learning_rate"]) * f
+    if tr.get("train_examples"):
+        tr["train_steps"] = int(np.ceil(int(tr["train_examples"]) / b))
+    return tr
 
 
 def dep_dir(cfg, stage, seed=None):

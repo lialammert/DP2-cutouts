@@ -391,3 +391,79 @@ def test_lost_flux_selection_of_d1_and_d2(cfg):
     finally:
         f1.unlink()
         f2.unlink()
+
+
+def test_compact_copies_give_identical_batches(cfg, tmp_path):
+    # deblend-compact d1 / d2 (flux and weight, VIS only), read memory-mapped or in memory: the batches are the same,
+    # bit for bit, as from the original arrays, with masked, NaN and ivar <= 0 pixels and the neighbour fill.
+    import shutil
+
+    from dp2_cutouts.deblend import compact, data
+    from dp2_cutouts.mlconfig import MLConfig
+    root = tmp_path / "ml"
+    shutil.copytree(cfg.root / "datasets", root / "datasets")
+    shutil.copytree(data.deblend_dir(cfg), root / "deblend")
+    rng = np.random.default_rng(5)
+    for which in ("d1", "d2"):
+        d = root / "datasets" / which
+        for name in [k for k in ("rubin_flux", "rubin_flux_rc", "euclid_flux") if (d / f"{k}.npy").exists()]:
+            a = np.load(d / f"{name}.npy", mmap_mode="r+")
+            a[rng.random(a.shape) < 0.01] = np.nan
+            a.flush()
+            m = np.load(d / f"{name.replace('flux', 'mask')}.npy", mmap_mode="r+")
+            m[rng.random(m.shape) < 0.02] = True
+            m.flush()
+            iv = np.load(d / f"{name.replace('flux', 'ivar')}.npy", mmap_mode="r+")
+            iv[rng.random(iv.shape) < 0.02] = 0.0
+            iv.flush()
+    raw = json.loads(json.dumps(cfg.raw))
+    raw["ml_root"] = str(root)
+    off = MLConfig(raw=json.loads(json.dumps(raw)), path=root / "cfg.yaml")
+    raw["deblend"]["data"] = dict(compact=True, in_memory=["d1", "d2"], compact_d1=["euclid", "rubin"])
+    on = MLConfig(raw=raw, path=root / "cfg.yaml")
+    with pytest.raises(RuntimeError, match="deblend-compact"):
+        data.D2Batches(on, "train", 4, True, seed=2)
+    info1 = compact.build(on, "d1", workers=1)
+    info2 = compact.build(on, "d2", workers=2)                # through the process pool
+    assert info1["rows"] == 24 and set(info1["sides"]) == {"euclid", "rubin"}
+    assert info2["rows"] == len(np.unique(np.concatenate([data.D2Batches(off, s, 4, False).rows_all
+                                                          for s in ("train", "val")])))
+    for train in (True, False):
+        for cls, split in ((data.D1Batches, "train"), (data.D2Batches, "train"), (data.D2Batches, "val")):
+            a, b = cls(off, split, 4, train, seed=2), cls(on, split, 4, train, seed=2)
+            assert not a.sides and set(b.sides) == {"euclid", "rubin"}
+            assert (b.sides["euclid"].local is not None) == train
+            for i in range(len(a)):
+                xa, xb = a[i][0], b[i][0]
+                assert set(xa) == set(xb)
+                for k in xa:
+                    np.testing.assert_array_equal(xa[k], xb[k], err_msg=f"{cls.__name__} {split} {k}")
+    # A copy of an older dataset is not used.
+    (root / "datasets" / "d2" / "meta.parquet").touch()
+    import os
+    st = os.stat(root / "datasets" / "d2" / "meta.parquet")
+    os.utime(root / "datasets" / "d2" / "meta.parquet", ns=(st.st_atime_ns, st.st_mtime_ns + 10 ** 9))
+    assert compact.read_info(on, "d2") is None
+
+
+def test_bench_times_every_trained_stage_and_the_loaders(cfg):
+    # After the stage test (same module fixture): deblend-bench on two tiny batch sizes.
+    from dp2_cutouts.deblend import bench
+    res = bench.run(cfg, sizes=[2, 4], loader_batches=2, steps=1)
+    assert set(res["stages"]) == {"rubin_vae", "k1", "k2", "A", "B", "c1", "c2", "c3"}
+    for st, r in res["stages"].items():
+        assert set(r["sizes"]) == {2, 4} and r["sizes"][4]["examples_per_s"] > 0, st
+        assert r["saturation_batch"] in (2, 4)
+    assert res["loaders"]["d1 original"]["examples_per_s"] > 0
+    assert "skipped" in res["loaders"]["d2 compact, memory-mapped"]
+
+
+def test_larger_batches_scale_the_learning_rate_and_keep_the_examples_budget():
+    from dp2_cutouts.deblend.train import scale_for_batch
+    base = dict(batch_size=128, learning_rate=1e-4, lr_scaling="sqrt", lr_reference_batch=128,
+                train_examples=5_120_000, train_steps=1)
+    assert scale_for_batch(base)["learning_rate"] == pytest.approx(1e-4)
+    assert scale_for_batch(base)["train_steps"] == 40000
+    big = scale_for_batch(dict(base, batch_size=1024))
+    assert big["learning_rate"] == pytest.approx(1e-4 * 8 ** 0.5) and big["train_steps"] == 5000
+    assert scale_for_batch(dict(base, batch_size=1024, lr_scaling="none"))["learning_rate"] == 1e-4

@@ -18,6 +18,10 @@
 #   export-rubin-vae                Rubin stamps of D1 as a debvader-keras real build, to train the reference VAE
 #                                   (--debvader-run: template run whose config.json gives the architecture)
 #   deblend-stats                   normalisation scales of the deblending campaign (D1 train split)
+#   deblend-compact d1|d2           compact copies for the loaders (flux and weight, VIS only; deblend/compact.py),
+#                                   used when deblend.data.compact is on; resumes after a walltime cut
+#   deblend-bench                   GPU throughput of each stage against the batch size, and loader throughput
+#                                   (deblend/bench.py; --stages, --batch-sizes, --loader-batches)
 #   deblend-train STAGE [--seed S]  train one stage of the campaign: rubin_vae, k1, k2, A, B, c1, c2, c3
 #                                   (--max-steps N: short pilot / smoke run)
 #   deblend-eval WHAT [--seed S]    evaluations of the campaign (see deblend/evaluate.py)
@@ -39,7 +43,7 @@ import traceback
 
 COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "d2-flags", "mask-loss", "quality", "repair-meta", "blends",
             "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2", "deblend-stats",
-            "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance")
+            "deblend-compact", "deblend-bench", "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance")
 
 
 def _debvader_run(args):
@@ -80,6 +84,18 @@ def _deblend(cfg, args, c):
         stats = data.compute_norm_stats(cfg, int(cfg["deblend"].get("stats_max_examples", 20000)))
         (out / "norm_stats.json").write_text(json.dumps(stats, indent=2))
         print(json.dumps(stats, indent=2))
+        return
+    if c == "deblend-compact":
+        from .deblend import compact
+        if args.what not in ("d1", "d2"):
+            sys.exit("deblend-compact needs d1 or d2")
+        info = compact.build(cfg, args.what, int(os.environ.get("SLURM_CPUS_PER_TASK") or 8))
+        print(f"{args.what}: compact copy of {info['rows']:,} rows ({info['bytes_per_row'] / 1e3:.0f} kB per row) -> "
+              f"{compact.compact_dir(cfg, args.what)}")
+        return
+    if c == "deblend-bench":
+        from .deblend import bench
+        bench.run(cfg, args.stages, args.batch_sizes, args.loader_batches, args.steps)
         return
     if c == "deblend-train":
         from .deblend import train
@@ -124,6 +140,10 @@ def main(argv=None):
     ap.add_argument("--time-budget-min", type=float,
                     help="deblend-train: stop after that many minutes without finishing, resumable (default: "
                          "$DEBLEND_TIME_BUDGET_MIN, set by deblend.slurm)")
+    ap.add_argument("--stages", nargs="+", help="deblend-bench: stages to time (default: all trainable)")
+    ap.add_argument("--batch-sizes", nargs="+", type=int, help="deblend-bench: batch sizes (default 32 ... 2048)")
+    ap.add_argument("--loader-batches", type=int, default=30, help="deblend-bench: batches read per loader timing")
+    ap.add_argument("--steps", type=int, default=20, help="deblend-bench: timed optimisation steps per batch size")
     ap.add_argument("--after", help="deblend-campaign: Slurm dependency of the first jobs, e.g. afterok:123")
     args = ap.parse_args(argv)
 

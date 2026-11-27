@@ -24,6 +24,9 @@
 #           not available at inference (kept for diagnostics only).
 # Augmentation (train only): the same rotation by k x 90 degrees and flip on every image of an example. Optional
 # masking augmentation of D1 Euclid inputs with real D2 neighbour masks (deblend.k1.mask_augment_prob).
+# Reading (deblend.data): from the compact copies of deblend/compact.py when deblend.data.compact is on (flux and
+# weight per side, VIS only; identical batches), the training rows of the datasets listed in deblend.data.in_memory
+# copied into memory when they fit.
 
 import json
 
@@ -33,6 +36,7 @@ import pandas as pd
 
 from ..ml.data import aug_images, aug_mask2d
 from ..pairs.store import Store
+from .compact import euclid_fw, open_sides, rubin_fw
 
 
 def asinh_norm(f, s):
@@ -263,22 +267,22 @@ class Prepare:
         e_bands = list(cfg["euclid"]["bands"])
         self.vis = e_bands.index(cfg["deblend"]["euclid_band"])
 
+    # Everything derives from (flux, w), w = likelihood weight (compact.py): the stored arrays and the compact copies
+    # give the same batches.
+    def rubin_w(self, f, w, rng):
+        x = asinh_norm(noise_fill(f, w, ~(w > 0), rng), self.norm.r_scale)
+        return x, f, w
+
+    def euclid_w(self, f, w, rng):
+        ok = w > 0
+        x = asinh_norm(noise_fill(f, w, ~ok, rng), self.norm.e_scale)
+        return np.concatenate([x, ok.astype(np.float32)], axis=-1), f, w
+
     def rubin(self, f, iv, m, rng):
-        bad = m | ~(iv > 0) | ~np.isfinite(iv) | ~np.isfinite(f)
-        w = np.where(bad, 0.0, iv).astype(np.float32)
-        x = asinh_norm(noise_fill(f, iv, bad, rng), self.norm.r_scale)
-        return x, np.nan_to_num(f).astype(np.float32), w
+        return self.rubin_w(*rubin_fw(f, iv, m), rng)
 
     def euclid(self, f, iv, m, fill, rng):
-        c = self.vis
-        f, iv, m = f[..., c:c + 1], iv[..., c:c + 1], m[..., c:c + 1]
-        bad = m | ~(iv > 0) | ~np.isfinite(iv) | ~np.isfinite(f)
-        if fill is not None:
-            bad = bad | fill[..., None]
-        w = np.where(bad, 0.0, iv).astype(np.float32)
-        x = asinh_norm(noise_fill(f, iv, bad, rng), self.norm.e_scale)
-        x = np.concatenate([x, (~bad).astype(np.float32)], axis=-1)
-        return x, np.nan_to_num(f).astype(np.float32), w
+        return self.euclid_w(*euclid_fw(f, iv, m, fill, self.vis), rng)
 
 
 class D1Batches(Batches):
@@ -297,6 +301,7 @@ class D1Batches(Batches):
                                "deblend.require_d1_euclid_fill: false (Euclid neighbours then count as target)")
         self.mask_pool = mask_pool          # (M, n_e, n_e) bool: real D2 neighbour masks
         self.mask_prob = float(mask_prob) if train else 0.0
+        self.sides = open_sides(cfg, "d1", self.rows_all, train)
 
     def __getitem__(self, i):
         rows = self.rows(i)
@@ -304,20 +309,31 @@ class D1Batches(Batches):
         ks, fl = self.augment(rng, len(rows))
         x = {}
         if "rubin" in self.fields:
-            f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in ("rubin_flux", "rubin_ivar", "rubin_mask"))
-            x["r_in"], x["r_flux"], x["r_w"] = self.prep.rubin(f, iv, m, rng)
+            if "rubin" in self.sides:
+                fw = _apply_aug(self.sides["rubin"].take(rows), ks, fl)
+                h = fw.shape[-1] // 2
+                x["r_in"], x["r_flux"], x["r_w"] = self.prep.rubin_w(fw[..., :h], fw[..., h:], rng)
+            else:
+                f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl)
+                            for k in ("rubin_flux", "rubin_ivar", "rubin_mask"))
+                x["r_in"], x["r_flux"], x["r_w"] = self.prep.rubin(f, iv, m, rng)
         if "euclid" in self.fields:
-            f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in ("euclid_flux", "euclid_ivar",
-                                                                          "euclid_mask"))
-            fill = _apply_aug(self.st.take("euclid_fill", rows), ks, fl, two_d=True) if self.has_fill \
-                else np.zeros(f.shape[:3], bool)
+            if "euclid" in self.sides:
+                fw = _apply_aug(self.sides["euclid"].take(rows), ks, fl)
+                f, w = fw[..., :1], fw[..., 1:]
+            else:
+                f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in ("euclid_flux", "euclid_ivar",
+                                                                              "euclid_mask"))
+                fill = _apply_aug(self.st.take("euclid_fill", rows), ks, fl, two_d=True) if self.has_fill \
+                    else None
+                f, w = euclid_fw(f, iv, m, fill, self.prep.vis)
             if self.mask_pool is not None and self.mask_prob > 0:
                 use = rng.random(len(rows)) < self.mask_prob
                 pick = rng.integers(0, len(self.mask_pool), len(rows))
                 extra = np.where(use[:, None, None], self.mask_pool[pick], False)
-                fill = fill | extra
+                w = np.where(extra[..., None], 0.0, w).astype(np.float32)
                 x["e_aug_masked"] = use.astype(np.float32)
-            x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid(f, iv, m, fill, rng)
+            x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid_w(f, w, rng)
         return x, np.zeros((len(rows),), np.float32)
 
 
@@ -333,6 +349,7 @@ class D2Batches(Batches):
         self.fields = tuple(fields)
         sfx = "_rc" if self.centering == "rubin" else ""
         self.rkeys = tuple(f"rubin_{q}{sfx}" for q in ("flux", "ivar", "mask"))
+        self.sides = open_sides(cfg, "d2", self.rows_all, train)
 
     def __getitem__(self, i):
         rows = self.rows(i)
@@ -340,13 +357,22 @@ class D2Batches(Batches):
         ks, fl = self.augment(rng, len(rows))
         x = {}
         if "blend" in self.fields:
-            f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in self.rkeys)
-            x["x_in"], x["x_flux"], x["x_w"] = self.prep.rubin(f, iv, m, rng)
+            if "rubin" in self.sides:
+                fw = _apply_aug(self.sides["rubin"].take(rows), ks, fl)
+                h = fw.shape[-1] // 2
+                x["x_in"], x["x_flux"], x["x_w"] = self.prep.rubin_w(fw[..., :h], fw[..., h:], rng)
+            else:
+                f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in self.rkeys)
+                x["x_in"], x["x_flux"], x["x_w"] = self.prep.rubin(f, iv, m, rng)
         if "euclid" in self.fields:
-            f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in ("euclid_flux", "euclid_ivar",
-                                                                          "euclid_mask"))
-            fill = _apply_aug(self.st.take("euclid_fill", rows), ks, fl, two_d=True)
-            x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid(f, iv, m, fill, rng)
+            if "euclid" in self.sides:
+                fw = _apply_aug(self.sides["euclid"].take(rows), ks, fl)
+                x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid_w(fw[..., :1], fw[..., 1:], rng)
+            else:
+                f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in ("euclid_flux", "euclid_ivar",
+                                                                              "euclid_mask"))
+                fill = _apply_aug(self.st.take("euclid_fill", rows), ks, fl, two_d=True)
+                x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid(f, iv, m, fill, rng)
         return x, np.zeros((len(rows),), np.float32)
 
 

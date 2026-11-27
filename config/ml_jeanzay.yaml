@@ -326,6 +326,13 @@ deblend:
     lost_sigma: 3.0                # same rule as D2; ~9 % of D1 on the preview sample. Needs d1/mask_loss.parquet
                                    # (dp2-ml mask-loss d1). null: off
   require_d1_euclid_fill: true     # refuse a D1 built without dataset1.euclid_neighbour_mask
+  data:                            # how the loaders read (deblend/compact.py), 2026-11-27
+    compact: true                  # from the compact copies (flux + weight, VIS only; identical batches): dp2-ml
+                                   # deblend-compact d1 / d2 first. The pilot read 712 kB per D1 pair, 4 Euclid bands
+    require_compact: true          # refuse to train without an up-to-date copy (else: original arrays, slow)
+    compact_d1: [euclid]           # D1 sides copied (rubin too: +248 GB, one read instead of three per block)
+    in_memory: [d2]                # training rows copied into memory (D2 train ~32 GB) when they fit
+    memory_fraction: 0.6           # ... in this fraction of the job's memory limit, else kept memory-mapped
   stats_max_examples: 20000
   seed: 20261124
   replicate_dependencies: false    # seeds replicate the students (A, B, C2, C3); K1, K2, C1 shared
@@ -341,6 +348,9 @@ deblend:
     batch_size: 128
     learning_rate: 1.0e-4          # debvader-keras real stage 1 (Adam, batch 128)
     clipnorm: 1.0
+    lr_scaling: sqrt               # larger batches (GPU saturation, deblend-bench): lr x sqrt(B / 128)
+    lr_reference_batch: 128
+    train_examples: 5120000        # budget in examples (= 40 000 steps of 128, ~5 D1 epochs); sets the steps
     train_steps: 40000             # step budget (epochs derived from it). Pilot of 2026-11-27: ~2-3 s per step with
                                    # the block reading, so ~1-1.5 day per stage (13-17 chained 2 h jobs, max_jobs_train 30)
     epochs: 100                    # used when train_steps is null
