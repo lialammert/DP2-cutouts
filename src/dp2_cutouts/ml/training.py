@@ -130,8 +130,14 @@ def validation_indices(meta, split, max_examples, seed):
     return np.sort(np.random.default_rng(seed).choice(rows, size=int(max_examples), replace=False))
 
 
-def optimizer(lr, clipnorm):
-    kw = dict(learning_rate=float(lr))
+def optimizer(lr, clipnorm, warmup_steps=0):
+    # warmup_steps > 0: the learning rate rises linearly from lr / 100 to lr over that many steps, then stays at lr
+    # (larger batches of a multi-GPU stage, deblend.train.gpus).
+    rate = float(lr)
+    if warmup_steps and int(warmup_steps) > 0:
+        rate = keras.optimizers.schedules.CosineDecay(initial_learning_rate=rate / 100, decay_steps=1, alpha=1.0,
+                                                      warmup_target=rate, warmup_steps=int(warmup_steps))
+    kw = dict(learning_rate=rate)
     if clipnorm and float(clipnorm) > 0:
         kw["clipnorm"] = float(clipnorm)
     return keras.optimizers.Adam(**kw)

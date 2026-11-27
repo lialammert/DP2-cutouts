@@ -363,14 +363,19 @@ deblend:
     read_block: auto               # compact copy (shuffled): batch / 4 consecutive rows per read; else 16 rows
                                    # (deblend/data.py Batches). Before: blocks of 16 consecutive rows:
                                    # the pilot read rows one by one, 5-9 s per step on Lustre
-    workers: 8                     # threads preparing batches ahead of the GPU
+    workers: auto                  # threads preparing batches ahead of the GPU (auto: the job's cores)
+    gpus: 1                        # data parallel over this many GPUs (batch_size per GPU); per stage below
+    warmup_steps: 0                # linear warm-up of the learning rate (multi-GPU stages: 300)
   rubin_vae: {beta: 1.0}
-  k1: {beta: 1.0, mask_augment_prob: 0.0, mask_pool_size: 5000}
+  k1: {beta: 1.0, mask_augment_prob: 0.0, mask_pool_size: 5000,
+       train: {gpus: 4, warmup_steps: 300}}   # deblend-bench 2026-11-27: ~350 ex/s on one V100
   k2: {}
   A: {embed: 128, dropout: 0.1}
   B: {context: 128, hidden: [128, 128], standardise: true, stats_batches: 100}
-  c1: {embed: 128, fusion: [256], beta: 1.0, weight_r: 1.0, weight_e: 1.0}
-  c2: {embed: 128, fusion: [256], lambda_d1: auto, lambda_batches: 8}
+  c1: {embed: 128, fusion: [256], beta: 1.0, weight_r: 1.0, weight_e: 1.0,
+       train: {gpus: 4, warmup_steps: 300}}   # ~280 ex/s on one V100
+  c2: {embed: 128, fusion: [256], lambda_d1: auto, lambda_batches: 8,
+       train: {gpus: 4, warmup_steps: 300}}   # ~515 ex/s on one V100
   c3: {context: 128, hidden: [128, 128], standardise: true, stats_batches: 100, lambda_replay: 1.0,
        init_context_from_c2: true}
   eval:

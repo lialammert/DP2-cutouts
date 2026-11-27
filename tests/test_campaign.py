@@ -195,3 +195,20 @@ def test_unknown_mode_and_comma_in_overrides_are_refused(tmp_path):
         C.start(cfg, tmp_path / "cfg.yaml", [], "everything", runner=FakeSlurm(), env=ENV)
     with pytest.raises(SystemExit):
         C.start(cfg, tmp_path / "cfg.yaml", ["deblend.x=[1,2]"], "all", runner=FakeSlurm(), env=ENV)
+
+
+def test_multi_gpu_stages_ask_for_their_gpus_and_cores(tmp_path):
+    # deblend.<stage>.train.gpus: the training job asks for that many GPUs and their share of the cores, after
+    # DP2_GPU_EXTRA (whose --cpus-per-task it overrides); the other stages keep the default request.
+    cfg = _cfg(tmp_path, "_pilot")
+    cfg.raw["deblend"]["c1"] = dict(train=dict(gpus=4))
+    slurm = FakeSlurm()
+    env = dict(ENV, DP2_GPU_EXTRA="-C v100-32g --qos=qos_gpu-t3 --cpus-per-task=10")
+    C.start(cfg, tmp_path / "cfg.yaml", [], "pilot", max_steps=300, split="val", runner=slurm, env=env)
+    (C.deblend_dir(cfg) / "norm_stats.json").write_text("{}")
+    slurm.queue = []
+    _advance(cfg, slurm, env)
+    cmds = {n: c for n, c, _ in slurm.submitted}
+    c1, vae = cmds["dbl.r_c1_pilot"], cmds["dbl.r_rubin_vae_pilot"]
+    assert "--gres=gpu:4" in c1 and c1.index("--cpus-per-task=40") > c1.index("--cpus-per-task=10")
+    assert not any(a.startswith("--gres") for a in vae) and "--cpus-per-task=40" not in vae

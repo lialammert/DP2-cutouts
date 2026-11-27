@@ -17,6 +17,7 @@
 # validation loss of the stage only (never on test or holdout).
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -39,7 +40,27 @@ def settings(cfg, stage):
     st = dict(db.get(stage, db.get(stage.lower(), {})) or {})
     tr = dict(db["train"])
     tr.update(st.pop("train", {}) or {})
+    g = int(tr.get("gpus", 1) or 1)
+    if g > 1:
+        # Data parallel: batch_size examples per GPU, the optimiser sees g x batch_size per step.
+        tr["batch_size_per_device"] = int(tr["batch_size"])
+        tr["batch_size"] = int(tr["batch_size"]) * g
     return dict(stage=stage, d=int(db["latent_dim"]), train=scale_for_batch(tr), model=st)
+
+
+def data_parallel(n):
+    # Replicates the model on the first n devices and splits every batch between them (keras.distribution
+    # DataParallel, JAX: gradients averaged across devices at every step). Set before the model is built.
+    devs = keras.distribution.list_devices()
+    if len(devs) < n:
+        raise RuntimeError(f"deblend.train.gpus = {n} but only {len(devs)} devices: {devs} (sbatch --gres=gpu:{n})")
+    keras.distribution.set_distribution(keras.distribution.DataParallel(devices=devs[:n]))
+    print(f"data parallel on {n} devices: {devs[:n]}", flush=True)
+
+
+def _trim(rows, g):
+    # Validation rows: a multiple of the number of devices, so that every batch splits evenly.
+    return rows if rows is None or g <= 1 else rows[:len(rows) - len(rows) % g]
 
 
 def scale_for_batch(tr):
@@ -204,7 +225,9 @@ def calibrate_lambda(model, ds, n_batches=8, fallback=1.0):
 def _loaders(cfg, s, which, seed, workers=None):
     tr = s["train"]
     bs = int(tr["batch_size"])
-    workers = int(workers or tr.get("workers", 4))
+    w = workers or tr.get("workers", 4)
+    workers = int(os.environ.get("SLURM_CPUS_PER_TASK") or 8) if w == "auto" else int(w)
+    g = int(tr.get("gpus", 1) or 1)
     blk = tr.get("read_block", 1)
     kw = dict(workers=workers, use_multiprocessing=False, max_queue_size=8,
               block=blk if blk == "auto" else int(blk or 1))
@@ -217,6 +240,9 @@ def _loaders(cfg, s, which, seed, workers=None):
         vidx = validation_indices(st.meta, "val", tr.get("val_max_examples"), seed)
         if vidx is not None:
             vidx = vidx[keep[vidx]]
+        elif g > 1:
+            vidx = np.flatnonzero((st.meta["split"] == "val").to_numpy() & keep)
+        vidx = _trim(vidx, g)
         fields = s.get("fields", ("rubin", "euclid"))
         pool = s.get("mask_pool")
         prob = float(s["model"].get("mask_augment_prob", 0.0))
@@ -232,6 +258,7 @@ def _loaders(cfg, s, which, seed, workers=None):
         mx = tr.get("val_max_examples")
         if mx and len(rows) > int(mx):
             rows = np.sort(np.random.default_rng(seed).choice(rows, int(mx), replace=False))
+        rows = _trim(rows, g)
         return (data.D2Batches(cfg, "train", bs, True, seed, meta_columns=cols, **kw),
                 data.D2Batches(cfg, "val", bs, False, seed, indices=rows, meta_columns=cols))
     if which == "mixed":
@@ -385,6 +412,17 @@ def train(cfg, stage, seed=None, resume=True, force=False, max_steps=None, time_
     if max_steps:
         s["train"].update(train_steps=int(max_steps), backup_every_steps=None)
     deps = {k: dep_dir(cfg, k, seed) for k in DEPENDS[stage]}
+    gpus = int(s["train"].get("gpus", 1) or 1)
+    if gpus > 1:
+        data_parallel(gpus)
+    try:
+        return _train(cfg, stage, seed, s, deps, rd, seed_v, t0, resume, max_steps, time_budget_s)
+    finally:
+        if gpus > 1:
+            keras.distribution.set_distribution(None)
+
+
+def _train(cfg, stage, seed, s, deps, rd, seed_v, t0, resume, max_steps, time_budget_s):
     model, (tr, va), frozen, subs = build(cfg, stage, s, seed_v, deps)
     guard = FrozenGuard(**frozen) if frozen else None
     from ..ml.debvader_bridge import weights_fingerprint
@@ -398,7 +436,8 @@ def train(cfg, stage, seed=None, resume=True, force=False, max_steps=None, time_
                                      n_params={k: int(v.count_params()) for k, v in subs.items()},
                                      n_train_batches=len(tr), d2_selection=_selection(tr),
                                      environment=environment()))
-    model.compile(optimizer=optimizer(s["train"]["learning_rate"], s["train"].get("clipnorm")))
+    model.compile(optimizer=optimizer(s["train"]["learning_rate"], s["train"].get("clipnorm"),
+                                      s["train"].get("warmup_steps", 0)))
     resumable = resume and not max_steps
     cbs = callbacks(rd, subs, s["train"]["early_stopping_patience"], resumable, s["train"].get("backup_every_steps"))
     budget = None

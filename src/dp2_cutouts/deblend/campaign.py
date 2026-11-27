@@ -79,6 +79,13 @@ def dep_seed(cfg, seed):
 
 
 # ----------------------------------------------------------------------------- the graph
+def stage_gpus(cfg, stage):
+    # deblend.<stage>.train.gpus, else deblend.train.gpus, else 1 (no keras here: the campaign runs on login nodes).
+    db = cfg["deblend"]
+    own = ((db.get(stage) or {}).get("train") or {}).get("gpus")
+    return int(own if own is not None else (db.get("train") or {}).get("gpus", 1) or 1)
+
+
 def nodes(cfg, spec):
     # Ordered dict job name -> node. A node: kind (cpu | train | eval), args (dp2-ml arguments), deps (job names),
     # done, submit (False: must already exist, never submitted by this campaign), max_jobs.
@@ -114,7 +121,8 @@ def nodes(cfg, spec):
                 (["--max-steps", str(spec["max_steps"])] if spec.get("max_steps") else [])
             out[tname(stage, s)] = dict(kind="train", args=args, deps=deps, submit=True,
                                         done=(run_dir(cfg, stage, s) / "DONE").exists(),
-                                        max_jobs=2 if spec.get("max_steps") else int(st["max_jobs_train"]))
+                                        max_jobs=2 if spec.get("max_steps") else int(st["max_jobs_train"]),
+                                        gpus=stage_gpus(cfg, stage))
     # Runs this campaign relies on without training them (shared stages of `seeds`, everything for `final`).
     for stage, s in sorted(needed, key=lambda t: (STAGES.index(t[0]), -1 if t[1] is None else t[1])):
         name = tname(stage, s)
@@ -179,6 +187,11 @@ def sbatch_cmd(node, name, spec_path, spec, env, dependency):
               [f"{scripts}/cpu.slurm"] + node["args"]
         return cmd, _clean_env(env, jenv, drop=("SBATCH_QOS", "SBATCH_TIMELIMIT", "SBATCH_ACCOUNT"))
     extra = shlex.split(env.get("DP2_GPU_EXTRA") or "")
+    g = int(node.get("gpus", 1) or 1)
+    if g > 1:
+        # A multi-GPU stage: g GPUs and their share of the node's cores (DP2_GPU_CPUS_PER_GPU, 10 on the V100
+        # nodes, 8 on the A100 ones), after DP2_GPU_EXTRA so that they win over its --cpus-per-task.
+        extra += [f"--gres=gpu:{g}", f"--cpus-per-task={g * int(env.get('DP2_GPU_CPUS_PER_GPU') or 10)}"]
     cmd = ["sbatch", "--parsable", f"--account={env['DP2_GPU_ACCOUNT']}"] + extra + [f"--job-name={name}"] + dep + \
           [f"{scripts}/deblend.slurm"] + node["args"]
     return cmd, _clean_env(env, jenv)

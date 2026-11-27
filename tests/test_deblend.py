@@ -536,3 +536,31 @@ def test_input_normalisation_on_the_gpu_gives_the_same_encodings(cfg):
         np.testing.assert_allclose(ge, me, rtol=1e-4, atol=1e-5)
     finally:
         layers.INPUT_NORM.clear()
+
+
+def test_a_stage_trains_data_parallel_on_two_devices(cfg, tmp_path):
+    # deblend.k1.train.gpus = 2 on two simulated CPU devices (fresh process: the device count is fixed when JAX
+    # starts): trained to DONE, global batch = 2 x the per-device batch, learning rate scaled, warm-up accepted.
+    import os
+    import subprocess
+    import sys
+
+    import yaml
+    raw = json.loads(json.dumps(cfg.raw))
+    raw["deblend"]["k1"] = dict(raw["deblend"].get("k1") or {}, train=dict(gpus=2, warmup_steps=2))
+    raw["deblend"]["train"].update(lr_scaling="sqrt", lr_reference_batch=4)
+    raw["deblend"]["runs"]["k1"] = "t_k1_dp"
+    p = tmp_path / "cfg.yaml"
+    p.write_text(yaml.safe_dump(raw))
+    code = ("from dp2_cutouts.mlconfig import MLConfig\nfrom dp2_cutouts.deblend import train\n"
+            f"rd = train.train(MLConfig.load({str(p)!r}), 'k1')\nprint('RUN', rd)\n")
+    env = dict(os.environ, XLA_FLAGS="--xla_force_host_platform_device_count=2", JAX_PLATFORMS="cpu",
+               KERAS_BACKEND="jax")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=900, env=env)
+    assert "data parallel on 2 devices" in out.stdout, out.stdout[-2000:] + out.stderr[-3000:]
+    rd = next(line.split(" ", 1)[1] for line in out.stdout.splitlines() if line.startswith("RUN "))
+    from pathlib import Path
+    assert (Path(rd) / "DONE").exists()
+    tr = json.loads((Path(rd) / "run.json").read_text())["settings"]["train"]
+    assert tr["batch_size"] == 8 and tr["batch_size_per_device"] == 4
+    assert tr["learning_rate"] == pytest.approx(tr["learning_rate_reference"] * 2 ** 0.5)
