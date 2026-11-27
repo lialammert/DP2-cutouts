@@ -54,10 +54,9 @@ def _device():
 
 
 def _take(x, b):
-    # The first b examples of a batch, tiled when it holds fewer.
-    n = len(next(iter(x.values())))
-    idx = np.arange(b) % n
-    return {k: v[idx] for k, v in x.items()}
+    # The first b examples of a batch, tiled when it holds fewer; each input on its own length (mixed D2 / D1 batches
+    # of C2, C3: the D2 validation pool can be smaller than the D1 one; bench of 2026-11-27 stopped on c3 at 2048).
+    return {k: v[np.arange(b) % len(v)] for k, v in x.items()}
 
 
 def gpu_stage(cfg, stage, sizes, steps):
