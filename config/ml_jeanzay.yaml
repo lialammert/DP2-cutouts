@@ -384,7 +384,8 @@ deblend:
               train: {global_clipnorm: 1.06e+6}}             # Q50 8.4e4, Q99 2.7e6
   k1: {beta: 1.0, kl_warmup_frac: 0.1, mask_augment_prob: 0.0, mask_pool_size: 5000,
        train: {gpus: 4, global_clipnorm: 6.68e+4}}           # Q50 1.5e4, Q99 1.1e5; pilot: 1 360 ex/s on 4 V100
-  k2: {train: {global_clipnorm: 3.76e+5}}                    # Q50 5.3e4, Q99 1.9e6
+  k2: {train: {gpus: 4, global_clipnorm: 3.76e+5}}           # Q50 5.3e4, Q99 1.9e6 (measured at B = 128; at
+                                                             # 512 the norms are lower: still a permissive bound)
   # Students: D2 and a D1 replay 50 / 50 (replay: true), 60 epochs, best checkpoint on their D2 validation term.
   A: {embed: 128, dropout: 0.1, draws: 8, val_draws: 32, replay: true, lambda_replay: 1.0, standardise: true,
       stats_batches: 100, train: {epochs: 60, global_clipnorm: 11.9}}   # Q50 6.7, Q99 13.3; energy score of
