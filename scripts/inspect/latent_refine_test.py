@@ -29,6 +29,13 @@ class OutOfTime(RuntimeError):
     pass
 
 
+def note(msg):
+    # Progress with elapsed time and peak memory of the process (to locate a memory kill).
+    import resource
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6      # kB -> GB (Linux)
+    print(f"[{time.time() - T0:6.1f} s, peak {rss:5.1f} GB] {msg}", flush=True)
+
+
 def check_time(max_seconds, where):
     if time.time() - T0 > max_seconds:
         raise OutOfTime(f"{where}: {time.time() - T0:.0f} s > {max_seconds} s")
@@ -70,12 +77,19 @@ def run(cfg, groups=((80, 200), (200, 1e9)), n=32, steps=500, lr=0.03, draws=2, 
     if "rvae" not in camp.parts:
         raise RuntimeError("no finished Rubin VAE")
     enc, dec = camp.parts["rvae"]
-    st = data.Store(cfg.dataset_dir("d1"), None, shared=True)
+    note("models loaded")
+    # Only the metadata columns used here (the first run, with every column of the 1.5 M rows, was killed by the
+    # 40 GB memory limit of the job).
+    cols = list(dict.fromkeys(list(data.train_columns(cfg, "d1")) + ["snr_i", "psf_sigma_i", "psf_e1_i",
+                                                                     "psf_e2_i"]))
+    st = data.Store(cfg.dataset_dir("d1"), cols, shared=True)
+    note("metadata read")
     keep, _ = data.d1_keep(cfg, st.meta)
     rows, labels = select_rows(st.meta, keep, groups, n, seed)
     if len(rows) == 0:
         raise RuntimeError("no validation galaxy in the S/N groups")
-    x, _ = data.D1Batches(cfg, "val", len(rows), False, indices=rows, fields=("rubin",))[0]
+    x, _ = data.D1Batches(cfg, "val", len(rows), False, indices=rows, fields=("rubin",), meta_columns=cols)[0]
+    note(f"{len(rows)} galaxies read")
     mrows = st.meta.iloc[rows].reset_index(drop=True)
     check_time(max_seconds, "data")
     cond = x.get("r_psf")
@@ -113,6 +127,7 @@ def run(cfg, groups=((80, 200), (200, 1e9)), n=32, steps=500, lr=0.03, draws=2, 
         return nll, kl, img
 
     nll0, kl0, img0 = summary(mu0, lv0)
+    note("evaluation before (compiled)")
     check_time(max_seconds, "evaluation before (compilation included)")
     p = [mu0, lv0]
     m = [jnp.zeros_like(a) for a in p]
@@ -132,6 +147,7 @@ def run(cfg, groups=((80, 200), (200, 1e9)), n=32, steps=500, lr=0.03, draws=2, 
             break
         if time.time() - T0 > max_seconds - 40:
             break
+    note(f"optimisation: {len(curve)} steps, converged {done}")
     nll1, kl1, img1 = summary(p[0], p[1])
     obs = evaluate.measure_rubin(np.asarray(x["r_flux"]), np.asarray(x["r_w"]) > 0, mrows, cfg, "o", 6.0)
     s0 = evaluate.measure_rubin(img0, np.asarray(x["r_w"]) > 0, mrows, cfg, "s", 6.0)
