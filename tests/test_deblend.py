@@ -983,8 +983,11 @@ def test_encoder_finetuning_diagnostic_runs_on_the_trained_rubin_vae(cfg):
                       eval_draws=2, max_seconds=900)
     finally:
         sys.path.remove(str(d))
-    assert res["updates"] == 4 and 4 in res["val_elbo_median"]
+    assert res["updates"] == 4 and 0 in res["val_elbo_median"] and 4 in res["selection_elbo_mean"]
+    from dp2_cutouts.deblend import train
+    assert res["clipnorm"] == train.settings(cfg, "rubin_vae")["train"].get("global_clipnorm")
+    assert 0 <= res["best_update"] <= 4 and res["selection_galaxies"] > 0
     for g in res["groups"].values():
-        for tag in ("encoder", "finetuned", "optimised"):
+        for tag in ("encoder", "ft_last", "ft_best", "optimised"):
             assert np.isfinite(g[f"elbo_{tag}"]), tag
-        assert "gap_recovered" in g
+        assert "gap_recovered_ft_best" in g
