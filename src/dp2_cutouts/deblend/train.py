@@ -338,11 +338,23 @@ def _loaders(cfg, s, which, seed, workers=None, noise=None):
     noise = noise or {}
     if which == "d1":
         cols = data.train_columns(cfg, "d1")
+        vmin = tr.get("val_min_snr")
+        if vmin is not None:
+            cols = tuple(cols) + ("snr_i",)
         st = data.Store(cfg.dataset_dir("d1"), cols, shared=True)
         keep, info = data.d1_keep(cfg, st.meta)
         if info:
             print(f"D1 selection (deblend.d1_selection): {info}")
-        vidx = validation_indices(st.meta, "val", tr.get("val_max_examples"), seed)
+        if vmin is not None:
+            # val_min_snr: validation on val_max_examples val galaxies at S/N_i >= val_min_snr (a short run judged
+            # where the shapes are reliable), a fixed random choice; their draws are fixed per row as always.
+            cand = np.flatnonzero((st.meta["split"] == "val").to_numpy() & keep &
+                                  (st.meta["snr_i"].to_numpy(float) >= float(vmin)))
+            n = int(tr.get("val_max_examples") or len(cand))
+            vidx = np.sort(np.random.default_rng(seed).choice(cand, min(n, len(cand)), replace=False))
+            print(f"validation: {len(vidx)} val galaxies at S/N_i >= {float(vmin):g}")
+        else:
+            vidx = validation_indices(st.meta, "val", tr.get("val_max_examples"), seed)
         if vidx is not None:
             vidx = vidx[keep[vidx]]
         elif g > 1:
@@ -547,8 +559,14 @@ def train(cfg, stage, seed=None, resume=True, force=False, max_steps=None, time_
 
 def plan(s, n_batches, max_steps=None):
     # Epochs, updates per epoch and total updates of a stage: train_steps (a budget in updates) or epochs; a pilot
-    # (max_steps) runs that many updates.
+    # (max_steps) runs that many updates. updates_per_epoch (with train_steps): shorter "epochs", i.e. a validation
+    # and a checkpoint every that many updates (each one on new batches: the order is redrawn at every epoch).
     tr = s["train"]
+    upe = tr.get("updates_per_epoch")
+    if upe and not max_steps:
+        spe = min(int(n_batches), int(upe))
+        epochs = max(1, int(np.ceil(int(tr.get("train_steps") or spe) / spe)))
+        return epochs, spe, epochs * spe
     spe = min(int(n_batches), int(max_steps)) if max_steps else int(n_batches)
     epochs = schedule(tr, n_batches)
     return epochs, spe, epochs * spe
@@ -612,6 +630,13 @@ def _train(cfg, stage, seed, s, deps, rd, seed_v, t0, resume, max_steps, time_bu
           f"{t['learning_rate']:.3g}, monitor {monitor}, global clipnorm {t.get('global_clipnorm')}"
           + (f", EMA {ema}" if ema else ""), flush=True)
     model.compile(optimizer=opt)
+    if s.get("init_from_run") and not (rd / "start_val.json").exists():
+        # Validation before the first update of a warm-started run: the source's posteriors (the new block starts
+        # at zero), on the same galaxies and draws as every later checkpoint.
+        v = model.evaluate(va, verbose=0, return_dict=True)
+        write_json(rd / "start_val.json", {k: float(x) for k, x in v.items()})
+        print("validation before the first update: " + ", ".join(f"val_{k} {float(x):.6g}" for k, x in v.items()),
+              flush=True)
     resumable = resume and not max_steps
     # W&B (DP2_WANDB=1, offline on the compute nodes): after GradNormLogger, so that its entries are in the epoch logs.
     wb = WandbLogger(rd, rd.name, str(cfg["deblend"].get("run_suffix") or "") or "campaign",
@@ -627,7 +652,8 @@ def _train(cfg, stage, seed, s, deps, rd, seed_v, t0, resume, max_steps, time_bu
         backup = next(c for c in cbs if isinstance(c, keras.callbacks.BackupAndRestore))
         budget = TimeBudget(time_budget_s, backup, t0)
         cbs.append(budget)
-    model.fit(tr, validation_data=va, epochs=epochs, steps_per_epoch=spe if max_steps else None, callbacks=cbs,
+    short = bool(max_steps) or (bool(t.get("updates_per_epoch")) and spe < len(tr))
+    model.fit(tr, validation_data=va, epochs=epochs, steps_per_epoch=spe if short else None, callbacks=cbs,
               verbose=2)
     if budget is not None and budget.hit:
         print(f"deblend {stage}: stopped on the time budget, not finished (no DONE); the same command resumes")

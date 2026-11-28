@@ -318,6 +318,10 @@ def test_latent_residual_block_warm_starts_with_the_same_posteriors_and_frozen_d
         raw["deblend"][st] = dict(raw["deblend"].get(st) or {}, latent_res_hidden=8, init_from=f"t_{st}",
                                   freeze_decoders=True, kl_warmup_frac=0.0)
         raw["deblend"]["runs"][st] = f"t_{st}_res"
+    # The Rubin VAE as on Jean Zay: a short run of train_steps updates, validated every updates_per_epoch on a few
+    # val galaxies above an S/N (the fixture's 8 val rows: S/N 5-80).
+    raw["deblend"]["rubin_vae"]["train"] = dict(train_steps=4, updates_per_epoch=2, val_max_examples=3,
+                                                val_min_snr=40.0)
     cfg2 = MLConfig(raw=raw, path=cfg.path)
     d = int(cfg["deblend"]["latent_dim"])
     src_r = train.run_dir(cfg, "rubin_vae")
@@ -338,9 +342,17 @@ def test_latent_residual_block_warm_starts_with_the_same_posteriors_and_frozen_d
         for a, b in zip(got, ref):
             np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-6, atol=1e-6)
         assert not any(v.trainable for k in frozen for v in getattr(model, k).weights)
-        rd = train.train(cfg2, st, max_steps=3)
+        rd = train.train(cfg2, st, max_steps=None if st == "rubin_vae" else 3)
         assert (rd / "DONE").exists() and json.loads((rd / "frozen_check.json").read_text())["unchanged"]
-        assert json.loads((rd / "run.json").read_text())["settings"]["init_from_run"].endswith(f"t_{st}")
+        run = json.loads((rd / "run.json").read_text())
+        assert run["settings"]["init_from_run"].endswith(f"t_{st}")
+        start = json.loads((rd / "start_val.json").read_text())
+        assert np.isfinite(start["total_loss"])
+        if st == "rubin_vae":
+            sch = run["settings"]["schedule"]
+            assert (sch["epochs"], sch["updates_per_epoch"], sch["total_updates"]) == (2, 2, 4)
+            assert len((rd / "history.csv").read_text().splitlines()) == 1 + 2
+            assert 1 <= len(loaders[1].rows_all) <= 3
     enc = train.load_rubin_encoder(cfg2, train.run_dir(cfg2, "rubin_vae"), d)
     assert enc.res is not None and train.res_hidden_of(src_r) == 0
     assert weights_fingerprint(enc.embed) != weights_fingerprint(train.load_rubin_encoder(cfg, src_r, d).embed)

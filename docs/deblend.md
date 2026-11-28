@@ -114,7 +114,7 @@ Decided after an external review of the campaign; no dataset or compact copy was
   - The fix is a `LatentResBlock` before the variational head, after the PSF concatenation (C1: after the fusion): Dense 256 → PReLU → Dense back to the input width, the last Dense at zero, no activation after the sum.
   - The run starts from every weight of the `dbl2_*` run (`init_from`), so its posteriors are exactly the source's before the first update. The decoders stay frozen (`freeze_decoders`); the whole encoder trains.
   - Settings unchanged: β = 1 from the start, 32-D latent, Gaussian prior and likelihood.
-  - Schedule: 10 epochs, warm-up + cosine, best checkpoint on the β = 1 validation loss. Runs `dbl2_<stage>_res`.
+  - First a short run (gain per GPU minute): 1 000 updates, warm-up + cosine, validated every 250 updates on 128 val galaxies at S/N_i ≥ 80 (fixed draws; `start_val.json` before the first update), 10 min budget, best checkpoint on the β = 1 validation loss. Run `dbl2_rubin_vae_res1k`; continued if it helps (`init_from` it, a new run name).
 
 ## Data rules
 
