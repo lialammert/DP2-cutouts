@@ -833,13 +833,14 @@ def test_wandb_logger_is_off_without_dp2_wandb_and_logs_scalars_when_on(tmp_path
         def finish(self):
             calls.append(("finish", None))
 
-    fake = types.SimpleNamespace(util=types.SimpleNamespace(generate_id=lambda: "abc123"),
-                                 init=lambda **kw: calls.append(("init", kw)) or Run())
+    # No wandb.util in the stand-in, as in wandb 0.31 (the first campaign jobs stopped on wandb.util.generate_id).
+    fake = types.SimpleNamespace(init=lambda **kw: calls.append(("init", kw)) or Run())
     monkeypatch.setitem(sys.modules, "wandb", fake)
     monkeypatch.setenv("DP2_WANDB", "1")
     monkeypatch.delenv("WANDB_MODE", raising=False)
     cb = tracking.WandbLogger(tmp_path, "dbl2_k1", "campaign", dict(stage="k1"), every=2)
-    assert (tmp_path / "wandb_id").read_text().strip() == "abc123" and calls[0][1]["resume"] == "allow"
+    rid = (tmp_path / "wandb_id").read_text().strip()
+    assert len(rid) == 8 and calls[0][1]["id"] == rid and calls[0][1]["resume"] == "allow"
     assert tracking.os.environ["WANDB_MODE"] == "offline"
     for b in range(4):
         cb.on_train_batch_end(b, dict(total_loss=float(b), note="text"))
@@ -850,7 +851,16 @@ def test_wandb_logger_is_off_without_dp2_wandb_and_logs_scalars_when_on(tmp_path
     assert logged[0][1] == {"train/total_loss": 1.0} and logged[2][1] == {"epoch/val_total_loss": 1.5, "epoch": 1}
     assert calls[-1][0] == "finish"
     again = tracking.WandbLogger(tmp_path, "dbl2_k1", "campaign", {})       # a resumed job: the same id
-    assert calls[-1][0] == "init" and calls[-1][1]["id"] == "abc123" and again.run is not None
+    assert calls[-1][0] == "init" and calls[-1][1]["id"] == rid and again.run is not None
+    # A wandb whose init fails: tracking off, no exception (the training must go on).
+
+    def boom(**kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(init=boom))
+    other = tmp_path / "other"
+    other.mkdir()
+    assert tracking.WandbLogger(other, "n", "g", {}).run is None
 
 
 def test_wandb_image_panels_show_observed_model_and_residual():
@@ -881,14 +891,13 @@ def test_a_training_logs_scalars_and_images_to_wandb_when_asked(cfg, monkeypatch
         def finish(self):
             pass
 
-    fake = types.SimpleNamespace(util=types.SimpleNamespace(generate_id=lambda: "img1"), init=lambda **kw: Run(),
-                                 Image=lambda arr, caption=None: ("image", arr.shape, caption))
+    fake = types.SimpleNamespace(init=lambda **kw: Run(), Image=lambda arr, caption=None: ("image", arr.shape, caption))
     monkeypatch.setitem(sys.modules, "wandb", fake)
     monkeypatch.setenv("DP2_WANDB", "1")
     monkeypatch.setenv("DP2_WANDB_IMAGES", "1")
     monkeypatch.setenv("WANDB_MODE", "offline")
     rd = train.train(cfg, "c1", seed=11, max_steps=2)
-    assert (rd / "DONE").exists() and (rd / "wandb_id").read_text().strip() == "img1"
+    assert (rd / "DONE").exists() and len((rd / "wandb_id").read_text().strip()) == 8
     epoch = [d for _, d in logged if "epoch" in d]
     assert epoch and "epoch/val_total_loss" in epoch[-1] and "epoch/grad_norm_q95" in epoch[-1]
     assert {"images/Rubin i", "images/VIS"} <= set(epoch[-1])

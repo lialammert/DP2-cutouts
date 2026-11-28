@@ -20,6 +20,7 @@
 
 import os
 import sys
+import uuid
 from pathlib import Path
 
 import keras
@@ -97,12 +98,15 @@ class WandbLogger(keras.callbacks.Callback):
             return
         self.wandb = wandb
         os.environ.setdefault("WANDB_MODE", "offline")
-        idf = Path(run_dir) / "wandb_id"
-        rid = idf.read_text().strip() if idf.exists() else None
-        if not rid:
-            rid = wandb.util.generate_id()
-            idf.write_text(rid + "\n")
+        # Everything below may fail with a wandb version other than the one tested: tracking is then off and the
+        # training goes on (2026-11-28: wandb 0.31 has no wandb.util.generate_id, and the first jobs stopped).
         try:
+            idf = Path(run_dir) / "wandb_id"
+            rid = idf.read_text().strip() if idf.exists() else ""
+            if not rid:
+                # Our own id (8 lowercase hex characters, like W&B's): no wandb internal is needed for it.
+                rid = uuid.uuid4().hex[:8]
+                idf.write_text(rid + "\n")
             self.run = wandb.init(project=os.environ.get("WANDB_PROJECT", "dp2-deblend"),
                                   entity=os.environ.get("WANDB_ENTITY") or None, name=name, group=group, id=rid,
                                   resume="allow", config=config, dir=os.environ.get("WANDB_DIR") or None)
