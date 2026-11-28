@@ -49,6 +49,20 @@ COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-
             "deblend-approve")
 
 
+def close_wandb():
+    # Before the process replaces itself (os.execve): the W&B run it opened is finished and wandb's service process
+    # stopped, otherwise that process survives the exec, keeps the run open, and the restarted training finds its
+    # run id "in use" (2026-11-28: C1 and the Rubin VAE lost their tracking after an autotuning restart).
+    w = sys.modules.get("wandb")
+    if w is None:
+        return
+    for fn in ("finish", "teardown"):
+        try:
+            getattr(w, fn, lambda **kw: None)()
+        except Exception as e:  # noqa: BLE001 - the restart must happen anyway
+            print(f"[dp2-ml] wandb.{fn} before the restart failed: {e}", file=sys.stderr, flush=True)
+
+
 def autotune_fallback_env(error_text, env):
     # Environment to restart with when a cuDNN engine failed under XLA convolution autotuning (V100, see
     # scripts/jeanzay/ml/env.sh): one level down the chain 3 (or more, or unset) -> 2 -> 0, the same flags otherwise
@@ -288,6 +302,7 @@ def main(argv=None):
                 # A training resumes from its backup: restarting the whole command loses nothing.
                 print("[dp2-ml] cuDNN engine failure under convolution autotuning: restarting with "
                       f"XLA_FLAGS={new_env['XLA_FLAGS']!r}", file=sys.stderr, flush=True)
+                close_wandb()
                 os.execve(sys.executable, [sys.executable, "-m", "dp2_cutouts.mlcli"] + list(argv or sys.argv[1:]),
                           new_env)
             if not (isinstance(e, SystemExit) and e.code in (0, None)):

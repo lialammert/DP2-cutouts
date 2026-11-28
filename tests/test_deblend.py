@@ -902,3 +902,23 @@ def test_a_training_logs_scalars_and_images_to_wandb_when_asked(cfg, monkeypatch
     assert epoch and "epoch/val_total_loss" in epoch[-1] and "epoch/grad_norm_q95" in epoch[-1]
     assert {"images/Rubin i", "images/VIS"} <= set(epoch[-1])
     assert epoch[-1]["images/Rubin i"][0][0] == "image" and len(epoch[-1]["images/VIS"]) == 4
+
+
+def test_wandb_is_closed_before_an_autotuning_restart(monkeypatch):
+    # mlcli.close_wandb: finish then teardown (a wandb service left running across os.execve kept the run "in use";
+    # checked with wandb 0.31.2 offline); without wandb imported, nothing happens; a failure does not stop it.
+    import sys
+    import types
+    from dp2_cutouts.mlcli import close_wandb
+    monkeypatch.delitem(sys.modules, "wandb", raising=False)
+    close_wandb()
+    calls = []
+
+    def teardown():
+        calls.append("teardown")
+        raise RuntimeError("no service")
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(finish=lambda: calls.append("finish"),
+                                                                     teardown=teardown))
+    close_wandb()
+    assert calls == ["finish", "teardown"]
