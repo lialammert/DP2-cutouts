@@ -357,7 +357,10 @@ deblend:
   train:                           # common recipe (2026-11-28); deblend.<stage>.train overrides it
     batch_size: 128
     learning_rate: 1.0e-4          # peak of the schedule (debvader-keras real stage 1: Adam, batch 128)
-    global_clipnorm: 1.0           # norm of the whole gradient (optim.DeblendAdam; logged: grad_norm_*, clipped_frac)
+    global_clipnorm: null          # threshold on the norm of the whole gradient, set per stage below: the 95 %
+                                   # quantile of the norms measured by the unclipped pilot of 2026-11-28 after its
+                                   # warm-up (C2: after lambda_D1 was fixed), scripts/inspect/clip_thresholds.py;
+                                   # logged per epoch: grad_norm_q50 ... q99, clipped_frac (optim.DeblendAdam)
     lr_scaling: sqrt               # larger batches (data-parallel stages): peak lr x sqrt(B / 128)
     lr_reference_batch: 128
     warmup_frac: 0.02              # linear warm-up from 1 % of the peak over the first 2 % of the updates,
@@ -376,24 +379,30 @@ deblend:
     gpus: 1                        # data parallel over this many GPUs (batch_size per GPU); per stage below
   # VAEs: beta = 1 reached by a linear KL warm-up over the first 10 % of the updates (validation always at beta = 1);
   # checkpoint before their dependents: campaign evaluations check_vaes / check_k2, then deblend-approve.
-  rubin_vae: {beta: 1.0, kl_warmup_frac: 0.1}
+  # global_clipnorm: pilot Q95 (Q50 / Q99 in the comments).
+  rubin_vae: {beta: 1.0, kl_warmup_frac: 0.1,
+              train: {global_clipnorm: 1.06e+6}}             # Q50 8.4e4, Q99 2.7e6
   k1: {beta: 1.0, kl_warmup_frac: 0.1, mask_augment_prob: 0.0, mask_pool_size: 5000,
-       train: {gpus: 4}}           # deblend-bench 2026-11-27: ~350 ex/s on one V100 (level 0)
-  k2: {}
+       train: {gpus: 4, global_clipnorm: 6.68e+4}}           # Q50 1.5e4, Q99 1.1e5; pilot: 1 360 ex/s on 4 V100
+  k2: {train: {global_clipnorm: 3.76e+5}}                    # Q50 5.3e4, Q99 1.9e6
   # Students: D2 and a D1 replay 50 / 50 (replay: true), 60 epochs, best checkpoint on their D2 validation term.
   A: {embed: 128, dropout: 0.1, draws: 8, val_draws: 32, replay: true, lambda_replay: 1.0, standardise: true,
-      stats_batches: 100, train: {epochs: 60}}   # energy score of 8 dropout draws against one K1 draw
+      stats_batches: 100, train: {epochs: 60, global_clipnorm: 11.9}}   # Q50 6.7, Q99 13.3; energy score of
+                                                                         # 8 dropout draws against one K1 draw
   B: {context: 128, hidden: [128, 128, 128, 128, 128], time_dim: 32, standardise: true, stats_batches: 100,
-      replay: true, lambda_replay: 1.0, ema: 0.999, val_triplets: 8, train: {epochs: 60}}
+      replay: true, lambda_replay: 1.0, ema: 0.999, val_triplets: 8,
+      train: {epochs: 60, global_clipnorm: 13.3}}                # Q50 1.3, Q99 94
   c1: {embed: 128, fusion: [256], beta: 1.0, kl_warmup_frac: 0.1, weight_r: 1.0, weight_e: 1.0,
-       train: {gpus: 4}}           # ~280 ex/s on one V100 (level 0)
+       train: {gpus: 4, global_clipnorm: 7.50e+5}}           # Q50 1.3e5, Q99 9.4e5; pilot: autotuning level 0
   # lambda_d1 auto: 1 for 500 updates, gradient norms measured over the next 200, ramp to their median ratio over
   # 200, then fixed (models.LAMBDA_PROTOCOL; <run>/lambda_d1.json); checkpoints counted from then on.
   c2: {embed: 128, fusion: [256], lambda_d1: auto,
        lambda_protocol: {warm: 500, measure: 200, ramp: 200, every: 10, batches: 2},
-       train: {gpus: 4, epochs: 60}}   # ~515 ex/s on one V100
+       train: {gpus: 4, epochs: 60, global_clipnorm: 1.68e+3}}   # after lambda_D1 fixed: Q50 668, Q99 1 884
+                                       # (pilot epoch 1, unclipped: norms up to 5e13, d1_kl_r 1e8, then recovered)
   c3: {context: 128, hidden: [128, 128, 128, 128, 128], time_dim: 32, standardise: true, stats_batches: 100,
-       lambda_replay: 1.0, init_context_from_c2: true, ema: 0.999, val_triplets: 8, train: {epochs: 60}}
+       lambda_replay: 1.0, init_context_from_c2: true, ema: 0.999, val_triplets: 8,
+       train: {epochs: 60, global_clipnorm: 13.3}}           # Q50 1.1, Q99 33
   eval:
     k_samples: 128                 # posterior samples per galaxy
     nfe: 40                        # Heun, 20 steps

@@ -810,3 +810,7 @@ def test_yaml_snr_bins_are_numbers():
     from pathlib import Path
     cfg = yaml.safe_load((Path(__file__).parents[1] / "config" / "ml_jeanzay.yaml").read_text())
     assert all(isinstance(v, (int, float)) for v in cfg["deblend"]["eval"]["snr_bins"])
+    # Every stage has its own clipping threshold, a number (the pilot's Q95).
+    for st in ("rubin_vae", "k1", "k2", "A", "B", "c1", "c2", "c3"):
+        v = cfg["deblend"][st]["train"]["global_clipnorm"]
+        assert isinstance(v, float) and v > 0, st
