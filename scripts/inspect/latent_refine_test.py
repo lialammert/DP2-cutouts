@@ -41,6 +41,21 @@ def check_time(max_seconds, where):
         raise OutOfTime(f"{where}: {time.time() - T0:.0f} s > {max_seconds} s")
 
 
+def load_rubin_vae(cfg):
+    # The Rubin VAE only (best weights): encoder, decoder, per-band output scale. (The first versions loaded every
+    # finished VAE through evaluate.Campaign, K1 and C1 with their VIS decoders included: 262 s of reading on a slow
+    # Lustre, job 941720.)
+    from dp2_cutouts.deblend import data, train
+    rd = train.run_dir(cfg, "rubin_vae")
+    if not (rd / "DONE").exists():
+        raise RuntimeError(f"no finished Rubin VAE in {rd}")
+    d = int(cfg["deblend"]["latent_dim"])
+    n_r, b_r, _ = train.sizes(cfg)
+    enc = train.load_rubin_encoder(cfg, rd, d)
+    dec = train.load_decoder(rd / "decoder_best.weights.h5", n_r, b_r, d, cfg)
+    return enc, dec, np.asarray(data.load_norm_stats(cfg)["rubin"]["scale"], np.float32)
+
+
 def select_rows(meta, keep, groups, n, seed):
     # n validation rows per S/N_i group [lo, hi), fixed seed.
     rng = np.random.default_rng(seed)
@@ -73,10 +88,7 @@ def run(cfg, groups=((80, 200), (200, 1e9)), n=32, steps=500, lr=0.03, draws=2, 
     from keras import ops
 
     from dp2_cutouts.deblend import data, evaluate
-    camp = evaluate.Campaign(cfg, students=False)
-    if "rvae" not in camp.parts:
-        raise RuntimeError("no finished Rubin VAE")
-    enc, dec = camp.parts["rvae"]
+    enc, dec, sr = load_rubin_vae(cfg)
     note("models loaded")
     # Only the metadata columns used here (the first run, with every column of the 1.5 M rows, was killed by the
     # 40 GB memory limit of the job).
@@ -95,7 +107,7 @@ def run(cfg, groups=((80, 200), (200, 1e9)), n=32, steps=500, lr=0.03, draws=2, 
     cond = x.get("r_psf")
     c = None if cond is None else jnp.asarray(cond)
     flux, w = jnp.asarray(x["r_flux"]), jnp.asarray(x["r_w"])
-    scale = jnp.asarray(camp.sr, jnp.float32)
+    scale = jnp.asarray(sr, jnp.float32)
     mu0, lv0 = (jnp.asarray(ops.convert_to_numpy(a)) for a in enc(jnp.asarray(x["r_in"]), cond=c))
     B, d = mu0.shape
 

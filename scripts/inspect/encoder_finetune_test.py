@@ -50,13 +50,17 @@ def run(cfg, groups=((80, 200), (200, 1e9)), n=32, train_snr=80.0, steps=300, ba
     from dp2_cutouts.deblend import data, evaluate
     from latent_refine_test import converged
 
-    def left():
-        return max_seconds - (time.time() - T0)
+    from latent_refine_test import load_rubin_vae
 
-    camp = evaluate.Campaign(cfg, students=False)
-    if "rvae" not in camp.parts:
-        raise RuntimeError("no finished Rubin VAE")
-    enc, dec = camp.parts["rvae"]
+    # The budget counts the GPU work only (compilation included), from the end of the data reading: the reading of
+    # the weights and the metadata on Lustre took 262 s once (job 941720) and is not GPU time. Slurm's --time bounds
+    # the whole job.
+    t_gpu = [None]
+
+    def left():
+        return max_seconds - (time.time() - (t_gpu[0] or time.time()))
+
+    enc, dec, sr = load_rubin_vae(cfg)     # the Rubin VAE only
     enc.trainable = True            # loaded frozen (train.load_rubin_encoder); its weights are the ones trained here
     note("models loaded")
     cols = list(dict.fromkeys(list(data.train_columns(cfg, "d1")) + ["snr_i", "psf_sigma_i", "psf_e1_i",
@@ -72,7 +76,9 @@ def run(cfg, groups=((80, 200), (200, 1e9)), n=32, train_snr=80.0, steps=300, ba
                         block="auto")
     note(f"{len(rows)} validation galaxies; {len(tr_rows)} train galaxies at S/N_i >= {train_snr:g}")
 
-    scale = jnp.asarray(camp.sr, jnp.float32)
+    t_gpu[0] = time.time()
+    note(f"GPU budget of {max_seconds:g} s starts")
+    scale = jnp.asarray(sr, jnp.float32)
     tv0 = [jnp.asarray(v.value) for v in enc.trainable_variables]
     ntv = [jnp.asarray(v.value) for v in enc.non_trainable_variables]
 
@@ -188,8 +194,9 @@ def run(cfg, groups=((80, 200), (200, 1e9)), n=32, train_snr=80.0, steps=300, ba
         gap = r["elbo_optimised"] - r["elbo_encoder"]
         r["gap_recovered"] = float((r["elbo_finetuned"] - r["elbo_encoder"]) / gap) if gap > 0 else None
         res["groups"][gname] = r
-    if time.time() - T0 > max_seconds:
-        raise OutOfTime(f"{time.time() - T0:.0f} s > {max_seconds} s")
+    res["gpu_s"] = round(time.time() - t_gpu[0], 1)
+    if time.time() - t_gpu[0] > max_seconds:
+        raise OutOfTime(f"GPU part {time.time() - t_gpu[0]:.0f} s > {max_seconds} s")
     return res
 
 
@@ -206,7 +213,8 @@ def main():
         print(f"ABANDON: time limit reached ({e}); no conclusion")
         return
     print(f"{res['n']} validation galaxies; encoder trained {res['updates']} updates of {res['batch']} "
-          f"({res['train_galaxies']} train galaxies at S/N_i >= 80), lr {res['lr']}; {res['elapsed_s']} s in all; "
+          f"({res['train_galaxies']} train galaxies at S/N_i >= 80), lr {res['lr']}; {res['elapsed_s']} s in all, "
+          f"{res['gpu_s']} s of GPU work; "
           f"reference latents: {res['reference_steps']} steps, converged {res['reference_converged']}")
     print("train loss (mean of the 10 updates up to):", ", ".join(f"{k}: {v}" for k, v in res["train_loss"].items()))
     print("validation ELBO, median over the 64 galaxies:", ", ".join(f"{k}: {v}" for k, v in res["val_elbo_median"].items()))
