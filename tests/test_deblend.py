@@ -306,6 +306,49 @@ def test_every_stage_trains_with_frozen_parts_and_samples_from_rubin_only(cfg):
     assert np.std(za, axis=1).mean() > 0          # MC dropout gives diverse samples
 
 
+def test_latent_residual_block_warm_starts_with_the_same_posteriors_and_frozen_decoders(cfg):
+    # deblend.<stage>.latent_res_hidden + init_from + freeze_decoders (2026-11-28): the warm-started VAE gives
+    # exactly the source run's posteriors before any update; after training its decoders are unchanged (frozen
+    # check), its encoder moved and it reloads with its block (width read from its run.json).
+    from dp2_cutouts.deblend import train
+    from dp2_cutouts.mlconfig import MLConfig
+    from dp2_cutouts.ml.debvader_bridge import weights_fingerprint
+    raw = json.loads(json.dumps(cfg.raw))
+    for st in ("rubin_vae", "c1"):
+        raw["deblend"][st] = dict(raw["deblend"].get(st) or {}, latent_res_hidden=8, init_from=f"t_{st}",
+                                  freeze_decoders=True, kl_warmup_frac=0.0)
+        raw["deblend"]["runs"][st] = f"t_{st}_res"
+    cfg2 = MLConfig(raw=raw, path=cfg.path)
+    d = int(cfg["deblend"]["latent_dim"])
+    src_r = train.run_dir(cfg, "rubin_vae")
+    for st in ("rubin_vae", "c1"):
+        s = train.settings(cfg2, st)
+        model, loaders, frozen, _ = train.build(cfg2, st, s, 3, {})
+        x, _ = loaders[1][0]
+        if st == "rubin_vae":
+            assert model.encoder.res is not None and set(frozen) == {"decoder"}
+            got = model.encoder(x["r_in"], cond=x["r_psf"])
+            ref = train.load_rubin_encoder(cfg, src_r, d)(x["r_in"], cond=x["r_psf"])
+        else:
+            assert model.encoder.res is not None and set(frozen) == {"dec_r", "dec_e"}
+            s_c1 = json.loads((train.run_dir(cfg, "c1") / "run.json").read_text())["settings"]
+            got = model.encoder(x["r_in"], x["e_in"], cond=x["r_psf"])
+            ref = train.load_joint_encoder(cfg, train.run_dir(cfg, "c1"), d, s_c1)(x["r_in"], x["e_in"],
+                                                                                  cond=x["r_psf"])
+        for a, b in zip(got, ref):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-6, atol=1e-6)
+        assert not any(v.trainable for k in frozen for v in getattr(model, k).weights)
+        rd = train.train(cfg2, st, max_steps=3)
+        assert (rd / "DONE").exists() and json.loads((rd / "frozen_check.json").read_text())["unchanged"]
+        assert json.loads((rd / "run.json").read_text())["settings"]["init_from_run"].endswith(f"t_{st}")
+    enc = train.load_rubin_encoder(cfg2, train.run_dir(cfg2, "rubin_vae"), d)
+    assert enc.res is not None and train.res_hidden_of(src_r) == 0
+    assert weights_fingerprint(enc.embed) != weights_fingerprint(train.load_rubin_encoder(cfg, src_r, d).embed)
+    dec0 = train.load_decoder(src_r / "decoder_best.weights.h5", N_R, B_R, d, cfg)
+    dec1 = train.load_decoder(train.run_dir(cfg2, "rubin_vae") / "decoder_best.weights.h5", N_R, B_R, d, cfg)
+    assert weights_fingerprint(dec0) == weights_fingerprint(dec1)
+
+
 def test_a_training_stopped_on_its_time_budget_resumes_the_cut_epoch(cfg):
     from dp2_cutouts.deblend import train
     rd = train.train(cfg, "k1", seed=7, time_budget_s=1e-6)

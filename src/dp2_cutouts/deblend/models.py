@@ -37,8 +37,8 @@ import numpy as np
 from keras import layers, ops
 
 from . import cfm
-from .layers import (MLP, ConvDecoder, ConvEmbedder, DiagGaussianHead, TriLGaussianHead, sample_diag, sample_tril,
-                     with_cond)
+from .layers import (MLP, ConvDecoder, ConvEmbedder, DiagGaussianHead, LatentResBlock, TriLGaussianHead, sample_diag,
+                     sample_tril, with_cond)
 from .likelihood import chi2_per_pixel, diag_to_tril, energy_score, gaussian_nll, kl_diag_std, kl_tril_tril
 
 
@@ -107,21 +107,24 @@ class Tracked(keras.Model):
 
 class ImageEncoder(keras.Model):
     # image -> (mu, log_var): ConvEmbedder + diagonal head; cond: Rubin PSF (Rubin encoders only).
-    def __init__(self, d, embed=256, filters=(32, 64, 128, 256), **kw):
+    # res_hidden > 0: a LatentResBlock between the embedding (after the PSF concatenation) and the head.
+    def __init__(self, d, embed=256, filters=(32, 64, 128, 256), res_hidden=0, **kw):
         super().__init__(**kw)
         self.embed = ConvEmbedder(embed, filters, name="embed")
+        self.res = LatentResBlock(int(res_hidden), name="res") if res_hidden else None
         self.head = DiagGaussianHead(d, name="head")
 
     def call(self, x, cond=None, training=False):
-        return self.head(self.embed(x, cond=cond, training=training))
+        h = self.embed(x, cond=cond, training=training)
+        return self.head(h if self.res is None else self.res(h))
 
 
 class ImageVAE(Tracked):
-    def __init__(self, side, n, out_channels, scale, d=32, beta=1.0, seed=0, **kw):
+    def __init__(self, side, n, out_channels, scale, d=32, beta=1.0, seed=0, res_hidden=0, **kw):
         super().__init__(**kw)
         self.side = side                          # "rubin" (keys r_*) or "euclid" (keys e_*)
         self.k = "r" if side == "rubin" else "e"
-        self.encoder = ImageEncoder(d, name="encoder")
+        self.encoder = ImageEncoder(d, res_hidden=res_hidden, name="encoder")
         self.decoder = ConvDecoder(n, out_channels, name="decoder")
         self.scale = _t(scale)
         self.beta = float(beta)
@@ -316,24 +319,27 @@ class RunBModel(Tracked):
 
 class JointEncoder(keras.Model):
     # (R, E) -> embeddings (the Rubin one with the PSF) -> fusion MLP -> diagonal Gaussian (C1's q_A).
-    def __init__(self, d=32, embed=128, fusion=(256,), **kw):
+    # res_hidden > 0: a LatentResBlock between the fusion and the head.
+    def __init__(self, d=32, embed=128, fusion=(256,), res_hidden=0, **kw):
         super().__init__(**kw)
         self.r_embed = ConvEmbedder(embed, name="r_embed")
         self.e_embed = ConvEmbedder(embed, name="e_embed")
         self.fusion = MLP(fusion, fusion[-1], name="fusion")
+        self.res = LatentResBlock(int(res_hidden), name="res") if res_hidden else None
         self.head = DiagGaussianHead(d, name="head")
 
     def call(self, r_in, e_in, cond=None, training=False):
         h = ops.concatenate([self.r_embed(r_in, cond=cond, training=training),
                              self.e_embed(e_in, training=training)], -1)
-        return self.head(ops.silu(self.fusion(h)))
+        h = ops.silu(self.fusion(h))
+        return self.head(h if self.res is None else self.res(h))
 
 
 class JointVAE(Tracked):
     def __init__(self, n_r, bands_r, n_e, scale_r, scale_e, d=32, embed=128, fusion=(256,), beta=1.0,
-                 weight_r=1.0, weight_e=1.0, seed=0, **kw):
+                 weight_r=1.0, weight_e=1.0, seed=0, res_hidden=0, **kw):
         super().__init__(**kw)
-        self.encoder = JointEncoder(d, embed, fusion, name="encoder")
+        self.encoder = JointEncoder(d, embed, fusion, res_hidden, name="encoder")
         self.dec_r = ConvDecoder(n_r, bands_r, name="dec_r")
         self.dec_e = ConvDecoder(n_e, 1, name="dec_e")
         self.scale_r, self.scale_e = _t(scale_r), _t(scale_e)

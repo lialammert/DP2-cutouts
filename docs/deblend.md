@@ -107,6 +107,14 @@ Decided after an external review of the campaign; no dataset or compact copy was
   over the next 200, then λ_D1 ramps to their median ratio over 200 updates and stays there
   (`<run>/lambda_d1.json`). Checkpoints are counted from then on.
 - **Run names:** `dbl2_*`. The `dbl_*` runs and pilots of the former recipe are left untouched.
+- **Latent residual block (2026-11-28, Rubin VAE first, then K1 and C1):**
+  - The β = 1 VAEs shrank the shapes (m ≈ −0.4 at S/N_i ≥ 100).
+  - Per-galaxy optimised posteriors with frozen networks recovered most of it (`scripts/inspect/latent_refine_test.py`). That is an amortisation gap; the decoder is not the cause.
+  - Training the same encoder a little further recovered none of it (`encoder_finetune_test.py`, stable at lr 10⁻⁵).
+  - The fix is a `LatentResBlock` before the variational head, after the PSF concatenation (C1: after the fusion): Dense 256 → PReLU → Dense back to the input width, the last Dense at zero, no activation after the sum.
+  - The run starts from every weight of the `dbl2_*` run (`init_from`), so its posteriors are exactly the source's before the first update. The decoders stay frozen (`freeze_decoders`); the whole encoder trains.
+  - Settings unchanged: β = 1 from the start, 32-D latent, Gaussian prior and likelihood.
+  - Schedule: 10 epochs, warm-up + cosine, best checkpoint on the β = 1 validation loss. Runs `dbl2_<stage>_res`.
 
 ## Data rules
 

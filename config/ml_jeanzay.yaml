@@ -345,7 +345,8 @@ deblend:
   replicate_dependencies: false    # seeds replicate the students (A, B, C2, C3); K1, K2, C1 shared
   run_suffix: ""                   # "_pilot" for the pilots (submit_deblend.sh pilot)
   # dbl2_*: the recipe of 2026-11-28 (new names: the dbl_* runs and pilots of the former recipe stay untouched)
-  runs: {rubin_vae: dbl2_rubin_vae, k1: dbl2_k1, k2: dbl2_k2, A: dbl2_runA, B: dbl2_runB, c1: dbl2_c1,
+  # *_res: the VAE with the latent residual block, warm-started from its dbl2_* run (Rubin VAE first, 2026-11-28)
+  runs: {rubin_vae: dbl2_rubin_vae_res, k1: dbl2_k1, k2: dbl2_k2, A: dbl2_runA, B: dbl2_runB, c1: dbl2_c1,
          c2: dbl2_c2, c3: dbl2_c3}
   campaign:                        # self-advancing Slurm campaign (deblend/campaign.py, submit_deblend.sh)
     qos: qos_gpu_a100-dev          # QoS whose queued jobs are counted (overridden by --qos= in DP2_GPU_EXTRA)
@@ -380,8 +381,15 @@ deblend:
   # VAEs: beta = 1 reached by a linear KL warm-up over the first 10 % of the updates (validation always at beta = 1);
   # checkpoint before their dependents: campaign evaluations check_vaes / check_k2, then deblend-approve.
   # global_clipnorm: pilot Q95 (Q50 / Q99 in the comments).
-  rubin_vae: {beta: 1.0, kl_warmup_frac: 0.1,
-              train: {global_clipnorm: 1.06e+6}}             # Q50 8.4e4, Q99 2.7e6
+  # 2026-11-28, after the amortisation-gap diagnostics (scripts/inspect/latent_refine_test.py, encoder_finetune_test.py;
+  # GPT's decision adopted by Anna): latent residual block (Dense 256 -> PReLU -> Dense, zero start) before the head,
+  # every weight of dbl2_rubin_vae copied in, decoder frozen, the whole encoder trained again: beta = 1 from the
+  # start (no KL warm-up: the source was trained at beta = 1), 10 epochs with the recipe's warm-up 2 % + cosine,
+  # best checkpoint on val_total_loss (the beta = 1 negative ELBO). Same clipping threshold.
+  rubin_vae: {beta: 1.0, kl_warmup_frac: 0.0, latent_res_hidden: 256, init_from: dbl2_rubin_vae,
+              freeze_decoders: true,
+              train: {global_clipnorm: 1.06e+6, epochs: 10}}  # Q50 8.4e4, Q99 2.7e6 (dbl2_rubin_vae: kl_warmup_frac
+                                                              # 0.1, 20 epochs, from scratch)
   k1: {beta: 1.0, kl_warmup_frac: 0.1, mask_augment_prob: 0.0, mask_pool_size: 5000,
        train: {gpus: 4, global_clipnorm: 6.68e+4}}           # Q50 1.5e4, Q99 1.1e5; pilot: 1 360 ex/s on 4 V100
   k2: {train: {gpus: 1, global_clipnorm: 3.76e+5}}           # Q50 5.3e4, Q99 1.9e6, measured at B = 128. 1 GPU

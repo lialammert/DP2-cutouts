@@ -155,6 +155,24 @@ class MLP(keras.Model):
         return self.out(x)
 
 
+class LatentResBlock(layers.Layer):
+    # h + Dense(dim)(PReLU(Dense(hidden)(h))), dim = the input's, no activation after the sum (2026-11-28, GPT's
+    # decision after the amortisation-gap diagnostics). The last Dense starts at zero (kernel and bias): a block
+    # added to a trained encoder leaves its posteriors exactly unchanged until training moves it.
+    def __init__(self, hidden=256, **kw):
+        super().__init__(**kw)
+        self.hidden = int(hidden)
+        self.d1 = layers.Dense(self.hidden, name="d1")
+        self.act = layers.PReLU(name="act")
+        self.d2 = None
+
+    def build(self, shape):
+        self.d2 = layers.Dense(int(shape[-1]), kernel_initializer="zeros", bias_initializer="zeros", name="d2")
+
+    def call(self, h):
+        return h + self.d2(self.act(self.d1(h)))
+
+
 class DiagGaussianHead(layers.Layer):
     # embedding -> (mu, log_var), diagonal Gaussian. log_var clipped to [-12, 8] for numerical safety.
     def __init__(self, d, **kw):

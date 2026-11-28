@@ -23,6 +23,16 @@
 # (optim.DeblendAdam), early stopping after 10 epochs without improvement as a safety net, the best validation
 # checkpoint kept. VAEs: linear KL warm-up from beta = 0 over the first 10 % of the updates (validation always at the
 # full beta). CFM students: EMA of the weights (0.999), used for validation and saved as the best weights.
+#
+# Latent residual block and warm start (2026-11-28, after the amortisation-gap diagnostics of the beta = 1 Rubin VAE,
+# GPT's decision adopted by Anna), for the VAEs (rubin_vae, k1, c1):
+#   deblend.<stage>.latent_res_hidden: 256   a LatentResBlock (Dense 256 -> PReLU -> Dense, last one at zero) between
+#                                            the embedding (after the PSF) or the fusion and the variational head;
+#   deblend.<stage>.init_from: <run name>    every weight of that finished run of the same stage copied in (the
+#                                            encoder's backbone and head, the decoders); the new block starts at zero,
+#                                            so the posteriors are exactly the source's at the first update;
+#   deblend.<stage>.freeze_decoders: true    the decoders stay fixed (FrozenGuard), the whole encoder trains.
+# The block's width is read back from each run's run.json wherever an encoder is reloaded (load_*_encoder).
 
 import json
 import os
@@ -122,15 +132,24 @@ def _load(model, path, *dummy, **kw):
     return model
 
 
+def res_hidden_of(d_run):
+    # Width of the latent residual block of a finished run (0: none, as every run before 2026-11-28).
+    p = Path(d_run) / "run.json"
+    if not p.exists():
+        return 0
+    return int((json.loads(p.read_text()).get("settings", {}).get("model", {}) or {}).get("latent_res_hidden") or 0)
+
+
 def load_k1_encoder(cfg, d_k1, d):
     _, _, n_e = sizes(cfg)
-    return _load(ImageEncoder(d, name="encoder"), d_k1 / "encoder_best.weights.h5", (1, n_e, n_e, 2))
+    return _load(ImageEncoder(d, res_hidden=res_hidden_of(d_k1), name="encoder"), d_k1 / "encoder_best.weights.h5",
+                 (1, n_e, n_e, 2))
 
 
 def load_rubin_encoder(cfg, d_run, d):
     n_r, b_r, _ = sizes(cfg)
-    return _load(ImageEncoder(d, name="encoder"), d_run / "encoder_best.weights.h5", (1, n_r, n_r, b_r),
-                 cond=_c0(cfg))
+    return _load(ImageEncoder(d, res_hidden=res_hidden_of(d_run), name="encoder"),
+                 d_run / "encoder_best.weights.h5", (1, n_r, n_r, b_r), cond=_c0(cfg))
 
 
 def load_decoder(path, n, channels, d, cfg=None):
@@ -141,7 +160,8 @@ def load_decoder(path, n, channels, d, cfg=None):
 
 def load_joint_encoder(cfg, d_c1, d, s):
     n_r, b_r, n_e = sizes(cfg)
-    enc = JointEncoder(d, s["model"].get("embed", 128), tuple(s["model"].get("fusion", [256])), name="encoder")
+    enc = JointEncoder(d, s["model"].get("embed", 128), tuple(s["model"].get("fusion", [256])),
+                       int(s["model"].get("latent_res_hidden") or 0), name="encoder")
     enc(ops.zeros((1, n_r, n_r, b_r)), ops.zeros((1, n_e, n_e, 2)), cond=_c0(cfg))
     enc.load_weights(str(d_c1 / "encoder_best.weights.h5"))
     enc.trainable = False
@@ -178,6 +198,52 @@ def load_student(cfg, stage, d_run, d, s):
     st.load_weights(str(d_run / "student_best.weights.h5"))
     st.trainable = False
     return st
+
+
+# ----------------------------------------------------------------------------- warm start of a VAE
+def init_dir(cfg, stage, s):
+    # Finished run named by deblend.<stage>.init_from (None without it).
+    name = s["model"].get("init_from")
+    if not name:
+        return None
+    d = data.deblend_dir(cfg) / "runs" / str(name)
+    if not (d / "DONE").exists():
+        raise RuntimeError(f"deblend.{stage}.init_from: {d} is not a finished run (no DONE)")
+    return d
+
+
+def warm_start(cfg, stage, model, src, freeze_decoders):
+    # Copies every weight of the finished VAE run `src` (same stage) into the built `model`: the encoder's parts by
+    # name (its new LatentResBlock, absent from the source, keeps its zero start), the decoders whole. Returns the
+    # decoders, frozen when freeze_decoders.
+    d = int(model.encoder.head.d)
+    if stage == "c1":
+        enc = load_joint_encoder(cfg, src, d, json.loads((src / "run.json").read_text())["settings"])
+        parts = ("r_embed", "e_embed", "fusion", "res", "head")
+        decs = dict(dec_r=(model.dec_r, "dec_r", cfg), dec_e=(model.dec_e, "dec_e", None))
+        n_r, b_r, n_e = sizes(cfg)
+        shapes = dict(dec_r=(n_r, b_r), dec_e=(n_e, 1))
+    else:
+        enc = (load_rubin_encoder if stage == "rubin_vae" else load_k1_encoder)(cfg, src, d)
+        parts = ("embed", "res", "head")
+        decs = dict(decoder=(model.decoder, "decoder", cfg if stage == "rubin_vae" else None))
+        shapes = dict(decoder=(model.decoder.n, model.decoder.channels))
+    copied = []
+    for p in parts:
+        a, b = getattr(enc, p, None), getattr(model.encoder, p, None)
+        if a is not None and b is not None:
+            b.set_weights(a.get_weights())
+            copied.append(p)
+    out = {}
+    for k, (dec, f, c) in decs.items():
+        src_dec = load_decoder(src / f"{f}_best.weights.h5", *shapes[k], d, c)
+        dec.set_weights(src_dec.get_weights())
+        if freeze_decoders:
+            dec.trainable = False
+        out[k] = dec
+    print(f"deblend {stage}: warm start from {src} (encoder parts {copied}, decoders {sorted(out)}"
+          + (", frozen" if freeze_decoders else "") + ")", flush=True)
+    return out
 
 
 # ----------------------------------------------------------------------------- latent standardisation
@@ -324,14 +390,16 @@ def build(cfg, stage, s, seed, deps):
     replay = "mixed" if m.get("replay", True) else "d2"
     if stage == "rubin_vae":
         s["fields"] = ("rubin",)
-        model = ImageVAE("rubin", n_r, b_r, sr, d, float(m.get("beta", 1.0)), seed, name="rubin_vae")
+        model = ImageVAE("rubin", n_r, b_r, sr, d, float(m.get("beta", 1.0)), seed,
+                         int(m.get("latent_res_hidden") or 0), name="rubin_vae")
         subs = dict(encoder=model.encoder, decoder=model.decoder)
         loaders = _loaders(cfg, s, "d1", seed, noise=noise)
     elif stage == "k1":
         s["fields"] = ("euclid",)
         if float(m.get("mask_augment_prob", 0.0)) > 0:
             s["mask_pool"] = data.d2_mask_pool(cfg, int(m.get("mask_pool_size", 5000)), seed)
-        model = ImageVAE("euclid", n_e, 1, se, d, float(m.get("beta", 1.0)), seed, name="k1")
+        model = ImageVAE("euclid", n_e, 1, se, d, float(m.get("beta", 1.0)), seed,
+                         int(m.get("latent_res_hidden") or 0), name="k1")
         subs = dict(encoder=model.encoder, decoder=model.decoder)
         loaders = _loaders(cfg, s, "d1", seed, noise=noise)
     elif stage == "k2":
@@ -356,7 +424,7 @@ def build(cfg, stage, s, seed, deps):
     elif stage == "c1":
         model = JointVAE(n_r, b_r, n_e, sr, se, d, int(m.get("embed", 128)), tuple(m.get("fusion", [256])),
                          float(m.get("beta", 1.0)), float(m.get("weight_r", 1.0)), float(m.get("weight_e", 1.0)),
-                         seed, name="c1")
+                         seed, int(m.get("latent_res_hidden") or 0), name="c1")
         subs = dict(encoder=model.encoder, dec_r=model.dec_r, dec_e=model.dec_e)
         loaders = _loaders(cfg, s, "d1", seed, noise=noise)
     elif stage == "c2":
@@ -396,6 +464,12 @@ def build(cfg, stage, s, seed, deps):
         raise ValueError(f"unknown deblend stage {stage!r}; known: {STAGES}")
     x0, _ = loaders[1][0]
     model({k: v[:2] for k, v in x0.items()})
+    src = init_dir(cfg, stage, s) if stage in ("rubin_vae", "k1", "c1") else None
+    if src is not None:
+        decs = warm_start(cfg, stage, model, src, bool(m.get("freeze_decoders", False)))
+        if m.get("freeze_decoders"):
+            frozen = dict(frozen, **decs)        # still saved with the run (subs): later stages read them there
+        s["init_from_run"] = str(src)
     return model, loaders, frozen, subs
 
 
