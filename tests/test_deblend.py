@@ -964,3 +964,27 @@ def test_latent_refinement_diagnostic_runs_on_the_trained_rubin_vae(cfg):
     for g in res["groups"].values():
         for k in ("nll_before", "nll_after", "kl_before", "kl_after"):
             assert np.isfinite(g[k]), k
+
+
+def test_encoder_finetuning_diagnostic_runs_on_the_trained_rubin_vae(cfg):
+    # scripts/inspect/encoder_finetune_test.py on the tiny Rubin VAE of the stage test: only the encoder is trained
+    # (the decoder frozen), the validation galaxies are those of latent_refine_test.py, every number is finite and
+    # the gap fraction is reported.
+    import importlib.util
+    import sys
+    from pathlib import Path
+    d = Path(__file__).parents[1] / "scripts" / "inspect"
+    sys.path.insert(0, str(d))
+    try:
+        spec = importlib.util.spec_from_file_location("encoder_finetune_test", d / "encoder_finetune_test.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        res = mod.run(cfg, groups=((0, 40), (40, 1e9)), n=3, train_snr=0.0, steps=4, batch=4, opt_steps=60,
+                      eval_draws=2, max_seconds=900)
+    finally:
+        sys.path.remove(str(d))
+    assert res["updates"] == 4 and 4 in res["val_elbo_median"]
+    for g in res["groups"].values():
+        for tag in ("encoder", "finetuned", "optimised"):
+            assert np.isfinite(g[f"elbo_{tag}"]), tag
+        assert "gap_recovered" in g
