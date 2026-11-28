@@ -33,6 +33,7 @@ echo "[wandb-sync] $(date) every ${EVERY} s from $WANDB_DIR"
 # Which account and server the uploads go to: a query that never prompts (stdin closed); fails when not logged in.
 who=$(timeout 60 python -c 'import wandb; a = wandb.Api(); print(a.default_entity, "@", a.settings["base_url"])'       </dev/null 2>/dev/null) || who="NOT LOGGED IN: run python -m wandb login (with DP2_WANDB_LIB on PYTHONPATH)"
 echo "[wandb-sync] account: $who"
+# Runs written to since the previous pass (rm $WANDB_DIR/.last_sync before starting: every run uploaded again).
 stamp="$WANDB_DIR/.last_sync"
 while true; do
     new=$(mktemp)
@@ -40,7 +41,10 @@ while true; do
     for d in "$WANDB_DIR"/wandb/offline-run-*; do
         [[ -d "$d" ]] || continue
         if [[ ! -e "$stamp" ]] || [[ -n "$(find "$d" -newer "$stamp" -print -quit)" ]]; then
-            $WB sync "$d" > /dev/null 2>&1 && echo "[wandb-sync] $(date +%H:%M) $(basename "$d")" \
+            # --include-synced: wandb sync skips a run it has synced once, so a run still being written stopped at
+            # its first upload (2026-11-28: K1 stopped at update 700 and showed "failed"). Each pass uploads the
+            # whole run file again; W&B keeps what it has and appends the new updates.
+            $WB sync --include-synced --yes "$d" > /dev/null 2>&1 && echo "[wandb-sync] $(date +%H:%M) $(basename "$d")" \
                 || echo "[wandb-sync] $(date +%H:%M) FAILED $(basename "$d")"
         fi
     done

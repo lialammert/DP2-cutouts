@@ -73,6 +73,33 @@ def panels(x, out, rubin_scale=None):
     return res
 
 
+def define_axes(run):
+    # The epoch curves and the images plotted against the epoch (the updates stay the axis of train/*).
+    try:
+        run.define_metric("epoch")
+        run.define_metric("epoch/*", step_metric="epoch")
+        run.define_metric("images/*", step_metric="epoch")
+    except Exception as e:  # noqa: BLE001 - cosmetic
+        print(f"[wandb] define_metric skipped ({e})", flush=True)
+
+
+def preview_outputs(model, x):
+    # The model's outputs on the small preview batch, computed on the CPU from copies of the weights (JAX): on the GPU
+    # every new input shape starts a cuDNN autotuning, which failed at every epoch on the V100 (2026-11-28, K1: no
+    # image). Other backends: a plain call.
+    if keras.backend.backend() != "jax":
+        out = model(x, training=False)
+        return {k: np.asarray(keras.ops.convert_to_numpy(v)) for k, v in out.items()}
+    import jax
+    cpu = jax.devices("cpu")[0]
+    tv = [jax.device_put(v.value, cpu) for v in model.trainable_variables]
+    ntv = [jax.device_put(v.value, cpu) for v in model.non_trainable_variables]
+    xc = {k: jax.device_put(np.asarray(v), cpu) for k, v in x.items()}
+    with jax.default_device(cpu):
+        out, _ = model.stateless_call(tv, ntv, xc, training=False)
+    return {k: np.asarray(v) for k, v in out.items()}
+
+
 def _scalars(logs, prefix):
     out = {}
     for k, v in (logs or {}).items():
@@ -111,6 +138,7 @@ class WandbLogger(keras.callbacks.Callback):
                                   entity=os.environ.get("WANDB_ENTITY") or None, name=name, group=group, id=rid,
                                   resume="allow", config=config, dir=os.environ.get("WANDB_DIR") or None)
             print(f"[wandb] run {name} (id {rid}, mode {os.environ.get('WANDB_MODE')})", flush=True)
+            define_axes(self.run)
         except Exception as e:  # noqa: BLE001 - tracking must never stop a training
             print(f"[wandb] init failed ({e}): no tracking", flush=True)
             self.run = None
@@ -137,7 +165,7 @@ class WandbLogger(keras.callbacks.Callback):
         d["epoch"] = int(epoch) + 1
         if self.run is not None and self.preview is not None:
             try:
-                out = self.model(self.preview, training=False)
+                out = preview_outputs(self.model, self.preview)
                 for title, img in panels(self.preview, out):
                     d.setdefault(f"images/{title.split(' #')[0]}", []).append(
                         self.wandb.Image(img, caption=f"{title}: observed | model | residual"))
