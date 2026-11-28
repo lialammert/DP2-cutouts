@@ -932,3 +932,13 @@ def test_the_restarted_process_does_not_inherit_wandbs_service_address(monkeypat
     monkeypatch.delitem(sys.modules, "wandb", raising=False)
     env = dict(PATH="p", WANDB_MODE="offline", WANDB_SERVICE="3-1-unix-/tmp/wandb-1/socket", XLA_FLAGS="x")
     assert without_wandb_service(env) == dict(PATH="p", WANDB_MODE="offline", XLA_FLAGS="x")
+
+
+def test_images_of_the_finished_vaes_from_their_best_weights(cfg):
+    # After the stage test (same module fixture): scripts/inspect/wandb_vae_images.py's panels for every VAE stage.
+    from dp2_cutouts.deblend.tracking import finished_vae_panels
+    want = dict(rubin_vae={"Rubin i"}, k1={"VIS"}, k2={"Rubin i"}, c1={"Rubin i", "VIS"})
+    for stage, titles in want.items():
+        got = finished_vae_panels(cfg, stage, n=2)
+        assert {t.split(" #")[0] for t, _ in got} == titles, stage
+        assert all(img.dtype == np.uint8 and img.shape[1] == 3 * img.shape[0] for _, img in got), stage

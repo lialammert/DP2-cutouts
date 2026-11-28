@@ -100,6 +100,32 @@ def preview_outputs(model, x):
     return {k: np.asarray(v) for k, v in out.items()}
 
 
+def finished_vae_panels(cfg, stage, n=4, split="val"):
+    # Panels of a finished VAE stage from its best weights (scripts/inspect/wandb_vae_images.py), on the first n
+    # examples of the split: rubin_vae (Rubin i), k1 (VIS), k2 (Rubin i from the K1 latent), c1 (Rubin i and VIS).
+    # The same observed | model | residual images as the live tracking.
+    from . import data, evaluate
+    camp = evaluate.Campaign(cfg, students=False)
+    part = dict(rubin_vae="rvae", k1="k1", k2="k2", c1="c1")[stage]
+    if part not in camp.parts or (stage == "k2" and "k1" not in camp.parts):
+        return []
+    x, _ = data.D1Batches(cfg, split, n, False)[0]
+    cond = x.get("r_psf")
+    if stage == "rubin_vae":
+        enc, dec = camp.parts["rvae"]
+        out = dict(mean=camp.decode(dec, camp.mu(enc, x["r_in"], cond=cond), camp.sr, cond))
+    elif stage == "k1":
+        enc, dec = camp.parts["k1"]
+        out = dict(mean=camp.decode(dec, camp.mu(enc, x["e_in"]), camp.se))
+    elif stage == "k2":
+        out = dict(mean=camp.decode(camp.parts["k2"], camp.mu(camp.parts["k1"][0], x["e_in"]), camp.sr, cond))
+    else:
+        enc, dec_r, dec_e = camp.parts["c1"]
+        mu = camp.mu(enc, x["r_in"], x["e_in"], cond=cond)
+        out = dict(mean_r=camp.decode(dec_r, mu, camp.sr, cond), mean_e=camp.decode(dec_e, mu, camp.se))
+    return panels(x, out)
+
+
 def _scalars(logs, prefix):
     out = {}
     for k, v in (logs or {}).items():
