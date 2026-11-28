@@ -66,7 +66,8 @@ fi
 if [[ -n "${DP2_WANDB:-}" && "${DP2_WANDB}" != "0" ]]; then
     export WANDB_MODE=offline
     export WANDB_DIR="${WANDB_DIR:-${SCRATCH:-$DP2_ML_ROOT}/wandb}"
-    export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$WANDB_DIR/.cache}" WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-$WANDB_DIR/.config}"
+    # WANDB_CONFIG_DIR stays the default (~/.config/wandb): it holds the server of the account (base_url).
+    export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$WANDB_DIR/.cache}"
     export WANDB_PROJECT="${WANDB_PROJECT:-dp2-deblend}" WANDB_SILENT=true
     mkdir -p "$WANDB_DIR"
     echo "[env] wandb offline in $WANDB_DIR (project $WANDB_PROJECT, lib ${DP2_WANDB_LIB:-<venv>})"
