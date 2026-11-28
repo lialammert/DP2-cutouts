@@ -942,3 +942,25 @@ def test_images_of_the_finished_vaes_from_their_best_weights(cfg):
         got = finished_vae_panels(cfg, stage, n=2)
         assert {t.split(" #")[0] for t, _ in got} == titles, stage
         assert all(img.dtype == np.uint8 and img.shape[1] == 3 * img.shape[0] for _, img in got), stage
+
+
+def test_latent_refinement_diagnostic_runs_on_the_trained_rubin_vae(cfg):
+    # scripts/inspect/latent_refine_test.py on the tiny Rubin VAE of the stage test: per-galaxy posteriors optimised
+    # with frozen networks; the ELBO loss of the last step is not worse than the first, every number is finite.
+    import importlib.util
+    from pathlib import Path
+    p = Path(__file__).parents[1] / "scripts" / "inspect" / "latent_refine_test.py"
+    spec = importlib.util.spec_from_file_location("latent_refine_test", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    res = mod.run(cfg, groups=((0, 40), (40, 1e9)), n=3, steps=5, eval_draws=2, max_seconds=600)
+    assert res["n"] >= 2 and set(res["groups"]) <= {"0-40", ">=40"}
+    assert res["steps"] == 5 and res["converged"] is False and 5 in res["curve"]
+    # Stopping rule: not before min_steps; then a flat loss is converged, a falling one is not.
+    assert not mod.converged([10.0] * 30, min_steps=50)
+    assert mod.converged([10.0] * 60, min_steps=50)
+    assert not mod.converged(list(np.linspace(100, 50, 60)), min_steps=50)
+    assert res["loss_first_last"][1] <= res["loss_first_last"][0] * 1.05
+    for g in res["groups"].values():
+        for k in ("nll_before", "nll_after", "kl_before", "kl_after"):
+            assert np.isfinite(g[k]), k
