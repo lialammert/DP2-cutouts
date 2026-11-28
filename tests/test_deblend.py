@@ -922,3 +922,13 @@ def test_wandb_is_closed_before_an_autotuning_restart(monkeypatch):
                                                                      teardown=teardown))
     close_wandb()
     assert calls == ["finish", "teardown"]
+
+
+def test_the_restarted_process_does_not_inherit_wandbs_service_address(monkeypatch):
+    # mlcli.without_wandb_service: the run closed and WANDB_SERVICE dropped from the copied environment (otherwise
+    # the restarted process tried to reach the dead service; reproduced with wandb 0.31.2 offline).
+    import sys
+    from dp2_cutouts.mlcli import without_wandb_service
+    monkeypatch.delitem(sys.modules, "wandb", raising=False)
+    env = dict(PATH="p", WANDB_MODE="offline", WANDB_SERVICE="3-1-unix-/tmp/wandb-1/socket", XLA_FLAGS="x")
+    assert without_wandb_service(env) == dict(PATH="p", WANDB_MODE="offline", XLA_FLAGS="x")

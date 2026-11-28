@@ -63,6 +63,15 @@ def close_wandb():
             print(f"[dp2-ml] wandb.{fn} before the restart failed: {e}", file=sys.stderr, flush=True)
 
 
+def without_wandb_service(env):
+    # Environment for the restarted process: the W&B run closed (close_wandb) and wandb's service address removed.
+    # wandb puts WANDB_SERVICE (its service socket) in the environment; the environment of the restart is copied
+    # before the service stops, so the restarted process tried to reach a dead socket ("Failed to connect to
+    # service", 2026-11-28, C1 and the Rubin VAE). Without it, the restarted process starts its own service.
+    close_wandb()
+    return {k: v for k, v in env.items() if not k.startswith("WANDB_SERVICE")}
+
+
 def autotune_fallback_env(error_text, env):
     # Environment to restart with when a cuDNN engine failed under XLA convolution autotuning (V100, see
     # scripts/jeanzay/ml/env.sh): one level down the chain 3 (or more, or unset) -> 2 -> 0, the same flags otherwise
@@ -302,7 +311,7 @@ def main(argv=None):
                 # A training resumes from its backup: restarting the whole command loses nothing.
                 print("[dp2-ml] cuDNN engine failure under convolution autotuning: restarting with "
                       f"XLA_FLAGS={new_env['XLA_FLAGS']!r}", file=sys.stderr, flush=True)
-                close_wandb()
+                new_env = without_wandb_service(new_env)
                 os.execve(sys.executable, [sys.executable, "-m", "dp2_cutouts.mlcli"] + list(argv or sys.argv[1:]),
                           new_env)
             if not (isinstance(e, SystemExit) and e.code in (0, None)):
