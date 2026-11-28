@@ -53,6 +53,13 @@ if nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | grep -q "V100
     esac
     echo "[env] V100: XLA_FLAGS=$XLA_FLAGS"
 fi
+# JAX_PLATFORMS=cpu set in the submitting shell (for checks on a login node) is copied into the job by sbatch, and
+# from it into every job the campaign submits: JAX then sees cpu:0 only (pilot of 2026-11-28: K1 and C1 stopped on
+# "deblend.train.gpus = 4 but only 1 devices"). On a node with a GPU it is dropped.
+if [[ -n "${JAX_PLATFORMS:-}" ]] && nvidia-smi -L >/dev/null 2>&1; then
+    echo "[env] JAX_PLATFORMS=$JAX_PLATFORMS inherited from the submitting shell: unset on this GPU node"
+    unset JAX_PLATFORMS
+fi
 # Caches out of $HOME (3 GiB quota on Jean Zay) and out of $WORK (shared by the lab, its file count is the tight
 # limit: it filled up on 2026-11-27): on $SCRATCH.
 _cache="${SCRATCH:-${DP2_ML_ROOT:-$WORK}}/.cache"

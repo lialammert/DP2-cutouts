@@ -203,7 +203,7 @@ def test_multi_gpu_stages_ask_for_their_gpus_and_cores(tmp_path):
     cfg = _cfg(tmp_path, "_pilot")
     cfg.raw["deblend"]["c1"] = dict(train=dict(gpus=4))
     slurm = FakeSlurm()
-    env = dict(ENV, DP2_GPU_EXTRA="-C v100-32g --qos=qos_gpu-t3 --cpus-per-task=10")
+    env = dict(ENV, DP2_GPU_EXTRA="-C v100-32g --qos=qos_gpu-t3 --cpus-per-task=10", JAX_PLATFORMS="cpu")
     C.start(cfg, tmp_path / "cfg.yaml", [], "pilot", max_steps=300, split="val", runner=slurm, env=env)
     (C.deblend_dir(cfg) / "norm_stats.json").write_text("{}")
     slurm.queue = []
@@ -211,6 +211,7 @@ def test_multi_gpu_stages_ask_for_their_gpus_and_cores(tmp_path):
     cmds = {n: c for n, c, _ in slurm.submitted}
     c1, vae = cmds["dbl.r_c1_pilot"], cmds["dbl.r_rubin_vae_pilot"]
     assert "--gres=gpu:4" in c1 and c1.index("--cpus-per-task=40") > c1.index("--cpus-per-task=10")
+    assert all("JAX_PLATFORMS" not in e for _, _, e in slurm.submitted)        # a login-node setting never passes
     assert not any(a.startswith("--gres") for a in vae) and "--cpus-per-task=40" not in vae
 
 

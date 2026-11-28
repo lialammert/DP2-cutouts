@@ -192,10 +192,14 @@ def queue(runner, env):
     return jobs
 
 
+# Never passed on to a campaign job: JAX_PLATFORMS=cpu of a login-node check would hide the GPUs (2026-11-28).
+NEVER_PASSED = ("JAX_PLATFORMS",)
+
+
 def _clean_env(env, extra=None, drop=()):
     # Environment for sbatch: without the SLURM_* of the job advancing the campaign (they would leak into the new
-    # job), plus the campaign variables.
-    e = {k: v for k, v in env.items() if not k.startswith("SLURM_") and k not in drop}
+    # job), nor NEVER_PASSED, plus the campaign variables.
+    e = {k: v for k, v in env.items() if not k.startswith("SLURM_") and k not in drop and k not in NEVER_PASSED}
     e.update(extra or {})
     return e
 
