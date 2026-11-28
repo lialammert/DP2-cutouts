@@ -406,7 +406,8 @@ deblend:
     relation_max_offset: 0.05      # slope or offset departs from the identity (scripts/inspect/shape_relation.py)
     reference: vis                 # shape reference on D2: the target's REGAUSS VIS shape (vis), or through the fit (fit)
     reliable_snr: 80               # main sample (2026-11-27: shapes below S/N_i ~80 not reliable), and S/N_i >= 10
-    snr_bins: [0, 10, 20, 50, 80, 100, 1.0e9]   # R2, m, c per S/N_i bin (D1 reconstructions and D2 runs)
+    snr_bins: [0, 10, 20, 50, 80, 100, 1.0e+9]  # R2, m, c per S/N_i bin (D1 reconstructions and D2 runs); the
+                                                # exponent needs its sign: YAML reads 1.0e9 as a string
     latent_max_examples: 5000
     jacobian_n: 32
     mask_pool: 2000

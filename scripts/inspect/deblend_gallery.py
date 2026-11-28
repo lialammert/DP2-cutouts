@@ -88,23 +88,25 @@ def main():
         return np.asarray(ops.convert_to_numpy(t))
 
     rubin, vis = {}, {}                                        # title -> (B, n, n, bands) / (B, ne, ne)
+    cond = x.get("x_psf")                                      # Rubin PSF of the stamps (deblend.psf_condition)
+    tc = None if cond is None else ops.convert_to_tensor(cond)
     if "k1" in camp.parts:
         mu_k1, _ = camp.parts["k1"][0](ops.convert_to_tensor(x["e_in"]))
         vis["K1: VIS target redrawn\nfrom its latent"] = camp.decode(camp.parts["k1"][1], np_(mu_k1), camp.se)[..., 0]
         if "k2" in camp.parts:
             rubin["K2 o K1: Euclid -> Rubin\n(teacher's view, Runs A/B)"] = camp.decode(camp.parts["k2"], np_(mu_k1),
-                                                                                        camp.sr)
+                                                                                        camp.sr, cond)
     rd = train.run_dir(cfg, "c2")
     if "c1" in camp.parts and (rd / "DONE").exists():
         s_c2 = json.loads((rd / "run.json").read_text())["settings"]
         br = train.load_c2_branches(cfg, rd, camp.d, s_c2)
-        mu_t, _ = br.teacher(ops.convert_to_tensor(x["x_in"]), ops.convert_to_tensor(x["e_in"]))
-        mu_s, _ = br.student(ops.convert_to_tensor(x["x_in"]))
+        mu_t, _ = br.teacher(ops.convert_to_tensor(x["x_in"]), ops.convert_to_tensor(x["e_in"]), cond=tc)
+        mu_s, _ = br.student(ops.convert_to_tensor(x["x_in"]), cond=tc)
         _, dec_r, dec_e = camp.parts["c1"]
-        rubin["C2 teacher (blend + VIS)\ndrawn by C1 as Rubin"] = camp.decode(dec_r, np_(mu_t), camp.sr)
+        rubin["C2 teacher (blend + VIS)\ndrawn by C1 as Rubin"] = camp.decode(dec_r, np_(mu_t), camp.sr, cond)
         vis["C2 teacher (blend + VIS)\ndrawn by C1 as VIS"] = camp.decode(dec_e, np_(mu_t), camp.se)[..., 0]
-        rubin["C2 student (blend only)\ndrawn by C1 as Rubin"] = camp.decode(dec_r, np_(mu_s), camp.sr)
-    means = {run: smp(x["x_in"], args.k)[1].mean(1) for run, smp in camp.samplers.items()}
+        rubin["C2 student (blend only)\ndrawn by C1 as Rubin"] = camp.decode(dec_r, np_(mu_s), camp.sr, cond)
+    means = {run: smp(x["x_in"], args.k, cond=cond)[1].mean(1) for run, smp in camp.samplers.items()}
     noise_r = np.median(1 / np.sqrt(np.where(x["x_w"] > 0, x["x_w"], np.nan)), axis=(1, 2))   # (B, bands)
     e_noise = np.median(1 / np.sqrt(np.where(x["e_w"][..., 0] > 0, x["e_w"][..., 0], np.nan)), axis=(1, 2))
 

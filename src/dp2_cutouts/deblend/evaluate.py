@@ -36,61 +36,38 @@ from ..ml.evaluate import bootstrap, linear_mc, robust_scatter
 from ..ml.training import write_json
 from ..pairs import common
 from . import data, infer, train
+from .shapes import gaussian_psf_image, shapes, shapes_many  # noqa: F401 (gaussian_psf_image, shapes: callers)
 
 RUNS = ("A", "B", "C")
 STAGE_OF = dict(A="A", B="B", C="c3")
 
 
 # ----------------------------------------------------------------------------- measurements
-def gaussian_psf_image(sigma_px, e1, e2, n=25):
-    import galsim
-    psf = galsim.Gaussian(sigma=max(float(sigma_px), 0.3)).shear(e1=float(np.clip(e1, -0.5, 0.5)),
-                                                                 e2=float(np.clip(e2, -0.5, 0.5)))
-    return psf.drawImage(nx=n, ny=n, scale=1.0).array
-
-
-def shapes(img, valid, psf_sigma_px, psf_e1=0.0, psf_e2=0.0):
-    # Adaptive moments (observed, PSF-convolved) and REGAUSS PSF-corrected distortion, with a Gaussian PSF model
-    # built from the catalogue PSF moments (the PSF images are not in the datasets). NaN on failure.
-    import galsim
-    out = dict(e1=np.nan, e2=np.nan, sigma=np.nan, ok=False, e1_rg=np.nan, e2_rg=np.nan, ok_rg=False)
-    n = img.shape[0]
-    c = (n - 1) / 2.0
-    m = common.moments(img, valid.astype(np.int32), (c, c))
-    out.update(e1=m["e1"], e2=m["e2"], sigma=m["sigma"], ok=bool(m["ok"]))
-    if not np.isfinite(psf_sigma_px):
-        return out
-    try:
-        gi = galsim.Image(np.ascontiguousarray(img, np.float64), scale=1.0)
-        bad = galsim.Image((~valid).astype(np.int32), scale=1.0)
-        pi = galsim.Image(gaussian_psf_image(psf_sigma_px, psf_e1, psf_e2), scale=1.0)
-        r = galsim.hsm.EstimateShear(gi, pi, badpix=bad, shear_est="REGAUSS", strict=False)
-        if not r.error_message:
-            out.update(e1_rg=float(r.corrected_e1), e2_rg=float(r.corrected_e2), ok_rg=True)
-    except Exception:  # noqa: BLE001 - a failed measurement is recorded as such
-        pass
-    return out
+# shapes / gaussian_psf_image live in deblend/shapes.py (imported above); shapes_many measures many images over the
+# job's cores, in order.
 
 
 def measure_rubin(images, valid, meta_rows, cfg, prefix, aperture_px):
-    # images (N, n, n, C) nJy -> one row per image: i-band shapes, aperture fluxes per band.
+    # images (N, n, n, C) nJy, meta_rows N rows (the i-band PSF of each image) -> one row per image: i-band shapes,
+    # aperture fluxes per band.
     bands = list(cfg["rubin"]["bands"])
     ib = bands.index("i")
-    n = images.shape[1]
+    N, n = len(images), images.shape[1]
     c = (n - 1) / 2.0
     rr, cc = np.indices((n, n))
     ap = (rr - c) ** 2 + (cc - c) ** 2 <= aperture_px ** 2
-    rows = []
-    for k in range(len(images)):
-        mr = meta_rows.iloc[k]
-        s = shapes(images[k][..., ib], valid[k][..., ib] if valid is not None else np.ones((n, n), bool),
-                   float(mr.get("psf_sigma_i", np.nan)) / common.RUBIN_SCALE if "psf_sigma_i" in mr else np.nan,
-                   float(mr.get("psf_e1_i", 0.0)), float(mr.get("psf_e2_i", 0.0)))
-        r = {f"{prefix}_{q}": v for q, v in s.items()}
-        for j, b in enumerate(bands):
-            r[f"{prefix}_flux_{b}"] = float((images[k][..., j] * ap).sum())
-        rows.append(r)
-    return pd.DataFrame(rows)
+    vi = valid[..., ib] if valid is not None else np.ones(images.shape[:3], bool)
+
+    def col(name, default):
+        return meta_rows[name].to_numpy(float) if name in meta_rows else np.full(N, default)
+
+    s = shapes_many(images[..., ib], vi, col("psf_sigma_i", np.nan) / common.RUBIN_SCALE, col("psf_e1_i", 0.0),
+                    col("psf_e2_i", 0.0))
+    df = pd.DataFrame(s, columns=["e1", "e2", "sigma", "ok", "e1_rg", "e2_rg", "ok_rg"]).add_prefix(f"{prefix}_")
+    flux = (images * ap[None, :, :, None]).sum((1, 2))
+    for j, b in enumerate(bands):
+        df[f"{prefix}_flux_{b}"] = flux[:, j].astype(float)
+    return df
 
 
 def psf_sigma_arcsec_from_fwhm(fwhm):
@@ -99,11 +76,8 @@ def psf_sigma_arcsec_from_fwhm(fwhm):
 
 def measure_vis(images, valid, cfg, prefix):
     s_px = psf_sigma_arcsec_from_fwhm(cfg["euclid"].get("vis_psf_fwhm", 0.16)) / float(cfg["euclid"]["pixel_scale"])
-    rows = []
-    for k in range(len(images)):
-        s = shapes(images[k][..., 0], valid[k][..., 0], s_px)
-        rows.append({f"{prefix}_{q}": v for q, v in s.items()})
-    return pd.DataFrame(rows)
+    s = shapes_many(images[..., 0], valid[..., 0], s_px)
+    return pd.DataFrame(s, columns=["e1", "e2", "sigma", "ok", "e1_rg", "e2_rg", "ok_rg"]).add_prefix(f"{prefix}_")
 
 
 def add_noise(images, w, rng):
@@ -213,9 +187,7 @@ class Campaign:
                                                       ev.get("method", "heun"), int(cfg["deblend"]["seed"]))
 
     def decode(self, dec, z, scale, cond=None):
-        from keras import ops
-        c = None if cond is None else ops.convert_to_tensor(cond)
-        return np.asarray(ops.convert_to_numpy(dec(ops.convert_to_tensor(z), cond=c))) * scale
+        return infer.decode_flat(dec, z, scale, cond)
 
     def post(self, enc, *inputs, cond=None):
         # Posterior (mean, log variance) of a diagonal encoder.
@@ -315,10 +287,12 @@ def eval_d1(cfg, split, seed, students=True, name="d1", only=None):
             _, imgs = smp(x["r_in"], K, cond=cond)
             mean_img = imgs.mean(1)
             parts.append(measure_rubin(mean_img, valid, mrows, cfg, f"{run}_meanimg", ap))
-            e1s, e2s, fis = (np.full((len(rows), K), np.nan) for _ in range(3))
-            for k in range(K):
-                m = measure_rubin(add_noise(imgs[:, k], x["r_w"], rng), valid, mrows, cfg, "s", ap)
-                e1s[:, k], e2s[:, k], fis[:, k] = m["s_e1"], m["s_e2"], m["s_flux_i"]
+            # The K samples of the batch in one measurement call (spread over the cores), each with its noise draw.
+            B = len(rows)
+            flat = add_noise(imgs.reshape(B * K, *imgs.shape[2:]), np.repeat(x["r_w"], K, axis=0), rng)
+            m = measure_rubin(flat, np.repeat(valid, K, axis=0), mrows.loc[mrows.index.repeat(K)].reset_index(drop=True),
+                              cfg, "s", ap)
+            e1s, e2s, fis = (m[f"s_{q}"].to_numpy(float).reshape(B, K) for q in ("e1", "e2", "flux_i"))
             prob[run]["e1"].append(e1s)
             prob[run]["e2"].append(e2s)
             prob[run]["flux_i"].append(fis)
@@ -470,7 +444,7 @@ def shape_metrics(y, x):
 
 def by_snr(df, ycol, xcol, edges=None):
     # shape_metrics of ycol against xcol in bins of snr_i, and on S/N_i >= each edge.
-    edges = list(edges or SNR_BINS)
+    edges = [float(e) for e in (edges or SNR_BINS)]      # (a YAML 1.0e9 without its exponent sign is a string)
     snr = df["snr_i"].to_numpy(float)
     res = {}
     for lo, hi in zip(edges[:-1], edges[1:]):
@@ -557,15 +531,14 @@ def eval_d2(cfg, split, seed):
             _, imgs = smp(x["x_in"], K, cond=x.get("x_psf"))
             mean_img = imgs.mean(1)
             mm = measure_rubin(mean_img, valid, mrows, cfg, f"{run}_meanimg", ap)
-            e1s, e2s, sz = (np.full((len(rows), K), np.nan) for _ in range(3))
-            e1r, e2r = (np.full((len(rows), K), np.nan) for _ in range(2))
-            for k in range(K):
-                m = measure_rubin(imgs[:, k], valid, mrows, cfg, "s", ap)
-                e1s[:, k], e2s[:, k], sz[:, k] = m["s_e1"], m["s_e2"], m["s_sigma"]
-                g1, g2 = m["s_e1_rg"].to_numpy(float), m["s_e2_rg"].to_numpy(float)
-                bad = ~(np.abs(g1) < E_MAX) | ~(np.abs(g2) < E_MAX)       # failed corrections left out
-                e1r[:, k] = np.where(bad, np.nan, g1)
-                e2r[:, k] = np.where(bad, np.nan, g2)
+            # The K samples of the batch in one measurement call (spread over the cores).
+            B = len(rows)
+            m = measure_rubin(imgs.reshape(B * K, *imgs.shape[2:]), np.repeat(valid, K, axis=0),
+                              mrows.loc[mrows.index.repeat(K)].reset_index(drop=True), cfg, "s", ap)
+            e1s, e2s, sz = (m[f"s_{q}"].to_numpy(float).reshape(B, K) for q in ("e1", "e2", "sigma"))
+            g1, g2 = (m[f"s_{q}_rg"].to_numpy(float).reshape(B, K) for q in ("e1", "e2"))
+            bad = ~(np.abs(g1) < E_MAX) | ~(np.abs(g2) < E_MAX)                # failed corrections left out
+            e1r, e2r = np.where(bad, np.nan, g1), np.where(bad, np.nan, g2)
             # Over-subtraction: central pixels where the blend lies below the reconstructed central by > 3 sigma.
             res = (x["x_flux"] - mean_img) * np.sqrt(x["x_w"])
             over = ((res < -3) & valid & apm[None, :, :, None]).sum((1, 2, 3)) / np.maximum(

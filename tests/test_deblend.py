@@ -606,12 +606,14 @@ def test_cudnn_failure_under_autotuning_restarts_at_level_zero():
     err = "XlaRuntimeError: UNKNOWN: CUDNN_STATUS_EXECUTION_FAILED in cuda_dnn.cc"
     env = dict(XLA_FLAGS="--foo --xla_gpu_autotune_level=3", PATH="p")
     new = autotune_fallback_env(err, env)
-    assert new["XLA_FLAGS"] == "--foo --xla_gpu_autotune_level=0" and new["DP2_AUTOTUNE_FALLBACK"] == "1"
+    assert new["XLA_FLAGS"] == "--foo --xla_gpu_autotune_level=2" and new["DP2_AUTOTUNE_FALLBACK"] == "1"
     assert new["PATH"] == "p"
-    assert autotune_fallback_env(err, new) is None                     # never twice
+    last = autotune_fallback_env(err, new)                             # 3 -> 2 -> 0, then nothing
+    assert last["XLA_FLAGS"] == "--foo --xla_gpu_autotune_level=0" and last["DP2_AUTOTUNE_FALLBACK"] == "2"
+    assert autotune_fallback_env(err, last) is None
     assert autotune_fallback_env("ValueError: other", env) is None
     assert autotune_fallback_env(err, dict(XLA_FLAGS="--xla_gpu_autotune_level=0")) is None
-    assert autotune_fallback_env(err, {})["XLA_FLAGS"] == "--xla_gpu_autotune_level=0"
+    assert autotune_fallback_env(err, {})["XLA_FLAGS"] == "--xla_gpu_autotune_level=2"
 
 
 # ----------------------------------------------------------------------------- recipe of 2026-11-28
@@ -758,3 +760,53 @@ print("NORM", repr(opt.stats()["grad_norm_mean"]), len(keras.distribution.list_d
         assert ndev == n
         got[n] = float(norm)
     assert got["2"] == pytest.approx(got["1"], rel=1e-5) and got["1"] > 0
+
+
+def test_shape_measurements_over_several_processes_match_one_by_one(monkeypatch):
+    # deblend/shapes.shapes_many: the same results, in the same order, with a pool of two worker processes.
+    from dp2_cutouts.deblend import shapes as S
+    rng = np.random.default_rng(0)
+    n = 19
+    yy, xx = np.indices((n, n)) - (n - 1) / 2
+    imgs = np.stack([np.exp(-(xx ** 2 / (2 * (2 + 0.1 * k) ** 2) + yy ** 2 / 8.0)) * 100 + rng.normal(0, 0.5, (n, n))
+                     for k in range(12)]).astype(np.float32)
+    valid = np.ones(imgs.shape, bool)
+    sig = np.full(12, 1.5)
+    one = S.shapes_many(imgs, valid, sig, min_parallel=10 ** 9)
+    monkeypatch.setenv("DP2_SHAPE_WORKERS", "2")
+    monkeypatch.setattr(S, "_POOL", None)
+    try:
+        many = S.shapes_many(imgs, valid, sig, min_parallel=2)
+    finally:
+        if S._POOL is not None:
+            S._POOL.shutdown()
+        S._POOL = None
+    assert len(many) == 12
+    for a, b in zip(one, many):
+        assert a.keys() == b.keys()
+        for k in a:
+            assert (a[k] == b[k]) or (np.isnan(a[k]) and np.isnan(b[k])), k
+
+
+def test_decoding_in_chunks_gives_the_same_images():
+    # infer.decode_flat: latents decoded in chunks (cuDNN refuses tensors of more than 2^31 elements) give the same
+    # images as in one call; the conditioning follows its rows.
+    from dp2_cutouts.deblend import infer
+    from dp2_cutouts.deblend.layers import ConvDecoder
+    keras.utils.set_random_seed(0)
+    dec = ConvDecoder(N_R, B_R)
+    rng = np.random.default_rng(0)
+    z = rng.normal(size=(10, 4)).astype(np.float32)
+    c = rng.normal(size=(10, 18)).astype(np.float32)
+    whole = np.asarray(ops.convert_to_numpy(dec(ops.convert_to_tensor(z), cond=ops.convert_to_tensor(c)))) * 2.0
+    np.testing.assert_allclose(infer.decode_flat(dec, z, 2.0, c, chunk=3), whole, rtol=1e-5, atol=1e-5)
+    zk = z.reshape(5, 2, 4)
+    out = infer._decode(dec, 2.0, zk, c[::2])
+    assert out.shape == (5, 2, N_R, N_R, B_R)
+
+
+def test_yaml_snr_bins_are_numbers():
+    import yaml
+    from pathlib import Path
+    cfg = yaml.safe_load((Path(__file__).parents[1] / "config" / "ml_jeanzay.yaml").read_text())
+    assert all(isinstance(v, (int, float)) for v in cfg["deblend"]["eval"]["snr_bins"])

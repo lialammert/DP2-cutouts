@@ -51,16 +51,19 @@ COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-
 
 def autotune_fallback_env(error_text, env):
     # Environment to restart with when a cuDNN engine failed under XLA convolution autotuning (V100, see
-    # scripts/jeanzay/ml/env.sh): the same flags at --xla_gpu_autotune_level=0. None when the error is another one,
-    # autotuning is already off, or this process is already the restart.
+    # scripts/jeanzay/ml/env.sh): one level down the chain 3 (or more, or unset) -> 2 -> 0, the same flags otherwise
+    # (2026-11-28: C1 on four V100 failed at 3; level 2 ran as fast in speed_probe, level 1 failed on K1). None when
+    # the error is another one or autotuning is already off. Each step lowers the level, so the restarts end.
     import re
     flags = env.get("XLA_FLAGS", "")
     m = re.search(r"--xla_gpu_autotune_level=(\d+)", flags)
-    if "CUDNN_STATUS_EXECUTION_FAILED" not in error_text or env.get("DP2_AUTOTUNE_FALLBACK") or \
-            (m is not None and m.group(1) == "0"):
+    level = int(m.group(1)) if m is not None else 4
+    if "CUDNN_STATUS_EXECUTION_FAILED" not in error_text or level == 0:
         return None
+    nxt = 2 if level > 2 else 0
     flags = re.sub(r"--xla_gpu_autotune_level=\d+", "", flags).strip()
-    return dict(env, XLA_FLAGS=f"{flags} --xla_gpu_autotune_level=0".strip(), DP2_AUTOTUNE_FALLBACK="1")
+    return dict(env, XLA_FLAGS=f"{flags} --xla_gpu_autotune_level={nxt}".strip(),
+                DP2_AUTOTUNE_FALLBACK=str(int(env.get("DP2_AUTOTUNE_FALLBACK") or 0) + 1))
 
 
 def _debvader_run(args):

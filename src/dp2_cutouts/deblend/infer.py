@@ -16,11 +16,27 @@ import numpy as np
 from keras import ops
 
 
+# Latents decoded at most this many at a time: 64 galaxies x 128 samples = 8 192 images in one call made a
+# convolution tensor of more than 2^31 elements, which cuDNN refuses (pilot of 2026-11-28: "Check failed:
+# cudnnSetTensorNdDescriptor ... count: 8192"). 1 024 stays far below and keeps the GPU busy.
+DECODE_CHUNK = 1024
+
+
+def decode_flat(decoder, z, scale, cond=None, chunk=DECODE_CHUNK):
+    # z (N, d), cond (N, c) or None -> images (N, n, n, C) x scale, in chunks.
+    z = np.asarray(z, np.float32)
+    out = []
+    for s in range(0, len(z), int(chunk)):
+        c = None if cond is None else ops.convert_to_tensor(np.asarray(cond[s:s + chunk], np.float32))
+        out.append(np.asarray(ops.convert_to_numpy(decoder(ops.convert_to_tensor(z[s:s + chunk]), cond=c))))
+    img = np.concatenate(out) if out else np.zeros((0,), np.float32)
+    return img * np.asarray(scale, np.float32)
+
+
 def _decode(decoder, scale, z, cond=None):
     B, K, d = z.shape
-    c = None if cond is None else ops.convert_to_tensor(np.repeat(np.asarray(cond, np.float32), K, axis=0))
-    img = decoder(ops.reshape(ops.convert_to_tensor(z), (B * K, d)), cond=c)
-    img = ops.convert_to_numpy(img) * np.asarray(scale, np.float32)
+    c = None if cond is None else np.repeat(np.asarray(cond, np.float32), K, axis=0)
+    img = decode_flat(decoder, z.reshape(B * K, d), scale, c)
     return img.reshape(B, K, *img.shape[1:])
 
 
