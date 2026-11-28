@@ -46,8 +46,11 @@ def cfg(tmp_path_factory):
     d1 = dict(rubin_flux=rf, rubin_ivar=np.ones_like(rf), rubin_mask=np.zeros(rf.shape, bool), euclid_flux=ef,
               euclid_ivar=np.full_like(ef, 400.0), euclid_mask=np.zeros(ef.shape, bool),
               euclid_present=np.ones((n, 4), bool), euclid_fill=fill)
-    common = dict(split=split, tract=np.full(n, 5063), patch=np.arange(n) % 4, psf_sigma_i=np.full(n, 0.3),
-                  psf_e1_i=np.zeros(n), psf_e2_i=np.zeros(n), snr_i=np.linspace(5, 80, n))
+    common = dict(split=split, tract=np.full(n, 5063), patch=np.arange(n) % 4, snr_i=np.linspace(5, 80, n))
+    for b in "ugrizy":
+        # The 18 Rubin PSF scalars of the catalogue (deblend.psf_condition).
+        common.update({f"psf_sigma_{b}": rng.uniform(0.25, 0.45, n), f"psf_e1_{b}": rng.normal(0.01, 0.03, n),
+                       f"psf_e2_{b}": rng.normal(-0.01, 0.03, n)})
     _write_store(root / "datasets" / "d1", pd.DataFrame(dict(common, object_id=np.arange(n))), d1)
     # D2: groups of two Euclid targets sharing a Rubin owner; the second one is further from the Rubin centre.
     blend = rf + np.roll(rf, 3, axis=2)
@@ -64,12 +67,20 @@ def cfg(tmp_path_factory):
               euclid_flux=ef, euclid_ivar=np.full_like(ef, 400.0), euclid_mask=np.zeros(ef.shape, bool),
               euclid_present=np.ones((n, 4), bool), euclid_fill=fill)
     _write_store(root / "datasets" / "d2", meta2, d2)
-    tr = dict(batch_size=4, learning_rate=1e-3, clipnorm=1.0, train_steps=None, epochs=1,
-              early_stopping_patience=5, backup_every_steps=None, val_max_examples=None)
+    tr = dict(batch_size=4, learning_rate=1e-3, global_clipnorm=1.0, train_steps=None, epochs=1,
+              early_stopping_patience=5, backup_every_steps=None, val_max_examples=None, warmup_frac=0.02,
+              final_lr_frac=0.01)
     raw = dict(ml_root=str(root), seed=1, rubin=dict(bands=list("ugrizy"), stamp_px=N_R),
                euclid=dict(bands=["VIS", "Y", "J", "H"], stamp_px=N_E, pixel_scale=0.1, vis_psf_fwhm=0.16),
                deblend=dict(euclid_band="VIS", latent_dim=4, d2_centering="rubin", seed=3, train=tr,
-                            k1=dict(beta=1.0), c2=dict(lambda_d1="auto", lambda_batches=2),
+                            psf_condition=True,
+                            rubin_vae=dict(beta=1.0, kl_warmup_frac=0.1), k1=dict(beta=1.0, kl_warmup_frac=0.1),
+                            c1=dict(kl_warmup_frac=0.1),
+                            A=dict(embed=16, draws=4, val_draws=6, replay=True, stats_batches=2),
+                            B=dict(hidden=[16, 16, 16], time_dim=8, replay=True, ema=0.9, val_triplets=3,
+                                   stats_batches=2),
+                            c2=dict(lambda_d1="auto"),
+                            c3=dict(hidden=[16, 16], time_dim=8, ema=0.9, val_triplets=3, stats_batches=2),
                             eval=dict(k_samples=3, max_examples=8, batch_size=4, bootstrap=5, jacobian_n=2,
                                       relation_max_examples=8, latent_max_examples=8, mask_pool=4, nfe=4,
                                       cost_batch=4, cost_k=2),
@@ -221,16 +232,23 @@ def test_cfm_learns_a_bimodal_conditional_target():
 
 
 # ----------------------------------------------------------------------------- MC dropout
-def test_mc_dropout_is_active_only_when_asked():
+def test_dropout_draws_of_run_a_follow_their_masks():
+    # The same masks give the same draws, other masks other draws; all units kept = the plain prediction; the PSF
+    # is appended to every draw.
     from dp2_cutouts.deblend.models import RubinBlendRegressor
     keras.utils.set_random_seed(0)
     m = RubinBlendRegressor(4, 16, 0.5)
     x = np.random.default_rng(0).normal(size=(2, N_R, N_R, B_R)).astype(np.float32)
-    a, b = (np.asarray(ops.convert_to_numpy(m(x, training=False))) for _ in range(2))
-    assert np.allclose(a, b)
-    m.set_mc(True)
-    c, d = (np.asarray(ops.convert_to_numpy(m(x, training=False))) for _ in range(2))
-    assert not np.allclose(c, d)
+    c = np.random.default_rng(1).normal(size=(2, 18)).astype(np.float32)
+    plain = np.asarray(ops.convert_to_numpy(m(x, cond=c)))
+    u = np.random.default_rng(2).random((2, 5, 16)).astype(np.float32)
+    a, b = (np.asarray(ops.convert_to_numpy(m.draws(x, c, u))) for _ in range(2))
+    assert a.shape == (2, 5, 4) and np.allclose(a, b) and np.std(a, axis=1).mean() > 0
+    m0 = RubinBlendRegressor(4, 16, 0.0)
+    p0 = np.asarray(ops.convert_to_numpy(m0(x, cond=c)))
+    d0 = np.asarray(ops.convert_to_numpy(m0.draws(x, c, u)))
+    np.testing.assert_allclose(d0, np.repeat(p0[:, None], 5, axis=1), rtol=1e-5, atol=1e-5)
+    assert plain.shape == (2, 4)
 
 
 # ----------------------------------------------------------------------------- every stage, in order
@@ -245,8 +263,17 @@ def test_every_stage_trains_with_frozen_parts_and_samples_from_rubin_only(cfg):
         run = json.loads((rd / "run.json").read_text())
         if train.DEPENDS[stage]:
             assert json.loads((rd / "frozen_check.json").read_text())["unchanged"]
+        sched = run["settings"]["schedule"]
+        assert sched["total_updates"] >= 2 and sched["warmup_updates"] == round(0.02 * sched["total_updates"])
+        head = (rd / "history.csv").read_text().splitlines()[0]
+        assert "grad_norm_mean" in head and "grad_norm_q95" in head and "grad_norm_nonfinite" in head
+        gn = json.loads((rd / "grad_norms.json").read_text())
+        assert gn["all"]["n"] == sched["total_updates"] and gn["stats_from"] == sched["grad_stats_from"]
         if stage == "c2":
-            assert run["settings"]["lambda_d1_calibration"]["value"] > 0
+            lam = json.loads((rd / "lambda_d1.json").read_text())
+            assert lam["n_measurements"] >= 1 and lam["target"] > 0 and np.isfinite(lam["target"])
+        if stage in ("A", "B", "c3"):
+            assert json.loads((rd / "best.json").read_text())["monitor"] == train.MONITOR[stage]
     # CFM velocity field of the planned size (d = 32, context 128): a few tens of thousands of parameters.
     from dp2_cutouts.deblend.cfm import VelocityField
     f = VelocityField(32)
@@ -257,10 +284,14 @@ def test_every_stage_trains_with_frozen_parts_and_samples_from_rubin_only(cfg):
     d = cfg["deblend"]["latent_dim"]
     sr = load_norm_stats(cfg)["rubin"]["scale"]
     x, _ = D2Batches(cfg, "val", 4, False, fields=("blend",))[0]
-    assert set(x) == {"x_in", "x_flux", "x_w"}
+    assert set(x) == {"x_in", "x_flux", "x_w", "x_psf"} and x["x_psf"].shape == (4, 18)
     s = {st: train.settings(cfg, st) for st in ("A", "B", "c3")}
-    dec_k2 = train.load_decoder(train.run_dir(cfg, "k2") / "decoder_best.weights.h5", N_R, B_R, d)
-    dec_c1 = train.load_decoder(train.run_dir(cfg, "c1") / "dec_r_best.weights.h5", N_R, B_R, d)
+    dec_k2 = train.load_decoder(train.run_dir(cfg, "k2") / "decoder_best.weights.h5", N_R, B_R, d, cfg)
+    dec_c1 = train.load_decoder(train.run_dir(cfg, "c1") / "dec_r_best.weights.h5", N_R, B_R, d, cfg)
+    # A and B share one K1 latent standardisation (written once, read by the second).
+    assert len(list((train.data.deblend_dir(cfg) / "latent_stats").glob("k1_*.json"))) == 1
+    assert json.loads((train.run_dir(cfg, "A") / "latent_stats.json").read_text()) == \
+        json.loads((train.run_dir(cfg, "B") / "latent_stats.json").read_text())
     samplers = dict(
         A=infer.RunASampler(train.load_student(cfg, "A", train.run_dir(cfg, "A"), d, s["A"]), dec_k2, sr),
         B=infer.CFMSampler(train.load_student(cfg, "B", train.run_dir(cfg, "B"), d, s["B"]), dec_k2, sr, 4, "euler"),
@@ -269,9 +300,9 @@ def test_every_stage_trains_with_frozen_parts_and_samples_from_rubin_only(cfg):
     for name, smp in samplers.items():
         params = set(inspect.signature(smp.__call__).parameters)
         assert not any("e_" in p or "euclid" in p for p in params), name
-        z, img = smp(x["x_in"], 3)
+        z, img = smp(x["x_in"], 3, cond=x["x_psf"])
         assert z.shape == (4, 3, d) and img.shape == (4, 3, N_R, N_R, B_R) and np.all(np.isfinite(img)), name
-    za = samplers["A"].latents(x["x_in"], 5)
+    za = samplers["A"].latents(x["x_in"], 5, cond=x["x_psf"])
     assert np.std(za, axis=1).mean() > 0          # MC dropout gives diverse samples
 
 
@@ -297,9 +328,13 @@ def test_evaluations_run_on_the_trained_campaign(cfg):
     raw["deblend"].setdefault("eval", {}).update(relation_min_snr=0, relation_min_pairs=0, relation_max_slope_dev=100,
                                                   relation_max_offset=100)
     loose = MLConfig(raw=raw, path=cfg.path)
-    for what in ("d1", "masking", "d2", "cost", "latent"):
+    for what in ("d1", "masking", "d2", "cost", "latent", "check_vaes", "check_k2"):
         summ = evaluate.run(loose, what, split="val")
         assert summ, what
+    chk = json.loads((evaluate.out_dir(cfg, "check_vaes", "val", None) / "summary.json").read_text())
+    assert {"rvae", "c1", "k1k2"} <= set(chk["paths"]) and set(chk["vis_paths"]) == {"k1_vis", "c1_vis"}
+    assert set(chk["latent"]) == {"rvae", "k1", "c1"} and not chk["probabilistic"]
+    assert len(chk["latent"]["k1"]["kl_per_dim"]) == 4
     d2 = json.loads((evaluate.out_dir(cfg, "d2", "val", None) / "summary.json").read_text())
     assert d2["d1_relation"]["reference"] == "vis" and set(d2["shape_by_snr"]) == {"A", "B", "C"}
     assert set(d2["runs"]) == {"A", "B", "C"} and "A_minus_B" in d2["paired"]
@@ -547,7 +582,7 @@ def test_a_stage_trains_data_parallel_on_two_devices(cfg, tmp_path):
 
     import yaml
     raw = json.loads(json.dumps(cfg.raw))
-    raw["deblend"]["k1"] = dict(raw["deblend"].get("k1") or {}, train=dict(gpus=2, warmup_steps=2))
+    raw["deblend"]["k1"] = dict(raw["deblend"].get("k1") or {}, train=dict(gpus=2))
     raw["deblend"]["train"].update(lr_scaling="sqrt", lr_reference_batch=4)
     raw["deblend"]["runs"]["k1"] = "t_k1_dp"
     p = tmp_path / "cfg.yaml"
@@ -577,3 +612,149 @@ def test_cudnn_failure_under_autotuning_restarts_at_level_zero():
     assert autotune_fallback_env("ValueError: other", env) is None
     assert autotune_fallback_env(err, dict(XLA_FLAGS="--xla_gpu_autotune_level=0")) is None
     assert autotune_fallback_env(err, {})["XLA_FLAGS"] == "--xla_gpu_autotune_level=0"
+
+
+# ----------------------------------------------------------------------------- recipe of 2026-11-28
+def test_energy_score_matches_its_definition_and_stays_finite_on_identical_draws():
+    import jax
+    from dp2_cutouts.deblend.likelihood import energy_score
+    rng = np.random.default_rng(0)
+    z = rng.normal(size=(3, 5, 4)).astype(np.float32)
+    y = rng.normal(size=(3, 4)).astype(np.float32)
+    es, err, spread = (np.asarray(ops.convert_to_numpy(a)) for a in energy_score(z, y))
+    for b in range(3):
+        e1 = np.mean([np.linalg.norm(z[b, i] - y[b]) for i in range(5)])
+        e2 = np.mean([np.linalg.norm(z[b, i] - z[b, j]) for i in range(5) for j in range(5) if i != j])
+        assert es[b] == pytest.approx(e1 - 0.5 * e2, rel=1e-5) and spread[b] == pytest.approx(e2, rel=1e-5)
+        assert err[b] == pytest.approx(e1, rel=1e-5)
+    # Identical draws (dropout masks that coincide): finite gradients, the pair term contributing zero.
+    same = np.repeat(z[:, :1], 5, axis=1)
+    g = jax.grad(lambda a: jax.numpy.sum(energy_score(a, y)[0]))(jax.numpy.asarray(same))
+    assert np.all(np.isfinite(np.asarray(g)))
+
+
+def test_learning_rate_warms_up_then_decays_to_one_percent():
+    from dp2_cutouts.deblend.optim import lr_schedule
+    sched, warm = lr_schedule(2e-4, 1000, 0.02, 0.01)
+    lr = lambda s: float(ops.convert_to_numpy(sched(s)))  # noqa: E731
+    assert warm == 20
+    assert lr(0) == pytest.approx(2e-6, rel=1e-3) and lr(20) == pytest.approx(2e-4, rel=1e-3)
+    assert lr(10) == pytest.approx(0.5 * (2e-6 + 2e-4), rel=1e-2)
+    assert lr(1000) == pytest.approx(2e-6, rel=1e-2) and lr(510) == pytest.approx(0.5 * (2e-4 + 2e-6), rel=1e-2)
+    v = [lr(s) for s in range(20, 1001, 10)]
+    assert all(a >= b for a, b in zip(v, v[1:]))
+
+
+def test_global_clipping_statistics_and_ema_start():
+    # The global norm is measured before clipping; the EMA copies the weights until ema_start, then averages.
+    from dp2_cutouts.deblend.optim import DeblendAdam
+    w = keras.Variable(np.zeros(3, np.float32))
+    opt = DeblendAdam(0.1, global_clipnorm=1.0, ema=0.5, ema_start=2)
+    opt.build([w])
+    for _ in range(4):
+        opt.apply([ops.convert_to_tensor(np.array([3.0, 4.0, 0.0], np.float32))], [w])
+    st = opt.stats()
+    assert st["grad_norm_mean"] == pytest.approx(5.0) and st["clipped_frac"] == 1.0 and st["updates"] == 4
+    ema = np.asarray(ops.convert_to_numpy(opt._model_variables_moving_average[0]))
+    assert not np.allclose(ema, ops.convert_to_numpy(w))      # averaged after ema_start, lagging the weights
+    assert st["grad_norm_q50"] == pytest.approx(5.0, rel=0.07) and st["grad_norm_q99"] == pytest.approx(5.0, rel=0.07)
+    h = opt.run_histograms()
+    assert h["all"]["n"] == 4 and h["steady"]["n"] == 4 and h["threshold"] == 1.0
+    opt.reset_stats()
+    assert opt.stats()["updates"] == 0 and opt.run_histograms()["all"]["n"] == 4    # the run's histogram stays
+    # Without a threshold (the pilot): nothing clipped, every norm recorded; a non-finite norm is counted apart;
+    # the steady histogram starts at stats_from.
+    v = keras.Variable(np.zeros(2, np.float32))
+    free = DeblendAdam(0.1, None, stats_from=2)
+    free.build([v])
+    for g in ([1.0, 0.0], [10.0, 0.0], [100.0, 0.0], [np.nan, 0.0]):
+        free.apply([ops.convert_to_tensor(np.array(g, np.float32))], [v])
+    st = free.stats()
+    assert st["clipped_frac"] == 0.0 and st["updates"] == 3 and st["grad_norm_nonfinite"] == 1
+    h = free.run_histograms()
+    assert h["all"]["n"] == 3 and h["steady"]["n"] == 1 and h["steady"]["q50"] == pytest.approx(100.0, rel=0.07)
+
+
+def test_lambda_d1_ramps_from_one_to_its_target_after_the_measurements():
+    from dp2_cutouts.deblend.models import C2Model
+    from dp2_cutouts.deblend.train import scaled_protocol
+    m = C2Model(keras.layers.Dense(1), keras.layers.Dense(1), [1.0], d=4, lambda_auto=True,
+                protocol=dict(warm=10, measure=5, ramp=10))
+    m.lambda_target.assign(3.0)
+    got = []
+    for step in (0, 15, 20, 25, 40):
+        m.n_updates.assign(float(step))
+        got.append(float(ops.convert_to_numpy(m.current_lambda())))
+    assert got == pytest.approx([1.0, 1.0, 2.0, 3.0, 3.0])
+    fixed = C2Model(keras.layers.Dense(1), keras.layers.Dense(1), [1.0], d=4, lambda_d1=0.3)
+    assert float(ops.convert_to_numpy(fixed.current_lambda())) == pytest.approx(0.3)
+    p = scaled_protocol(dict(warm=500, measure=200, ramp=200, every=10, batches=2), 300)
+    assert p["warm"] + p["measure"] + p["ramp"] <= 180 and p["every"] >= 1 and p["measure"] >= 1
+
+
+def test_psf_ellipticity_turns_with_the_image():
+    # An elliptical Gaussian rotated / flipped like the stamps (ml/data.aug_images): its measured distortion changes
+    # exactly as data.psf_features transforms the catalogue e1, e2.
+    from dp2_cutouts.deblend.data import psf_features
+    from dp2_cutouts.ml.data import aug_images
+    n = 41
+    yy, xx = np.indices((n, n)) - (n - 1) / 2
+
+    def e12(img):
+        ixx, iyy, ixy = ((img * xx * xx).sum(), (img * yy * yy).sum(), (img * xx * yy).sum())
+        return (ixx - iyy) / (ixx + iyy), 2 * ixy / (ixx + iyy)
+
+    img = np.exp(-(xx ** 2 / (2 * 4.0 ** 2) + yy ** 2 / (2 * 2.5 ** 2) - 0.3 * xx * yy / 6.0))
+    e1, e2 = e12(img)
+    stats = dict(mean=[0.0] * 3, std=[1.0] * 3)
+    for k in range(4):
+        for fl in (False, True):
+            r = aug_images(img[None, :, :, None], k, fl)[0, :, :, 0]
+            want = psf_features(np.array([[[0.3, e1, e2]]], np.float32), [k], [fl], stats)[0]
+            assert e12(r) == pytest.approx((want[1], want[2]), abs=1e-6), (k, fl)
+            assert want[0] == pytest.approx(0.3)
+
+
+def test_fixed_validation_draws_depend_on_the_row_only():
+    from dp2_cutouts.deblend.data import fixed_draws
+    spec = dict(a=("normal", (3,)), b=("uniform", (2, 4)))
+    one = fixed_draws(np.array([5, 9, 2]), spec, salt=1)
+    two = fixed_draws(np.array([2, 5]), spec, salt=1)
+    np.testing.assert_array_equal(one["a"][0], two["a"][1])
+    np.testing.assert_array_equal(one["b"][2], two["b"][0])
+    assert np.all((one["b"] >= 0) & (one["b"] < 1))
+    other = fixed_draws(np.array([5]), spec, salt=2)
+    assert not np.allclose(other["a"][0], one["a"][0])
+
+
+def test_gradient_norm_is_that_of_the_whole_batch_on_two_devices():
+    # Data parallel (keras.distribution.DataParallel, two simulated CPU devices): the norm measured before clipping
+    # is the norm of the gradient of the batch-mean loss, the same as on one device (no per-device clipping).
+    import os
+    import subprocess
+    import sys
+    code = """
+import os, numpy as np, keras
+from dp2_cutouts.deblend.optim import DeblendAdam
+if os.environ["NDEV"] == "2":
+    keras.distribution.set_distribution(keras.distribution.DataParallel(devices=keras.distribution.list_devices()[:2]))
+keras.utils.set_random_seed(0)
+m = keras.Sequential([keras.Input((5,)), keras.layers.Dense(3), keras.layers.Dense(1)])
+opt = DeblendAdam(1e-3, None)
+m.compile(optimizer=opt, loss="mse")
+x = np.random.default_rng(0).normal(size=(8, 5)).astype("float32")
+y = np.random.default_rng(1).normal(size=(8, 1)).astype("float32")
+m.train_on_batch(x, y)
+print("NORM", repr(opt.stats()["grad_norm_mean"]), len(keras.distribution.list_devices()))
+"""
+    got = {}
+    for n in ("1", "2"):
+        env = dict(os.environ, XLA_FLAGS=f"--xla_force_host_platform_device_count={n}", JAX_PLATFORMS="cpu",
+                   KERAS_BACKEND="jax", NDEV=n)
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=600, env=env)
+        line = next((ln for ln in out.stdout.splitlines() if ln.startswith("NORM ")), None)
+        assert line is not None, out.stdout[-2000:] + out.stderr[-3000:]
+        _, norm, ndev = line.split()
+        assert ndev == n
+        got[n] = float(norm)
+    assert got["2"] == pytest.approx(got["1"], rel=1e-5) and got["1"] > 0

@@ -30,6 +30,8 @@
 #   deblend-advance [status | retry JOB | stop CAMPAIGN]
 #                                   submit what has become ready in the active campaigns (run by every campaign job
 #                                   when it ends); status: print only
+#   deblend-approve STAGE [--note]  after the checkpoint evaluation (check_vaes / check_k2): lets the stages that
+#                                   depend on that VAE train, then advances the campaigns
 # Legacy (archived architecture, kept runnable for traceability, not part of the active campaign):
 #   train-stage1 | eval-stage1      Stage 1 (needs --debvader-run; --ablation picks the loss weights)
 #   train-stage2 | eval-stage2      Stage 2 (needs --debvader-run and --stage1-run)
@@ -43,7 +45,8 @@ import traceback
 
 COMMANDS = ("mmu-mirror", "probe-euclid", "phase0", "d1", "d2", "d1-merge", "d2-merge", "d2-flags", "mask-loss", "quality", "repair-meta", "blends",
             "export-rubin-vae", "train-stage1", "eval-stage1", "train-stage2", "eval-stage2", "deblend-stats",
-            "deblend-compact", "deblend-bench", "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance")
+            "deblend-compact", "deblend-bench", "deblend-train", "deblend-eval", "deblend-campaign", "deblend-advance",
+            "deblend-approve")
 
 
 def autotune_fallback_env(error_text, env):
@@ -159,16 +162,22 @@ def main(argv=None):
     ap.add_argument("--loader-batches", type=int, default=30, help="deblend-bench: batches read per loader timing")
     ap.add_argument("--steps", type=int, default=20, help="deblend-bench: timed optimisation steps per batch size")
     ap.add_argument("--after", help="deblend-campaign: Slurm dependency of the first jobs, e.g. afterok:123")
+    ap.add_argument("--note", default="", help="deblend-approve: what was checked")
     args = ap.parse_args(argv)
 
     from .mlconfig import MLConfig
     cfg = MLConfig.load(args.config, args.set)
     c = args.command
 
-    if c in ("deblend-campaign", "deblend-advance"):
+    if c in ("deblend-campaign", "deblend-advance", "deblend-approve"):
         # No keras here: the campaign is started from a login node.
         from .deblend import campaign
-        if c == "deblend-campaign":
+        if c == "deblend-approve":
+            if args.what not in campaign.STAGES:
+                sys.exit(f"deblend-approve needs a stage: {', '.join(campaign.STAGES)}")
+            campaign.approve(cfg, args.what, args.note, args.seed)
+            campaign.advance(cfg)
+        elif c == "deblend-campaign":
             campaign.start(cfg, args.config, args.set, args.what, args.seed, args.max_steps, args.split, args.after)
         elif args.what in (None, "status"):
             campaign.advance(cfg, submit=args.what is None)

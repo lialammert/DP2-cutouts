@@ -334,30 +334,38 @@ deblend:
                                    # noise fill per batch: every loader path is then the fast one)
     in_memory: [d2]                # training rows copied into memory (D2 train ~32 GB) when they fit
     memory_fraction: 0.6           # ... in this fraction of the job's memory limit, else kept memory-mapped
-    normalise_on: cpu              # gpu: tanh(arcsinh) in the encoders (layers.normalise_input), not in the loader
-                                   # threads; same function, choose after deblend-bench
+    normalise_on: gpu              # arcsinh(2.5 f / s_b) in the encoders (layers.normalise_input), not in the
+                                   # loader threads; same function. bench 902314: D2 loader 2.8k -> 8k ex/s
+                                   # (no tanh since 2026-11-28: nothing in the copies depends on it)
+  psf_condition: true              # 2026-11-28: the Rubin PSF moments (sigma, e1, e2 x 6 bands, already in the D1 / D2
+                                   # metadata; deblend/psf_stats.json) appended to every Rubin embedding and to the
+                                   # latent of every Rubin decoder; no Euclid PSF (constant VIS FWHM only)
   stats_max_examples: 20000
   seed: 20261124
   replicate_dependencies: false    # seeds replicate the students (A, B, C2, C3); K1, K2, C1 shared
   run_suffix: ""                   # "_pilot" for the pilots (submit_deblend.sh pilot)
-  runs: {rubin_vae: dbl_rubin_vae, k1: dbl_k1, k2: dbl_k2, A: dbl_runA, B: dbl_runB, c1: dbl_c1, c2: dbl_c2,
-         c3: dbl_c3}
+  # dbl2_*: the recipe of 2026-11-28 (new names: the dbl_* runs and pilots of the former recipe stay untouched)
+  runs: {rubin_vae: dbl2_rubin_vae, k1: dbl2_k1, k2: dbl2_k2, A: dbl2_runA, B: dbl2_runB, c1: dbl2_c1,
+         c2: dbl2_c2, c3: dbl2_c3}
   campaign:                        # self-advancing Slurm campaign (deblend/campaign.py, submit_deblend.sh)
     qos: qos_gpu_a100-dev          # QoS whose queued jobs are counted (overridden by --qos= in DP2_GPU_EXTRA)
     max_queued: 8                  # the dev QoS refuses more than ~10 queued jobs per user, all projects together
     max_jobs_train: 30             # 2 h jobs per training before giving up (walltime kills, node failures)
     max_jobs_eval: 2
-  train:                           # common recipe; deblend.<stage>.train overrides it
+    gates: {k2: [k1], A: [k1, k2], B: [k1, k2], c2: [c1]}   # wait for dp2-ml deblend-approve (mode all only)
+  train:                           # common recipe (2026-11-28); deblend.<stage>.train overrides it
     batch_size: 128
-    learning_rate: 1.0e-4          # debvader-keras real stage 1 (Adam, batch 128)
-    clipnorm: 1.0
-    lr_scaling: sqrt               # larger batches (GPU saturation, deblend-bench): lr x sqrt(B / 128)
+    learning_rate: 1.0e-4          # peak of the schedule (debvader-keras real stage 1: Adam, batch 128)
+    global_clipnorm: 1.0           # norm of the whole gradient (optim.DeblendAdam; logged: grad_norm_*, clipped_frac)
+    lr_scaling: sqrt               # larger batches (data-parallel stages): peak lr x sqrt(B / 128)
     lr_reference_batch: 128
-    train_examples: 5120000        # budget in examples (= 40 000 steps of 128, ~5 D1 epochs); sets the steps
-    train_steps: 40000             # step budget (epochs derived from it). Pilot of 2026-11-27: ~2-3 s per step with
-                                   # the block reading, so ~1-1.5 day per stage (13-17 chained 2 h jobs, max_jobs_train 30)
-    epochs: 100                    # used when train_steps is null
-    early_stopping_patience: 3     # in epochs (an epoch of the full D1 is ~9 000 steps)
+    warmup_frac: 0.02              # linear warm-up from 1 % of the peak over the first 2 % of the updates,
+    final_lr_frac: 0.01            # then cosine decay to 1 % of the peak at the last update
+    train_examples: null           # budget in epochs (below); a number of examples here would override it
+    train_steps: null
+    epochs: 20                     # D1 stages (rubin_vae, k1, k2, c1); the D2 stages set 60 (an epoch = one pass
+                                   # over D2 plus as many D1 replay examples)
+    early_stopping_patience: 10    # safety net only (the cosine sets the end); the best val checkpoint is kept
     backup_every_steps: 2000       # resumable backups: 2 h dev-QoS jobs chained
     val_max_examples: 20000
     read_block: auto               # compact copy (shuffled): batch / 4 consecutive rows per read; else 16 rows
@@ -365,22 +373,29 @@ deblend:
                                    # the pilot read rows one by one, 5-9 s per step on Lustre
     workers: auto                  # threads preparing batches ahead of the GPU (auto: the job's cores)
     gpus: 1                        # data parallel over this many GPUs (batch_size per GPU); per stage below
-    warmup_steps: 0                # linear warm-up of the learning rate (multi-GPU stages: 300)
-  rubin_vae: {beta: 1.0}
-  k1: {beta: 1.0, mask_augment_prob: 0.0, mask_pool_size: 5000,
-       train: {gpus: 4, warmup_steps: 300}}   # deblend-bench 2026-11-27: ~350 ex/s on one V100
+  # VAEs: beta = 1 reached by a linear KL warm-up over the first 10 % of the updates (validation always at beta = 1);
+  # checkpoint before their dependents: campaign evaluations check_vaes / check_k2, then deblend-approve.
+  rubin_vae: {beta: 1.0, kl_warmup_frac: 0.1}
+  k1: {beta: 1.0, kl_warmup_frac: 0.1, mask_augment_prob: 0.0, mask_pool_size: 5000,
+       train: {gpus: 4}}           # deblend-bench 2026-11-27: ~350 ex/s on one V100 (level 0)
   k2: {}
-  A: {embed: 128, dropout: 0.1}
-  B: {context: 128, hidden: [128, 128], standardise: true, stats_batches: 100}
-  c1: {embed: 128, fusion: [256], beta: 1.0, weight_r: 1.0, weight_e: 1.0,
-       train: {gpus: 4, warmup_steps: 300}}   # ~280 ex/s on one V100
-  c2: {embed: 128, fusion: [256], lambda_d1: auto, lambda_batches: 8,
-       train: {gpus: 4, warmup_steps: 300}}   # ~515 ex/s on one V100
-  c3: {context: 128, hidden: [128, 128], standardise: true, stats_batches: 100, lambda_replay: 1.0,
-       init_context_from_c2: true}
+  # Students: D2 and a D1 replay 50 / 50 (replay: true), 60 epochs, best checkpoint on their D2 validation term.
+  A: {embed: 128, dropout: 0.1, draws: 8, val_draws: 32, replay: true, lambda_replay: 1.0, standardise: true,
+      stats_batches: 100, train: {epochs: 60}}   # energy score of 8 dropout draws against one K1 draw
+  B: {context: 128, hidden: [128, 128, 128, 128, 128], time_dim: 32, standardise: true, stats_batches: 100,
+      replay: true, lambda_replay: 1.0, ema: 0.999, val_triplets: 8, train: {epochs: 60}}
+  c1: {embed: 128, fusion: [256], beta: 1.0, kl_warmup_frac: 0.1, weight_r: 1.0, weight_e: 1.0,
+       train: {gpus: 4}}           # ~280 ex/s on one V100 (level 0)
+  # lambda_d1 auto: 1 for 500 updates, gradient norms measured over the next 200, ramp to their median ratio over
+  # 200, then fixed (models.LAMBDA_PROTOCOL; <run>/lambda_d1.json); checkpoints counted from then on.
+  c2: {embed: 128, fusion: [256], lambda_d1: auto,
+       lambda_protocol: {warm: 500, measure: 200, ramp: 200, every: 10, batches: 2},
+       train: {gpus: 4, epochs: 60}}   # ~515 ex/s on one V100
+  c3: {context: 128, hidden: [128, 128, 128, 128, 128], time_dim: 32, standardise: true, stats_batches: 100,
+       lambda_replay: 1.0, init_context_from_c2: true, ema: 0.999, val_triplets: 8, train: {epochs: 60}}
   eval:
-    k_samples: 10                  # posterior samples per galaxy (50 / 100 with --set deblend.eval.k_samples=...)
-    nfe: 20
+    k_samples: 128                 # posterior samples per galaxy
+    nfe: 40                        # Heun, 20 steps
     method: heun
     flux_aperture_px: 6
     max_examples: 5000

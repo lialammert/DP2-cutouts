@@ -15,9 +15,13 @@
 #            differences between runs with a patch block bootstrap.
 #   cost     inference cost: parameters, time per galaxy, throughput, CFM latent convergence vs NFE (Euler,
 #            Heun) against a fine Heun reference, MC dropout passes.
-#   latent   latent spaces of K1 and C1 (variance per dimension, PCA spectrum, effective dimension) and the C1
-#            decoder Jacobians: directions that move the Rubin image but barely the Euclid one, and their effect on
-#            Rubin fluxes, colours, size and shape (JAX).
+#   latent   latent spaces of the Rubin VAE, K1 and C1 (variance of the posterior mean, posterior variance and KL
+#            per dimension, active dimensions, PCA spectrum, effective dimension) and the C1 decoder Jacobians:
+#            directions that move the Rubin image but barely the Euclid one, and their effect on Rubin fluxes,
+#            colours, size and shape (JAX).
+#   check_vaes / check_k2  the checkpoint of the VAEs before their dependents train (campaign gates; val split):
+#            the D1 reconstructions of the Rubin VAE, C1 and K1 (VIS; with K2: E -> R) and their latent spaces.
+#            Then dp2-ml <cfg> deblend-approve <stage>.
 # Nothing here uses the holdout split unless --split holdout is given explicitly (final evaluation only).
 # Outputs: <ml_root>/deblend/evaluations/<what>[_<split>][_s<seed>]/ (parquet tables, summary.json, figures).
 # There is no isolated Rubin truth for D2: every D2 number is a comparison with references that are themselves
@@ -157,8 +161,7 @@ def summary_stats(d):
 # ----------------------------------------------------------------------------- loading the trained runs
 class Campaign:
     # Everything trained, loaded once; missing stages are skipped (listed in .missing).
-    def __init__(self, cfg, seed=None):
-        from keras import ops
+    def __init__(self, cfg, seed=None, students=True):
         self.cfg, self.seed = cfg, seed
         self.d = int(cfg["deblend"]["latent_dim"])
         self.n_r, self.b_r, self.n_e = train.sizes(cfg)
@@ -177,24 +180,24 @@ class Campaign:
             return rd if ok else None
 
         d = self.d
+        # Rubin encoders and decoders take the Rubin PSF (deblend.psf_condition): train.load_* with cfg.
         if (rd := done("rubin_vae")):
-            from .models import ImageEncoder
-            enc = ImageEncoder(d, name="encoder")
-            enc(ops.zeros((1, self.n_r, self.n_r, self.b_r)))
-            enc.load_weights(str(rd / "encoder_best.weights.h5"))
-            self.parts["rvae"] = (enc, train.load_decoder(rd / "decoder_best.weights.h5", self.n_r, self.b_r, d))
+            self.parts["rvae"] = (train.load_rubin_encoder(cfg, rd, d),
+                                  train.load_decoder(rd / "decoder_best.weights.h5", self.n_r, self.b_r, d, cfg))
         if (rd := done("k1")):
             self.parts["k1"] = (train.load_k1_encoder(cfg, rd, d),
                                 train.load_decoder(rd / "decoder_best.weights.h5", self.n_e, 1, d))
         if (rd := done("k2")):
-            self.parts["k2"] = train.load_decoder(rd / "decoder_best.weights.h5", self.n_r, self.b_r, d)
+            self.parts["k2"] = train.load_decoder(rd / "decoder_best.weights.h5", self.n_r, self.b_r, d, cfg)
         if (rd := done("c1")):
             s_c1 = json.loads((rd / "run.json").read_text())["settings"]
             self.parts["c1"] = (train.load_joint_encoder(cfg, rd, d, s_c1),
-                                train.load_decoder(rd / "dec_r_best.weights.h5", self.n_r, self.b_r, d),
+                                train.load_decoder(rd / "dec_r_best.weights.h5", self.n_r, self.b_r, d, cfg),
                                 train.load_decoder(rd / "dec_e_best.weights.h5", self.n_e, 1, d))
         ev = cfg["deblend"].get("eval", {}) or {}
         self.samplers = {}
+        if not students:
+            return
         for run in RUNS:
             stage = STAGE_OF[run]
             rd = done(stage)
@@ -204,19 +207,25 @@ class Campaign:
             s = json.loads((rd / "run.json").read_text())["settings"]
             stu = train.load_student(cfg, stage, rd, d, s)
             if run == "A":
-                self.samplers[run] = infer.RunASampler(stu, dec, self.sr)
+                self.samplers[run] = infer.RunASampler(stu, dec, self.sr, int(cfg["deblend"]["seed"]))
             else:
-                self.samplers[run] = infer.CFMSampler(stu, dec, self.sr, int(ev.get("nfe", 20)),
+                self.samplers[run] = infer.CFMSampler(stu, dec, self.sr, int(ev.get("nfe", 40)),
                                                       ev.get("method", "heun"), int(cfg["deblend"]["seed"]))
 
-    def decode(self, dec, z, scale):
+    def decode(self, dec, z, scale, cond=None):
         from keras import ops
-        return np.asarray(ops.convert_to_numpy(dec(ops.convert_to_tensor(z)))) * scale
+        c = None if cond is None else ops.convert_to_tensor(cond)
+        return np.asarray(ops.convert_to_numpy(dec(ops.convert_to_tensor(z), cond=c))) * scale
 
-    def mu(self, enc, *inputs):
+    def post(self, enc, *inputs, cond=None):
+        # Posterior (mean, log variance) of a diagonal encoder.
         from keras import ops
-        mu, _ = enc(*[ops.convert_to_tensor(a) for a in inputs])
-        return np.asarray(ops.convert_to_numpy(mu))
+        kw = {} if cond is None else dict(cond=ops.convert_to_tensor(cond))
+        mu, lv = enc(*[ops.convert_to_tensor(a) for a in inputs], **kw)
+        return np.asarray(ops.convert_to_numpy(mu)), np.asarray(ops.convert_to_numpy(lv))
+
+    def mu(self, enc, *inputs, cond=None):
+        return self.post(enc, *inputs, cond=cond)[0]
 
 
 def _iterate(ds, max_n):
@@ -238,11 +247,25 @@ def out_dir(cfg, what, split, seed):
 
 
 # ----------------------------------------------------------------------------- D1
-def eval_d1(cfg, split, seed):
+def vis_measure(images, valid, cfg, prefix, aperture_px):
+    # VIS shapes (measure_vis) and the flux in a circular aperture of the valid pixels.
+    m = measure_vis(images, valid, cfg, prefix)
+    n = images.shape[1]
+    rr, cc = np.indices((n, n))
+    ap = ((rr - (n - 1) / 2) ** 2 + (cc - (n - 1) / 2) ** 2 <= aperture_px ** 2)[None, :, :, None]
+    m[f"{prefix}_flux"] = (images * valid * ap).sum((1, 2, 3))
+    return m
+
+
+def eval_d1(cfg, split, seed, students=True, name="d1", only=None):
+    # students False: the VAEs only (Rubin VAE, K1 with K2, C1), the checkpoint before their dependents are trained
+    # (eval_check). only: the paths to evaluate among rvae, k1k2, c1 (None: all those trained).
     ev = cfg["deblend"].get("eval", {}) or {}
     K = int(ev.get("k_samples", 10))
     ap = float(ev.get("flux_aperture_px", 6))
-    camp = Campaign(cfg, seed)
+    ap_vis = 2.0 * ap                                      # the same sky radius on the 0.1" VIS pixels
+    camp = Campaign(cfg, seed, students=students)
+    want = (lambda p: only is None or p in only)
     ds = data.D1Batches(cfg, split, int(ev.get("batch_size", 64)), False)
     meta = ds.st.meta
     rng = np.random.default_rng(int(cfg["deblend"]["seed"]))
@@ -258,22 +281,38 @@ def eval_d1(cfg, split, seed):
                 parts[0][c] = mrows[c].to_numpy()
         obs = measure_rubin(x["r_flux"], valid, mrows, cfg, "obs", ap)
         parts.append(obs)
+        cond = x.get("r_psf")
         paths = {}
-        if "rvae" in camp.parts:
+        if "rvae" in camp.parts and want("rvae"):
             enc, dec = camp.parts["rvae"]
-            paths["rvae"] = camp.decode(dec, camp.mu(enc, x["r_in"]), camp.sr)
-        if "k1" in camp.parts and "k2" in camp.parts:
-            paths["k1k2"] = camp.decode(camp.parts["k2"], camp.mu(camp.parts["k1"][0], x["e_in"]), camp.sr)
-        if "c1" in camp.parts:
+            paths["rvae"] = camp.decode(dec, camp.mu(enc, x["r_in"], cond=cond), camp.sr, cond)
+        if "k1" in camp.parts and "k2" in camp.parts and want("k1k2"):
+            paths["k1k2"] = camp.decode(camp.parts["k2"], camp.mu(camp.parts["k1"][0], x["e_in"]), camp.sr, cond)
+        if "c1" in camp.parts and want("c1"):
             enc, dec_r, _ = camp.parts["c1"]
-            paths["c1"] = camp.decode(dec_r, camp.mu(enc, x["r_in"], x["e_in"]), camp.sr)
-        for name, img in paths.items():
-            parts.append(measure_rubin(img, valid, mrows, cfg, name, ap))
+            paths["c1"] = camp.decode(dec_r, camp.mu(enc, x["r_in"], x["e_in"], cond=cond), camp.sr, cond)
+        for pname, img in paths.items():
+            parts.append(measure_rubin(img, valid, mrows, cfg, pname, ap))
             r2 = x["r_w"] * (x["r_flux"] - img) ** 2
-            parts.append(pd.DataFrame({f"{name}_chi2": (r2.sum((1, 2, 3)) / np.maximum(valid.sum((1, 2, 3)), 1))}))
+            parts.append(pd.DataFrame({f"{pname}_chi2": (r2.sum((1, 2, 3)) / np.maximum(valid.sum((1, 2, 3)), 1))}))
+        # VIS reconstructions of the Euclid decoders (K1; C1's Euclid side) against the observed VIS.
+        vpaths = {}
+        if "k1" in camp.parts and want("k1k2"):
+            enc, dec = camp.parts["k1"]
+            vpaths["k1_vis"] = camp.decode(dec, camp.mu(enc, x["e_in"]), camp.se)
+        if "c1" in camp.parts and want("c1"):
+            enc, _, dec_e = camp.parts["c1"]
+            vpaths["c1_vis"] = camp.decode(dec_e, camp.mu(enc, x["r_in"], x["e_in"], cond=cond), camp.se)
+        if vpaths:
+            ve = x["e_w"] > 0
+            parts.append(vis_measure(x["e_flux"], ve, cfg, "vobs", ap_vis))
+            for pname, img in vpaths.items():
+                parts.append(vis_measure(img, ve, cfg, pname, ap_vis))
+                r2 = x["e_w"] * (x["e_flux"] - img) ** 2
+                parts.append(pd.DataFrame({f"{pname}_chi2": r2.sum((1, 2, 3)) / np.maximum(ve.sum((1, 2, 3)), 1)}))
         # The final models applied to isolated Rubin stamps: K samples each, measured with a noise draw.
         for run, smp in camp.samplers.items():
-            _, imgs = smp(x["r_in"], K)
+            _, imgs = smp(x["r_in"], K, cond=cond)
             mean_img = imgs.mean(1)
             parts.append(measure_rubin(mean_img, valid, mrows, cfg, f"{run}_meanimg", ap))
             e1s, e2s, fis = (np.full((len(rows), K), np.nan) for _ in range(3))
@@ -291,35 +330,47 @@ def eval_d1(cfg, split, seed):
                                        f"{run}_e_std": np.nanstd(np.hypot(e1s, e2s), 1)}))
         tables.append(pd.concat(parts, axis=1))
     df = pd.concat(tables, ignore_index=True)
-    out = out_dir(cfg, "d1", split, seed)
+    out = out_dir(cfg, name, split, seed)
     df.to_parquet(out / "objects.parquet")
-    summ = dict(split=split, n=int(len(df)), missing_stages=camp.missing, paths={}, probabilistic={})
-    for name in ("rvae", "k1k2", "c1") + tuple(f"{r}_meanimg" for r in camp.samplers):
-        if f"{name}_e1" not in df:
+    summ = dict(split=split, n=int(len(df)), missing_stages=camp.missing, paths={}, probabilistic={}, vis_paths={})
+    for pname in ("k1_vis", "c1_vis"):
+        if f"{pname}_e1" not in df:
             continue
-        ok = df[f"{name}_ok"].astype(bool) & df["obs_ok"].astype(bool)
-        s = dict(hsm_failure=float(1 - df[f"{name}_ok"].astype(bool).mean()))
+        ok = df[f"{pname}_ok"].astype(bool) & df["vobs_ok"].astype(bool)
+        s = dict(hsm_failure=float(1 - df[f"{pname}_ok"].astype(bool).mean()),
+                 size=summary_stats((df[f"{pname}_sigma"] / df["vobs_sigma"] - 1)[ok]),
+                 flux=summary_stats(df[f"{pname}_flux"] / df["vobs_flux"] - 1),
+                 chi2_per_pixel_median=float(np.nanmedian(df[f"{pname}_chi2"])))
         for q in ("e1", "e2"):
-            s[q] = summary_stats((df[f"{name}_{q}"] - df[f"obs_{q}"])[ok])
-            s[f"{q}_mc"] = linear_mc(df[f"{name}_{q}"][ok].to_numpy(), df[f"obs_{q}"][ok].to_numpy())
-            okr = df[f"{name}_ok_rg"].astype(bool) & df["obs_ok_rg"].astype(bool)
-            s[f"{q}_regauss"] = summary_stats((df[f"{name}_{q}_rg"] - df[f"obs_{q}_rg"])[okr])
+            s[q] = summary_stats((df[f"{pname}_{q}"] - df[f"vobs_{q}"])[ok])
+            s[f"{q}_mc"] = linear_mc(df[f"{pname}_{q}"][ok].to_numpy(), df[f"vobs_{q}"][ok].to_numpy())
+        summ["vis_paths"][pname] = s
+    for pname in ("rvae", "k1k2", "c1") + tuple(f"{r}_meanimg" for r in camp.samplers):
+        if f"{pname}_e1" not in df:
+            continue
+        ok = df[f"{pname}_ok"].astype(bool) & df["obs_ok"].astype(bool)
+        s = dict(hsm_failure=float(1 - df[f"{pname}_ok"].astype(bool).mean()))
+        for q in ("e1", "e2"):
+            s[q] = summary_stats((df[f"{pname}_{q}"] - df[f"obs_{q}"])[ok])
+            s[f"{q}_mc"] = linear_mc(df[f"{pname}_{q}"][ok].to_numpy(), df[f"obs_{q}"][ok].to_numpy())
+            okr = df[f"{pname}_ok_rg"].astype(bool) & df["obs_ok_rg"].astype(bool)
+            s[f"{q}_regauss"] = summary_stats((df[f"{pname}_{q}_rg"] - df[f"obs_{q}_rg"])[okr])
             if "snr_i" in df:
                 # PSF-corrected shape of the reconstruction against the observed one, by S/N_i: m < 0 at high S/N
                 # = shapes pulled towards the prior (the beta = 1 checkpoint of 2026-11-27).
                 sub = df[okr]
-                s[f"{q}_regauss_by_snr"] = by_snr(sub, f"{name}_{q}_rg", f"obs_{q}_rg",
+                s[f"{q}_regauss_by_snr"] = by_snr(sub, f"{pname}_{q}_rg", f"obs_{q}_rg",
                                                   cfg["deblend"].get("eval", {}).get("snr_bins"))
-        s["size"] = summary_stats((df[f"{name}_sigma"] / df["obs_sigma"] - 1)[ok])
+        s["size"] = summary_stats((df[f"{pname}_sigma"] / df["obs_sigma"] - 1)[ok])
         for b in cfg["rubin"]["bands"]:
-            s[f"flux_{b}"] = summary_stats(df[f"{name}_flux_{b}"] / df[f"obs_flux_{b}"] - 1)
+            s[f"flux_{b}"] = summary_stats(df[f"{pname}_flux_{b}"] / df[f"obs_flux_{b}"] - 1)
         for b1, b2 in (("g", "r"), ("r", "i"), ("i", "z")):
             col = lambda p: -2.5 * np.log10(np.clip(df[f"{p}_flux_{b1}"], 1e-3, None) /  # noqa: E731
                                             np.clip(df[f"{p}_flux_{b2}"], 1e-3, None))
-            s[f"colour_{b1}{b2}"] = summary_stats(col(name) - col("obs"))
-        if f"{name}_chi2" in df:
-            s["chi2_per_pixel_median"] = float(np.nanmedian(df[f"{name}_chi2"]))
-        summ["paths"][name] = s
+            s[f"colour_{b1}{b2}"] = summary_stats(col(pname) - col("obs"))
+        if f"{pname}_chi2" in df:
+            s["chi2_per_pixel_median"] = float(np.nanmedian(df[f"{pname}_chi2"]))
+        summ["paths"][pname] = s
     for run, p in prob.items():
         cat = {k: np.concatenate(v) for k, v in p.items()}
         r = {}
@@ -503,7 +554,7 @@ def eval_d2(cfg, split, seed):
         rr, cc = np.indices((n, n))
         apm = (rr - (n - 1) / 2) ** 2 + (cc - (n - 1) / 2) ** 2 <= ap ** 2
         for run, smp in camp.samplers.items():
-            _, imgs = smp(x["x_in"], K)
+            _, imgs = smp(x["x_in"], K, cond=x.get("x_psf"))
             mean_img = imgs.mean(1)
             mm = measure_rubin(mean_img, valid, mrows, cfg, f"{run}_meanimg", ap)
             e1s, e2s, sz = (np.full((len(rows), K), np.nan) for _ in range(3))
@@ -666,16 +717,18 @@ def eval_cost(cfg, split, seed):
     ds = data.D2Batches(cfg, split, int(ev.get("cost_batch", 64)), False, fields=("blend",))
     x, _ = ds[0]
     xin = x["x_in"]
+    xc = x.get("x_psf")
+    cc = None if xc is None else ops.convert_to_tensor(xc)
     out = dict(n_galaxies=int(len(xin)), runs={})
     for run, smp in camp.samplers.items():
         r = dict(student_params=int(smp.student.count_params()), decoder_params=int(smp.decoder.count_params()))
         if run == "A":
-            r["timing"] = {str(k): infer.timing(smp, xin, k) for k in (10, 50, 100)}
+            r["timing"] = {str(k): infer.timing(smp, xin, k, cond=xc) for k in (10, 50, 100)}
         else:
             r["field_params"] = int(smp.student.field.count_params())
-            h = smp.student.context(ops.convert_to_tensor(xin))
+            h = smp.student.context(ops.convert_to_tensor(xin), cond=cc)
             t0 = time.perf_counter()
-            h = smp.student.context(ops.convert_to_tensor(xin))
+            h = smp.student.context(ops.convert_to_tensor(xin), cond=cc)
             r["context_s_per_galaxy"] = (time.perf_counter() - t0) / len(xin)
             Kc = int(ev.get("cost_k", 10))
             z0 = np.random.default_rng(0).standard_normal((len(xin) * Kc, smp.student.field.d)).astype(np.float32)
@@ -694,7 +747,7 @@ def eval_cost(cfg, split, seed):
                                                    rms_to_reference=float(np.sqrt(np.mean((z - ref) ** 2))),
                                                    field_s_per_sample=dt / len(z))
             r["convergence"] = conv
-            r["timing"] = {str(k): infer.timing(smp, xin, k) for k in (10, 50, 100)}
+            r["timing"] = {str(k): infer.timing(smp, xin, k, cond=xc) for k in (10, 50, 100)}
         out["runs"][run] = r
     try:
         import jax
@@ -709,32 +762,66 @@ def eval_cost(cfg, split, seed):
 
 # ----------------------------------------------------------------------------- latent spaces
 def eval_latent(cfg, split, seed):
-    from keras import ops
     ev = cfg["deblend"].get("eval", {}) or {}
-    camp = Campaign(cfg, seed)
-    ds = data.D1Batches(cfg, split, int(ev.get("batch_size", 64)), False)
-    mus = {"k1": [], "c1": []}
-    keep = []
-    for x, rows in _iterate(ds, int(ev.get("latent_max_examples", 5000))):
-        if "k1" in camp.parts:
-            mus["k1"].append(camp.mu(camp.parts["k1"][0], x["e_in"]))
-        if "c1" in camp.parts:
-            mus["c1"].append(camp.mu(camp.parts["c1"][0], x["r_in"], x["e_in"]))
-        if len(keep) < 1:
-            keep.append(x)
-    out = dict(spaces={})
-    for k, v in mus.items():
-        if not v:
-            continue
-        z = np.concatenate(v)
-        ev_ = np.sort(np.linalg.eigvalsh(np.cov(z.T)))[::-1]
-        out["spaces"][k] = dict(var_per_dim=z.var(0).tolist(), pca_eigenvalues=ev_.tolist(),
-                                participation_ratio=float(ev_.sum() ** 2 / (ev_ ** 2).sum()),
-                                n_dims_90pct=int(np.searchsorted(np.cumsum(ev_) / ev_.sum(), 0.9) + 1))
+    camp = Campaign(cfg, seed, students=False)
+    out = latent_summary(cfg, camp, split, int(ev.get("latent_max_examples", 5000)))
     if "c1" in camp.parts:
-        out["jacobian"] = jacobian_analysis(cfg, camp, keep[0], int(ev.get("jacobian_n", 32)))
+        out["jacobian"] = jacobian_analysis(cfg, camp, out.pop("_first_batch"), int(ev.get("jacobian_n", 32)))
+    out.pop("_first_batch", None)
     write_json(out_dir(cfg, "latent", split, seed) / "summary.json", out)
     return out
+
+
+def latent_summary(cfg, camp, split, max_n, threshold=0.01):
+    # Latent spaces of the VAEs on D1 (rvae: Rubin VAE, k1, c1): per dimension the variance of the posterior mean
+    # over the objects, the mean posterior variance and the mean KL to the prior; active dimensions (variance of
+    # the mean above threshold, Burda et al. 2016); PCA spectrum of the means.
+    ds = data.D1Batches(cfg, split, int((cfg["deblend"].get("eval") or {}).get("batch_size", 64)), False)
+    post = {k: ([], []) for k in ("rvae", "k1", "c1") if k in camp.parts}
+    first = None
+    for x, rows in _iterate(ds, max_n):
+        cond = x.get("r_psf")
+        for k, (mus, lvs) in post.items():
+            enc = camp.parts[k][0]
+            mu, lv = (camp.post(enc, x["e_in"]) if k == "k1" else
+                      camp.post(enc, x["r_in"], cond=cond) if k == "rvae" else
+                      camp.post(enc, x["r_in"], x["e_in"], cond=cond))
+            mus.append(mu)
+            lvs.append(lv)
+        if first is None:
+            first = x
+    out = dict(spaces={}, _first_batch=first)
+    for k, (mus, lvs) in post.items():
+        if not mus:
+            continue
+        z, lv = np.concatenate(mus), np.concatenate(lvs)
+        ev_ = np.sort(np.linalg.eigvalsh(np.cov(z.T)))[::-1]
+        kl = 0.5 * (np.exp(lv) + z ** 2 - 1.0 - lv).mean(0)
+        var_mean = z.var(0)
+        out["spaces"][k] = dict(var_per_dim=var_mean.tolist(), posterior_var_per_dim=np.exp(lv).mean(0).tolist(),
+                                kl_per_dim=kl.tolist(), kl_total=float(kl.sum()),
+                                active_dims=int((var_mean > threshold).sum()), active_threshold=threshold,
+                                pca_eigenvalues=ev_.tolist(),
+                                participation_ratio=float(ev_.sum() ** 2 / (ev_ ** 2).sum()),
+                                n_dims_90pct=int(np.searchsorted(np.cumsum(ev_) / ev_.sum(), 0.9) + 1))
+    return out
+
+
+def eval_check(cfg, split, seed, which):
+    # Checkpoint of the VAEs before the stages that depend on them are trained (campaign gates, 2026-11-28), on the
+    # val split: check_vaes = Rubin VAE, K1 (its VIS reconstructions) and C1 (Rubin and VIS); check_k2 = K1 + K2
+    # (E -> R). Reconstructions (shapes by S/N_i, sizes, fluxes, colours, chi2) and the latent spaces (active
+    # dimensions, KL per dimension). Approve each with dp2-ml <cfg> deblend-approve <stage>.
+    only = dict(check_vaes=("rvae", "c1", "k1k2"), check_k2=("k1k2",))[which]
+    summ = eval_d1(cfg, split, seed, students=False, name=which, only=only)
+    camp = Campaign(cfg, seed, students=False)
+    lat = latent_summary(cfg, camp, split, int((cfg["deblend"].get("eval") or {}).get("latent_max_examples", 5000)))
+    lat.pop("_first_batch", None)
+    summ["latent"] = lat["spaces"]
+    summ["note"] = ("VAE checkpoint: look at m, c by S/N_i (>= 80) of every path, sizes, fluxes, chi2, the K1 / C1 "
+                    "VIS reconstructions and the active dimensions before dp2-ml deblend-approve")
+    write_json(out_dir(cfg, which, split, seed) / "summary.json", summ)
+    return summ
 
 
 def jacobian_analysis(cfg, camp, x, n):
@@ -750,12 +837,14 @@ def jacobian_analysis(cfg, camp, x, n):
     st = data.load_norm_stats(cfg)
     w_r = 1.0 / np.asarray(st["rubin"]["sky_sigma"], np.float32)
     w_e = 1.0 / np.asarray(st["euclid"]["sky_sigma"], np.float32)
-    mu = camp.mu(enc, x["r_in"][:n], x["e_in"][:n])
-    fr = lambda z: (dec_r(z[None])[0] * camp.sr * w_r).reshape(-1)  # noqa: E731
+    cond = x.get("r_psf")
+    mu = camp.mu(enc, x["r_in"][:n], x["e_in"][:n], cond=None if cond is None else cond[:n])
     fe = lambda z: (dec_e(z[None])[0] * camp.se * w_e).reshape(-1)  # noqa: E731
     ratios, effects = [], []
     bands = list(cfg["rubin"]["bands"])
     for i in range(len(mu)):
+        ci = None if cond is None else jax.numpy.asarray(cond[i:i + 1])
+        fr = lambda z, ci=ci: (dec_r(z[None], cond=ci)[0] * camp.sr * w_r).reshape(-1)  # noqa: E731
         z = jax.numpy.asarray(mu[i])
         Jr = np.asarray(jax.jacfwd(fr)(z))
         Je = np.asarray(jax.jacfwd(fe)(z))
@@ -765,7 +854,8 @@ def jacobian_analysis(cfg, camp, x, n):
         vals, vecs = eigh(Mr, Me + eps * np.eye(len(Me)))
         ratios.append(vals[::-1].tolist())
         dz = vecs[:, -1] / np.linalg.norm(vecs[:, -1])
-        imgs = camp.decode(dec_r, np.stack([mu[i] - 0.5 * dz, mu[i] + 0.5 * dz]), camp.sr)
+        imgs = camp.decode(dec_r, np.stack([mu[i] - 0.5 * dz, mu[i] + 0.5 * dz]), camp.sr,
+                           None if cond is None else np.repeat(cond[i:i + 1], 2, axis=0))
         m = measure_rubin(imgs, np.ones_like(imgs, bool), pd.DataFrame([{}, {}]), cfg, "j", 6.0)
         eff = {f"dflux_{b}": float(m[f"j_flux_{b}"][1] / max(m[f"j_flux_{b}"][0], 1e-9) - 1) for b in bands}
         eff.update(de=float(np.hypot(m["j_e1"][1] - m["j_e1"][0], m["j_e2"][1] - m["j_e2"][0])),
@@ -810,9 +900,11 @@ def figures_d2(df, out, runs):
 
 # ----------------------------------------------------------------------------- dispatch
 def run(cfg, what, seed=None, split="test"):
-    fns = dict(d1=eval_d1, masking=eval_masking, d2=eval_d2, cost=eval_cost, latent=eval_latent)
+    fns = dict(d1=eval_d1, masking=eval_masking, d2=eval_d2, cost=eval_cost, latent=eval_latent,
+               check_vaes=lambda c, sp, s: eval_check(c, sp, s, "check_vaes"),
+               check_k2=lambda c, sp, s: eval_check(c, sp, s, "check_k2"))
     if what == "all":
-        return {k: f(cfg, split, seed) for k, f in fns.items()}
+        return {k: f(cfg, split, seed) for k, f in fns.items() if not k.startswith("check_")}
     if what not in fns:
         raise SystemExit(f"deblend-eval needs one of {sorted(fns)} or all")
     return fns[what](cfg, split, seed)

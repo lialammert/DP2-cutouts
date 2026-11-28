@@ -19,7 +19,7 @@ def _cfg(root, suffix=""):
     raw = dict(ml_root=str(root), deblend=dict(run_suffix=suffix, replicate_dependencies=False,
                                                runs={k: f"r_{k}" for k in C.STAGES},
                                                campaign=dict(max_queued=8, max_jobs_train=3, max_jobs_eval=2,
-                                                             lock_timeout_s=1)))
+                                                             lock_timeout_s=1, gates={})))
     return MLConfig(raw=raw, path=root / "cfg.yaml")
 
 
@@ -212,3 +212,32 @@ def test_multi_gpu_stages_ask_for_their_gpus_and_cores(tmp_path):
     c1, vae = cmds["dbl.r_c1_pilot"], cmds["dbl.r_rubin_vae_pilot"]
     assert "--gres=gpu:4" in c1 and c1.index("--cpus-per-task=40") > c1.index("--cpus-per-task=10")
     assert not any(a.startswith("--gres") for a in vae) and "--cpus-per-task=40" not in vae
+
+
+def test_gated_stages_wait_for_the_approval_of_their_vaes(tmp_path):
+    # Mode all: K2, A, B wait for an approved K1 (A, B also for K2), C2 for an approved C1; the checkpoint
+    # evaluations run on val once the VAEs are done. Pilots have no gates.
+    cfg = _cfg(tmp_path)
+    cfg.raw["deblend"]["campaign"]["gates"] = None           # the default gates
+    slurm = FakeSlurm()
+    (C.deblend_dir(cfg)).mkdir(parents=True, exist_ok=True)
+    (C.deblend_dir(cfg) / "norm_stats.json").write_text("{}")
+    for st in ("rubin_vae", "k1", "c1"):
+        _done(cfg, st)
+    rep = C.start(cfg, tmp_path / "cfg.yaml", [], "all", runner=slurm, env=ENV)["all"]
+    assert rep["dbl.r_k2"].startswith("awaiting approval of k1") and rep["dbl.r_c2"].startswith("awaiting approval")
+    assert rep["dbl.r_A"].startswith("awaiting approval of k1, k2")   # K2 not even trained yet
+    assert "dbl.eval_check_vaes_val" in slurm.names()
+    with pytest.raises(SystemExit):
+        C.approve(cfg, "k2")                                 # not finished
+    C.approve(cfg, "k1", note="checked")
+    assert json.loads((C.run_dir(cfg, "k1") / "APPROVED").read_text())["note"] == "checked"
+    slurm.queue = []
+    _advance(cfg, slurm)
+    assert "dbl.r_k2" in slurm.names() and "dbl.r_c2" not in slurm.names()
+    _done(cfg, "k2")
+    rep = _advance(cfg, slurm)["all"]
+    assert rep["dbl.r_A"].startswith("awaiting approval of k2")
+    pilot = _cfg(tmp_path / "p", "_pilot")
+    nodes = C.nodes(pilot, dict(mode="pilot", seed=None, split="val", max_steps=300))
+    assert all(not n.get("gates") for n in nodes.values())

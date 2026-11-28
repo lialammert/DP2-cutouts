@@ -17,6 +17,10 @@
 # - A node whose command raised an exception gets a failure marker (<campaign dir>/failed/<job name>) and is not
 #   resubmitted until `deblend-advance retry <job name>`. A node is also given up after max_jobs_train /
 #   max_jobs_eval submissions (walltime kills, node failures).
+# - Gates (mode all, 2026-11-28; deblend.campaign.gates): a training whose dependencies are VAEs waits, besides their
+#   DONE, for an APPROVED file in their run folders, written by `dp2-ml <cfg> deblend-approve <stage>` after the
+#   checkpoint evaluation (check_vaes: Rubin VAE, K1, C1; check_k2: K1 + K2, both on val). Default: K2 waits for
+#   K1, A and B for K1 and K2, C2 for C1. Pilots (--max-steps) have no gates.
 # Nothing here imports keras: the campaign is started from a login node.
 
 import json
@@ -29,10 +33,14 @@ from pathlib import Path
 STAGES = ("rubin_vae", "k1", "k2", "A", "B", "c1", "c2", "c3")
 DEPENDS = dict(rubin_vae=(), k1=(), k2=("k1",), A=("k1",), B=("k1",), c1=(), c2=("c1",), c3=("c1", "c2"))
 STUDENTS = ("A", "B", "c2", "c3")
-# Evaluations and the trainings they need; None: every training of the campaign.
-EVALS = dict(masking=("k1",), latent=("k1", "c1"), d1=None, d2=None, cost=None)
-MODES = dict(pilot=("all", ("masking", "latent", "d1", "d2", "cost")),
-             all=("all", ("masking", "latent", "d1", "d2", "cost")),
+# Evaluations and the trainings they need; None: every training of the campaign. The check_* evaluations always
+# read the val split (they decide whether the next stages may train).
+EVALS = dict(masking=("k1",), latent=("k1", "c1"), d1=None, d2=None, cost=None,
+             check_vaes=("rubin_vae", "k1", "c1"), check_k2=("k1", "k2"))
+CHECK_SPLIT = "val"
+GATES = dict(k2=("k1",), A=("k1", "k2"), B=("k1", "k2"), c2=("c1",))
+MODES = dict(pilot=("all", ("check_vaes", "check_k2", "masking", "latent", "d1", "d2", "cost")),
+             all=("all", ("check_vaes", "check_k2", "masking", "latent", "d1", "d2", "cost")),
              seeds=("students", ("d1", "d2", "cost")),
              final=("none", ("d1", "d2", "cost")))
 DEFAULTS = dict(max_queued=8, max_jobs_train=30, max_jobs_eval=2, qos="qos_gpu_a100-dev", lock_timeout_s=120)
@@ -52,6 +60,21 @@ def run_name(cfg, stage, seed=None):
 
 def run_dir(cfg, stage, seed=None):
     return deblend_dir(cfg) / "runs" / run_name(cfg, stage, seed)
+
+
+def approved(cfg, stage, seed=None):
+    return (run_dir(cfg, stage, seed) / "APPROVED").exists()
+
+
+def approve(cfg, stage, note="", seed=None):
+    # Marks a finished VAE run as checked: the gated stages that depend on it may train (deblend-advance).
+    rd = run_dir(cfg, stage, seed)
+    if not (rd / "DONE").exists():
+        raise SystemExit(f"{stage}: {rd} is not finished (no DONE): nothing to approve")
+    checks = [str(p) for w in ("check_vaes", "check_k2") if (p := eval_dir(cfg, w, CHECK_SPLIT, None) / "summary.json").exists()]
+    (rd / "APPROVED").write_text(json.dumps(dict(stage=stage, run=rd.name, note=note, checks=checks,
+                                                 time=time.strftime("%Y-%m-%d %H:%M:%S")), indent=2))
+    print(f"[campaign] {stage} approved ({rd})")
 
 
 def eval_name(cfg, what, split, seed):
@@ -119,10 +142,13 @@ def nodes(cfg, spec):
             deps = stats + [tname(k, ds) for k in DEPENDS[stage]]
             args = ["deblend-train", stage] + (["--seed", str(s)] if s is not None else []) + \
                 (["--max-steps", str(spec["max_steps"])] if spec.get("max_steps") else [])
+            gates = [] if spec.get("max_steps") or mode != "all" else \
+                [(k, ds) for k in (GATES if st.get("gates") is None else st["gates"]).get(stage, ())]
             out[tname(stage, s)] = dict(kind="train", args=args, deps=deps, submit=True,
                                         done=(run_dir(cfg, stage, s) / "DONE").exists(),
                                         max_jobs=2 if spec.get("max_steps") else int(st["max_jobs_train"]),
-                                        gpus=stage_gpus(cfg, stage))
+                                        gpus=stage_gpus(cfg, stage),
+                                        gates=[k for k, gs in gates if not approved(cfg, k, gs)])
     # Runs this campaign relies on without training them (shared stages of `seeds`, everything for `final`).
     for stage, s in sorted(needed, key=lambda t: (STAGES.index(t[0]), -1 if t[1] is None else t[1])):
         name = tname(stage, s)
@@ -132,10 +158,11 @@ def nodes(cfg, spec):
     eval_seed = seed if which == "students" else None
     for what in evals:
         need = EVALS[what] if EVALS[what] is not None else STAGES
-        args = ["deblend-eval", what, "--split", split] + (["--seed", str(eval_seed)] if eval_seed is not None else [])
-        out[PREFIX + "eval_" + eval_name(cfg, what, split, eval_seed)] = dict(
+        sp = CHECK_SPLIT if what.startswith("check_") else split
+        args = ["deblend-eval", what, "--split", sp] + (["--seed", str(eval_seed)] if eval_seed is not None else [])
+        out[PREFIX + "eval_" + eval_name(cfg, what, sp, eval_seed)] = dict(
             kind="eval", args=args, deps=stats + [tname(*trained[k]) for k in need], submit=True,
-            done=(eval_dir(cfg, what, split, eval_seed) / "summary.json").exists(), max_jobs=int(st["max_jobs_eval"]))
+            done=(eval_dir(cfg, what, sp, eval_seed) / "summary.json").exists(), max_jobs=int(st["max_jobs_eval"]))
     # Dependencies a node needs are always in the graph (external runs included above).
     for n in out.values():
         for d in n["deps"]:
@@ -349,6 +376,10 @@ def advance(cfg, cdir=None, runner=run_cmd, env=None, after=None, load=_load, su
                     continue
                 if blockers:
                     states[name] = "waiting"
+                    continue
+                if node.get("gates"):
+                    states[name] = "awaiting approval of " + ", ".join(node["gates"]) + \
+                        " (dp2-ml <cfg> deblend-approve <stage>)"
                     continue
                 if not submit:
                     states[name] = "ready"

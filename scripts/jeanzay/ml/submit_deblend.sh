@@ -45,7 +45,8 @@ ml() { dp2-ml "$DP2_ML_CONFIG" "$@"; }
 case "$STEP" in
     pilot)
         ml deblend-campaign pilot --max-steps "$PILOT_STEPS" --split val ${AFTER_OPT[@]+"${AFTER_OPT[@]}"} \
-            --set deblend.run_suffix=_pilot --set deblend.eval.max_examples=500 ;;
+            --set deblend.run_suffix=_pilot --set deblend.eval.max_examples=500 \
+            --set deblend.train.global_clipnorm=null ;;   # no clipping: gradient norms measured (clip_thresholds.py)
     all) ml deblend-campaign all --split test ${AFTER_OPT[@]+"${AFTER_OPT[@]}"} ;;
     seeds)
         for s in ${SEEDS:?set SEEDS, e.g. \"1 2\"}; do

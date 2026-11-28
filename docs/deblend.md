@@ -33,8 +33,8 @@ for weak lensing first: shapes, sizes, selection, and the shear response where i
 
 | | teacher (training only) | student (inference: Rubin blend X only) | decoder |
 |---|---|---|---|
-| A | K1: Euclid VIS VAE, q_E(z \| E_c, M_E), frozen | CNN + MC dropout 0.1, latent MSE to sampled z_E | K2 (Rubin from z_E), frozen |
-| B | K1, same checkpoint | CNN context h(X) 128-D + CFM field (41 376 parameters) | K2, same checkpoint |
+| A | K1: Euclid VIS VAE, q_E(z \| E_c, M_E), frozen | CNN + MC dropout 0.1, energy score of 8 draws against one sampled z_E, D1 replay | K2 (Rubin from z_E), frozen |
+| B | K1, same checkpoint | CNN context h(X) 128-D + CFM field (5 x 128, time embedding), D1 replay | K2, same checkpoint |
 | C | C2: r(z \| X, E_c), full covariance, on the C1 joint latent | CNN context + the same CFM field (C3), D1 replay | C1 Rubin decoder, frozen |
 
 **Stages.**
@@ -70,6 +70,43 @@ for weak lensing first: shapes, sizes, selection, and the shear response where i
   shared by all steps and samples.
 - Latents are standardised with statistics from the train split (teacher samples) and mapped back before
   decoding.
+
+## Training recipe (2026-11-28)
+
+Decided after an external review of the campaign; no dataset or compact copy was rebuilt for it.
+
+- **Inputs:** arcsinh(2.5 f / s_b), without DebVAder's tanh (applied in the encoders, `normalise_on: gpu`).
+- **Rubin PSF conditioning** (`deblend.psf_condition`):
+  - The catalogue PSF moments σ, e1, e2 in the six bands (18 scalars, already in the D1 and D2 metadata) are
+    appended to every Rubin embedding, before the latent heads and the fusion, and to the latent at the input of
+    every Rubin decoder (K2 included).
+  - They are standardised on D1 train (`deblend/psf_stats.json`; e1, e2 around 0, by their rms). e1 and e2 are
+    turned with the image by the augmentation.
+  - Nothing Euclid is conditioned: only a constant VIS FWHM is known.
+- **Optimisation:**
+  - Adam with the global gradient norm clipped at 1 (its mean, maximum and the fraction of clipped updates go to
+    `history.csv`).
+  - Linear warm-up from 1 % of the peak over the first 2 % of the updates, then cosine decay to 1 % of the peak.
+  - Peak 1e-4, × √(B / 128) on the four-GPU stages (K1, C1, C2).
+  - 20 epochs on D1, 60 on D2. An epoch of a mixed stage is one pass over D2 plus as many D1 examples, new ones at
+    every epoch.
+  - Early stopping after 10 epochs without improvement (a safety net); the best validation checkpoint is kept.
+- **VAEs:** β = 1, reached by a linear KL warm-up over the first 10 % of the updates. Validation is always at β = 1,
+  with one fixed reparametrisation draw per object.
+- **Validation on fixed draws:** every random quantity of a validation (reparametrisation, teacher draws, dropout
+  masks, flow triplets) is drawn per object from its dataset row (`data.fixed_draws`), the same for every
+  checkpoint.
+- **Students A and B:** D1 replay, 50 / 50 with D2. Checkpoints are chosen on the D2 validation term (A:
+  `val_es_d2`, B and C3: `val_cfm_d2`). A and B share one K1 latent standardisation (`deblend/latent_stats/`).
+- **Run A:** the energy score of 8 dropout draws against one draw of the K1 posterior, per object and per step,
+  in the standardised K1 space; 32 draws in validation.
+- **B and C3:** CFM field of five layers of 128 with a 32-D sinusoidal time embedding; EMA of the weights (0.999,
+  from the end of the warm-up), used for validation and saved as the best weights. Heun with 20 steps (40 NFE),
+  128 samples per galaxy in the evaluations.
+- **C2:** λ_D1 = 1 for 500 updates. The gradient norms of its two objectives on the shared backbone are measured
+  over the next 200, then λ_D1 ramps to their median ratio over 200 updates and stays there
+  (`<run>/lambda_d1.json`). Checkpoints are counted from then on.
+- **Run names:** `dbl2_*`. The `dbl_*` runs and pilots of the former recipe are left untouched.
 
 ## Data rules
 
@@ -140,7 +177,11 @@ evaluation; D2 itself is unchanged.
    - `run.json` (λ_D1 calibration, parameter counts).
 
    Then set `deblend.train.train_steps` from the measured speed.
-4. `submit_deblend.sh all`: the eight trainings, then the evaluations on the test split.
+4. `submit_deblend.sh all`: the eight trainings, then the evaluations on the test split. The stages that depend
+   on a VAE wait for its approval:
+   - K2 waits for K1, A and B for K1 and K2, C2 for C1.
+   - The campaign runs `check_vaes` (Rubin VAE, K1, C1) and then `check_k2` on the val split.
+   - After reading them, `dp2-ml <cfg> deblend-approve <stage> --note "..."` releases the next stages.
 5. `SEEDS="1 2" submit_deblend.sh seeds`: replicates of the students (A, B, C2, C3).
 6. `submit_deblend.sh final`: holdout, once.
 

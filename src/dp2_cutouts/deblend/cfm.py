@@ -9,22 +9,38 @@
 # and shared by every step and every posterior sample (vectorised over (batch, samples)).
 # Latents may be standardised with train-split statistics (mean, std per dimension): the flow then runs in the
 # standardised space and samples are mapped back before decoding.
+# Validation (2026-11-28): the loss on M fixed triplets per object (t stratified in [0, 1), z0 and the teacher draw
+# given by the loader, the same at every validation), so that two checkpoints are compared on the same draws
+# (fixed_loss); training keeps one random triplet per example.
 
 import keras
 import numpy as np
 from keras import layers, ops
 
 
+def time_embedding(t, dim):
+    # Sinusoidal embedding of t in [0, 1] (N, 1) -> (N, dim): sin and cos of t at dim / 2 angular frequencies
+    # spaced geometrically from 1 to 1000 rad (the slowest one sees the whole path, the fastest one 1/1000 of it).
+    half = int(dim) // 2
+    freqs = np.exp(np.linspace(0.0, np.log(1000.0), half)).astype(np.float32)
+    a = t * ops.convert_to_tensor(freqs[None, :], dtype=t.dtype)
+    return ops.concatenate([ops.sin(a), ops.cos(a)], axis=-1)
+
+
 class VelocityField(keras.Model):
-    # [z_t (d), t (1), h (c)] -> 128 SiLU -> 128 SiLU -> d (linear). With d = 32, c = 128: 41 376 parameters.
-    def __init__(self, latent_dim=32, hidden=(128, 128), **kw):
+    # [z_t (d), embedding of t, h (c)] -> hidden SiLU layers -> d (linear). Campaign setting (2026-11-28, as FMPE /
+    # sbi): five layers of 128 and a 32-D sinusoidal time embedding; time_dim = 0 feeds t itself (the former field:
+    # [z_t, t, h] -> 128 -> 128 -> d, 41 376 parameters at d = 32, c = 128).
+    def __init__(self, latent_dim=32, hidden=(128, 128), time_dim=0, **kw):
         super().__init__(**kw)
         self.d = int(latent_dim)
+        self.time_dim = int(time_dim)
         self.hidden = [layers.Dense(w, activation="silu") for w in hidden]
         self.out = layers.Dense(self.d)
 
     def call(self, z, t, h):
-        x = ops.concatenate([z, t, h], axis=-1)
+        te = time_embedding(t, self.time_dim) if self.time_dim else t
+        x = ops.concatenate([z, te, h], axis=-1)
         for lay in self.hidden:
             x = lay(x)
         return self.out(x)
@@ -43,6 +59,18 @@ def cfm_loss(field, z1, h, seed):
     zt, t, u = cfm_pair(z1, seed)
     v = field(zt, t, h)
     return ops.mean(ops.square(v - u))
+
+
+def fixed_loss(field, z1, h, u, z0):
+    # Validation loss on M fixed triplets per example: z1 (B, M, d) teacher draws, h (B, c), u (B, M) uniform draws
+    # stratifying t_j = (j + u_j) / M, z0 (B, M, d). Mean over examples, triplets and dimensions.
+    B, M, d = ops.shape(z1)[0], z1.shape[1], z1.shape[2]
+    t = (ops.convert_to_tensor(np.arange(M, dtype=np.float32))[None, :] + u) / float(M)
+    t = t[..., None]
+    zt = (1.0 - t) * z0 + t * z1
+    hh = ops.reshape(ops.repeat(h[:, None, :], M, axis=1), (B * M, ops.shape(h)[-1]))
+    v = field(ops.reshape(zt, (B * M, d)), ops.reshape(t, (B * M, 1)), hh)
+    return ops.mean(ops.square(v - ops.reshape(z1 - z0, (B * M, d))))
 
 
 def steps_for_nfe(nfe, method):

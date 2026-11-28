@@ -64,12 +64,16 @@ class FrozenGuard:
 
 class BestSubmodels(keras.callbacks.Callback):
     # Saves the trainable sub-models (not the frozen VAE) when the monitored validation metric improves, and the
-    # last state every epoch.
-    def __init__(self, run_dir, submodels, monitor="val_total_loss"):
+    # last state every epoch. start_epoch: epochs before it are never "best" (C2 while its lambda_D1 still moves).
+    # ema: a context factory (deblend/optim.EMAWeights) under which the weights are saved (the EMA weights, those
+    # the validation measured).
+    def __init__(self, run_dir, submodels, monitor="val_total_loss", start_epoch=0, ema=None):
         super().__init__()
         self.run_dir = Path(run_dir)
         self.submodels = submodels
         self.monitor = monitor
+        self.start_epoch = int(start_epoch)
+        self.ema = ema
         self.best_path = self.run_dir / "best.json"
         self.best = json.loads(self.best_path.read_text())["value"] if self.best_path.exists() else np.inf
 
@@ -78,14 +82,16 @@ class BestSubmodels(keras.callbacks.Callback):
             m.save_weights(str(self.run_dir / f"{name}_{tag}.weights.h5"))
 
     def on_epoch_end(self, epoch, logs=None):
+        import contextlib
         logs = logs or {}
-        self._save("last")
-        v = logs.get(self.monitor)
-        if v is not None and np.isfinite(v) and v < self.best:
-            self.best = float(v)
-            self._save("best")
-            self.best_path.write_text(json.dumps(dict(value=self.best, epoch=int(epoch) + 1,
-                                                      time=time.strftime("%Y-%m-%d %H:%M:%S"))))
+        with (self.ema() if self.ema is not None else contextlib.nullcontext()):
+            self._save("last")
+            v = logs.get(self.monitor)
+            if epoch >= self.start_epoch and v is not None and np.isfinite(v) and v < self.best:
+                self.best = float(v)
+                self._save("best")
+                self.best_path.write_text(json.dumps(dict(value=self.best, epoch=int(epoch) + 1, monitor=self.monitor,
+                                                          time=time.strftime("%Y-%m-%d %H:%M:%S"))))
 
 
 class StopOnNaN(keras.callbacks.Callback):
@@ -95,14 +101,18 @@ class StopOnNaN(keras.callbacks.Callback):
             raise RuntimeError(f"non-finite loss at batch {batch}: {v}")
 
 
-def callbacks(run_dir, submodels, patience, resume, backup_every_steps=None):
+def callbacks(run_dir, submodels, patience, resume, backup_every_steps=None, monitor="val_total_loss",
+              start_epoch=0, ema=None, first=()):
     # backup_every_steps: resumable backup every that many steps instead of every epoch (an epoch of the full D1 is
     # thousands of steps; a job cut by its walltime resumes from the last backup and restarts that epoch from its
     # first batch, the weights keeping what the cut part had learnt: keras 3 BackupAndRestore, tested).
+    # monitor / start_epoch: checkpoint selection and early stopping (the same metric); first: callbacks that run
+    # before the others at every hook (after the backup), e.g. those adding entries to the epoch logs.
     run_dir = Path(run_dir)
-    cbs = [BestSubmodels(run_dir, submodels), StopOnNaN(),
-           keras.callbacks.CSVLogger(str(run_dir / "history.csv"), append=True),
-           keras.callbacks.EarlyStopping(monitor="val_total_loss", mode="min", patience=int(patience))]
+    cbs = list(first) + [BestSubmodels(run_dir, submodels, monitor, start_epoch, ema), StopOnNaN(),
+                         keras.callbacks.CSVLogger(str(run_dir / "history.csv"), append=True),
+                         keras.callbacks.EarlyStopping(monitor=monitor, mode="min", patience=int(patience),
+                                                       start_from_epoch=int(start_epoch))]
     if resume:
         freq = int(backup_every_steps) if backup_every_steps else "epoch"
         cbs.insert(0, keras.callbacks.BackupAndRestore(str(run_dir / "backup"), save_freq=freq,

@@ -5,12 +5,16 @@
 # split), as keras PyDatasets (backend agnostic).
 #
 # What each image carries:
-#   *_in    network input: tanh(arcsinh(2.5 f / s_b)) per band (s_b: norm_stats.json, D1 train split), pixels that
+#   *_in    network input: arcsinh(2.5 f / s_b) per band (s_b: norm_stats.json, D1 train split), pixels that
 #           are not observations of the target replaced by a noise draw at their own ivar before normalisation;
 #           the Euclid input has a second channel = validity (1 observed target pixel, 0 otherwise): the encoder is
 #           mask-aware, so a masked neighbour is never mistaken for sky;
 #   *_flux  observed flux in the dataset units (Rubin nJy, Euclid as delivered: MER microJy per pixel);
-#   *_w     likelihood weight = ivar on pixels that are observations of the target, 0 elsewhere.
+#   *_w     likelihood weight = ivar on pixels that are observations of the target, 0 elsewhere;
+#   r_psf / x_psf  (deblend.psf_condition) the Rubin PSF of the example, 18 standardised scalars: sigma, e1, e2 of
+#           the catalogue PSF moments in every band (D1: the object's; D2: those of the Rubin object of the group,
+#           the centre of the stamp), e1 / e2 transformed with the image by the augmentation;
+#   validation only: fixed draws per example (val_noise; see fixed_draws).
 # Not observations of the target: Rubin pixels flagged by the MMU mask (NO_DATA, SATURATED, CR, INTERPOLATED,
 # DETECTION_EDGE) or with ivar <= 0; Euclid pixels flagged by the MMU mask, with ivar <= 0, or belonging to another
 # source (euclid_fill: D2 always, D1 when built with dataset1.euclid_neighbour_mask). The Rubin pixels that the
@@ -29,6 +33,7 @@
 # copied into memory when they fit.
 
 import json
+import os
 import time
 
 import keras
@@ -41,7 +46,8 @@ from .compact import euclid_fw, noise_fill, open_sides, position_key, rubin_fw  
 
 
 def asinh_norm(f, s):
-    return np.tanh(np.arcsinh(2.5 * f / s)).astype(np.float32)
+    # arcsinh(2.5 f / s_b), no tanh (2026-11-28): the same function as layers.normalise_input.
+    return np.arcsinh(2.5 * f / s).astype(np.float32)
 
 
 def compute_norm_stats(cfg, max_examples=20000, seed=0):
@@ -81,6 +87,102 @@ def compute_norm_stats(cfg, max_examples=20000, seed=0):
 
 def deblend_dir(cfg):
     return cfg.root / "deblend"
+
+
+# ----------------------------------------------------------------------------- PSF conditioning (2026-11-28)
+PSF_QUANTITIES = ("sigma", "e1", "e2")
+
+
+def psf_enabled(cfg):
+    return bool(cfg["deblend"].get("psf_condition", False))
+
+
+def psf_columns(cfg):
+    # The 18 metadata columns, band by band: psf_sigma_<b> (arcsec), psf_e1_<b>, psf_e2_<b> (distortions of the
+    # catalogue PSF moments, stages/catalog_table.py). Already in the D1 and D2 metadata: nothing is recomputed.
+    return [f"psf_{q}_{b}" for b in cfg["rubin"]["bands"] for q in PSF_QUANTITIES]
+
+
+def n_cond(cfg):
+    return len(psf_columns(cfg)) if psf_enabled(cfg) else 0
+
+
+def _write_json_atomic(path, obj):
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(obj, indent=2))
+    os.replace(tmp, path)
+
+
+def load_psf_stats(cfg):
+    # Standardisation of the PSF scalars, from the D1 train split (deblend/psf_stats.json, written on first use: the
+    # same numbers for every stage and seed). sigma: mean and standard deviation; e1, e2: mean 0 and their rms (the
+    # augmentation by quarter turns and flips makes their distribution symmetric about 0, so a non-zero train mean
+    # would not describe what the networks see).
+    p = deblend_dir(cfg) / "psf_stats.json"
+    cols = psf_columns(cfg)
+    if p.exists():
+        s = json.loads(p.read_text())
+        if s.get("columns") == cols:
+            return s
+    import pyarrow.parquet as pq
+    path = cfg.dataset_dir("d1") / "meta.parquet"
+    missing = [c for c in cols if c not in set(pq.read_schema(path).names)]
+    if missing:
+        raise RuntimeError(f"deblend.psf_condition: D1 metadata has no {missing}")
+    m = pd.read_parquet(path, columns=["split"] + cols)
+    sub = m.loc[m["split"] == "train", cols].astype(float)
+    mean, std = [], []
+    for c in cols:
+        v = sub[c].to_numpy()
+        v = v[np.isfinite(v)]
+        if c.startswith("psf_sigma_"):
+            mu, sd = float(v.mean()), float(v.std())
+        else:
+            mu, sd = 0.0, float(np.sqrt(np.mean(v ** 2)))
+        mean.append(mu)
+        std.append(sd if sd > 0 else 1.0)
+    s = dict(columns=cols, mean=mean, std=std, nan_fraction=sub.isna().mean().round(6).tolist(),
+             n_train=int(len(sub)), definition="D1 train; sigma: mean / std; e1, e2: 0 / rms (augmentation symmetry)")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(p, s)
+    return s
+
+
+def psf_raw(meta, cfg):
+    # (n rows, bands, 3) float32 array of the PSF scalars of every metadata row.
+    cols = psf_columns(cfg)
+    missing = [c for c in cols if c not in meta.columns]
+    if missing:
+        raise RuntimeError(f"deblend.psf_condition: the metadata has no {missing} (read them: train_columns)")
+    return meta[cols].to_numpy(np.float32).reshape(len(meta), len(cfg["rubin"]["bands"]), len(PSF_QUANTITIES))
+
+
+def psf_features(raw, ks, flips, stats):
+    # raw (B, bands, 3) -> (B, 3 bands) standardised, e1 / e2 transformed like the images: a quarter turn swaps the
+    # axes (e1 -> -e1, e2 -> -e2), a flip of the columns reverses the cross moment (e2 -> -e2) (ml/data.py
+    # aug_ellipticity, applied in the original units, before the standardisation). Missing values -> 0 (the mean).
+    raw = np.asarray(raw, np.float32)
+    s = np.where(np.asarray(ks) % 2 == 1, -1.0, 1.0).astype(np.float32)[:, None]
+    f = np.where(np.asarray(flips, bool), -1.0, 1.0).astype(np.float32)[:, None]
+    v = np.stack([raw[..., 0], raw[..., 1] * s, raw[..., 2] * s * f], -1).reshape(len(raw), -1)
+    v = (v - np.asarray(stats["mean"], np.float32)) / np.asarray(stats["std"], np.float32)
+    return np.where(np.isfinite(v), v, 0.0).astype(np.float32)
+
+
+# ----------------------------------------------------------------------------- fixed validation draws (2026-11-28)
+VAL_NOISE_SEED = 20261128
+
+
+def fixed_draws(rows, spec, salt):
+    # Draws that depend only on the dataset row (and on the dataset, salt): the same for every validation of every
+    # checkpoint, whatever the batch composition. spec {key: (kind, shape)}, kind normal or uniform.
+    out = {k: np.empty((len(rows),) + tuple(shape), np.float32) for k, (_, shape) in spec.items()}
+    for i, r in enumerate(rows):
+        g = np.random.default_rng([VAL_NOISE_SEED, int(salt), int(r)])
+        for k in sorted(spec):
+            kind, shape = spec[k]
+            out[k][i] = g.standard_normal(shape) if kind == "normal" else g.random(shape)
+    return out
 
 
 def load_norm_stats(cfg):
@@ -312,17 +414,23 @@ class Prepare:
         return self.euclid_w(*euclid_fw(f, iv, m, fill, self.vis), rng)
 
 
-# Metadata columns a training needs (the evaluations read every column): split, the selections, the D2 targets.
+# Metadata columns a training needs (the evaluations read every column): split, the selections, the D2 targets,
+# and the PSF scalars when the networks are conditioned on them (train_columns).
 D1_TRAIN_COLUMNS = ("split", "object_id")
 D2_TRAIN_COLUMNS = ("split", "group_id", "euclid_object_id", "rc_offset_x_px", "rc_offset_y_px", "euclid_vis_mag",
                     "sep_delta_e", "sep_centroid_shift_arcsec", "sep_rel_size_change", "sep_rel_flux_change")
+
+
+def train_columns(cfg, which):
+    base = D1_TRAIN_COLUMNS if which == "d1" else D2_TRAIN_COLUMNS
+    return tuple(base) + (tuple(psf_columns(cfg)) if psf_enabled(cfg) else ())
 
 
 class D1Batches(Batches):
     # D1 examples: Rubin isolated R and Euclid isolated E. fields: which of "rubin", "euclid" to read.
     # meta_columns: metadata columns to load (None: all), shared between the loaders of one process.
     def __init__(self, cfg, split, batch_size, train, seed=0, indices=None, fields=("rubin", "euclid"),
-                 mask_pool=None, mask_prob=0.0, meta_columns=None, **kw):
+                 mask_pool=None, mask_prob=0.0, meta_columns=None, val_noise=None, **kw):
         self.st = Store(cfg.dataset_dir("d1"), meta_columns, shared=True)
         self.keep, self.selection = d1_keep(cfg, self.st.meta)
         rows = np.flatnonzero((self.st.meta["split"] == split).to_numpy() & self.keep) if indices is None else indices
@@ -336,6 +444,10 @@ class D1Batches(Batches):
         self.mask_pool = mask_pool          # (M, n_e, n_e) bool: real D2 neighbour masks
         self.mask_prob = float(mask_prob) if train else 0.0
         self.sides = open_sides(cfg, "d1", self.rows_all, train)
+        self.val_noise = dict(val_noise or {})
+        self.psf, self.psf_stats = None, None
+        if psf_enabled(cfg) and "rubin" in self.fields:
+            self.psf, self.psf_stats = psf_raw(self.st.meta, cfg), load_psf_stats(cfg)
 
     def __getitem__(self, i):
         rows = self.rows(i)
@@ -356,6 +468,8 @@ class D1Batches(Batches):
                 f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl)
                             for k in ("rubin_flux", "rubin_ivar", "rubin_mask"))
                 x["r_in"], x["r_flux"], x["r_w"] = self.prep.rubin(f, iv, m, rng)
+            if self.psf is not None:
+                x["r_psf"] = psf_features(self.psf[rows], ks, fl, self.psf_stats)
         if "euclid" in self.fields:
             filled = "euclid" in self.sides
             if filled:
@@ -381,13 +495,15 @@ class D1Batches(Batches):
             t = time.perf_counter()
             x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid_w(f, w, rng, filled=filled)
             self.tick("prepare", t)
+        if not self.train and self.val_noise:
+            x.update(fixed_draws(rows, self.val_noise, salt=1))
         return x, np.zeros((len(rows),), np.float32)
 
 
 class D2Batches(Batches):
     # D2 examples: Rubin blend X (input) and the masked Euclid central E_c (teacher input / likelihood target).
     def __init__(self, cfg, split, batch_size, train, seed=0, indices=None, fields=("blend", "euclid"),
-                 meta_columns=None, **kw):
+                 meta_columns=None, val_noise=None, **kw):
         self.st = Store(cfg.dataset_dir("d2"), meta_columns, shared=True)
         self.centering = cfg["deblend"]["d2_centering"]
         keep, self.selection = d2_keep(cfg, self.st.meta)
@@ -398,6 +514,10 @@ class D2Batches(Batches):
         sfx = "_rc" if self.centering == "rubin" else ""
         self.rkeys = tuple(f"rubin_{q}{sfx}" for q in ("flux", "ivar", "mask"))
         self.sides = open_sides(cfg, "d2", self.rows_all, train)
+        self.val_noise = dict(val_noise or {})
+        self.psf, self.psf_stats = None, None
+        if psf_enabled(cfg) and "blend" in self.fields:
+            self.psf, self.psf_stats = psf_raw(self.st.meta, cfg), load_psf_stats(cfg)
 
     def __getitem__(self, i):
         rows = self.rows(i)
@@ -417,6 +537,8 @@ class D2Batches(Batches):
             else:
                 f, iv, m = (_apply_aug(self.st.take(k, rows), ks, fl) for k in self.rkeys)
                 x["x_in"], x["x_flux"], x["x_w"] = self.prep.rubin(f, iv, m, rng)
+            if self.psf is not None:
+                x["x_psf"] = psf_features(self.psf[rows], ks, fl, self.psf_stats)
         if "euclid" in self.fields:
             if "euclid" in self.sides:
                 t = time.perf_counter()
@@ -431,6 +553,8 @@ class D2Batches(Batches):
                                                                               "euclid_mask"))
                 fill = _apply_aug(self.st.take("euclid_fill", rows), ks, fl, two_d=True)
                 x["e_in"], x["e_flux"], x["e_w"] = self.prep.euclid(f, iv, m, fill, rng)
+        if not self.train and self.val_noise:
+            x.update(fixed_draws(rows, self.val_noise, salt=2))
         return x, np.zeros((len(rows),), np.float32)
 
 

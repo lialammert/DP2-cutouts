@@ -15,9 +15,10 @@ from keras import layers, ops
 
 
 # Input normalisation on the accelerator (deblend.data.normalise_on: gpu). The loaders then hand the encoders the
-# flux (masked pixels already filled with sky noise) and every ConvEmbedder applies DebVAder's tanh(arcsinh(2.5 f /
-# s_b)) itself, inside the compiled graph: the same function as the CPU path (data.asinh_norm), moved off the CPU
-# threads that prepare the batches. Set by data.Prepare from the configuration, so that the loaders and the models of
+# flux (masked pixels already filled with sky noise) and every ConvEmbedder applies arcsinh(2.5 f / s_b) itself,
+# inside the compiled graph: the same function as the CPU path (data.asinh_norm), moved off the CPU threads that
+# prepare the batches. arcsinh alone since 2026-11-28 (DebVAder's tanh on top bounded the input at 1 and flattened
+# the cores of bright galaxies; arcsinh is logarithmic there, linear near zero, and never clipped). Set by data.Prepare from the configuration, so that the loaders and the models of
 # a process always agree; empty = the inputs arrive normalised. The side is recognised by its channels: the Rubin
 # bands, or 2 for Euclid (flux, validity; validity left as is).
 INPUT_NORM = {}
@@ -29,9 +30,9 @@ def normalise_input(x):
     c = x.shape[-1]
     r = INPUT_NORM["rubin"]
     if c == len(r):
-        return ops.tanh(ops.arcsinh(2.5 * x / ops.convert_to_tensor(r, dtype=x.dtype)))
+        return ops.arcsinh(2.5 * x / ops.convert_to_tensor(r, dtype=x.dtype))
     if c == 2:
-        f = ops.tanh(ops.arcsinh(2.5 * x[..., :1] / ops.convert_to_tensor(INPUT_NORM["euclid"], dtype=x.dtype)))
+        f = ops.arcsinh(2.5 * x[..., :1] / ops.convert_to_tensor(INPUT_NORM["euclid"], dtype=x.dtype))
         return ops.concatenate([f, x[..., 1:]], axis=-1)
     raise ValueError(f"input with {c} channels: neither Rubin ({len(r)} bands) nor Euclid (2)")
 
@@ -85,6 +86,9 @@ class ConvEmbedder(keras.Model):
     # Image (B, n, n, C) -> embedding (B, out_dim). Four levels (n -> ceil(n / 16)), a 1x1 convolution to
     # `squeeze` channels, then one dense layer. dropout: rate applied to the embedding; mc_dropout=True keeps it
     # active at inference (BatchNormalization is not used anywhere, so no statistics can move).
+    # cond (B, c): conditioning scalars (the standardised Rubin PSF moments, deblend.psf_condition) appended to the
+    # embedding, after its dropout: output (B, out_dim + c). No weight depends on it, so the embedders of two
+    # stages stay interchangeable (C2 and C3 start from copies of C1's / C2's).
     def __init__(self, out_dim=128, filters=(32, 64, 128, 256), squeeze=64, dropout=0.0, mc_dropout=False, **kw):
         super().__init__(**kw)
         self.blocks = [ConvBlock(f) for f in filters]
@@ -97,18 +101,24 @@ class ConvEmbedder(keras.Model):
         self.mc_dropout = bool(mc_dropout)
         self.drop = layers.Dropout(self.rate) if self.rate > 0 else None
 
-    def call(self, x, training=False):
+    def call(self, x, cond=None, training=False):
         x = normalise_input(x)
         for b in self.blocks:
             x = b(x)
         h = self.act(self.dense(self.flat(self.sq_act(self.squeeze(x)))))
         if self.drop is not None:
             h = self.drop(h, training=bool(training) or self.mc_dropout)
-        return h
+        return with_cond(h, cond)
+
+
+def with_cond(h, cond):
+    # [h, cond] on the last axis; h unchanged without conditioning.
+    return h if cond is None else ops.concatenate([h, ops.cast(cond, h.dtype)], axis=-1)
 
 
 class ConvDecoder(keras.Model):
     # Latent (B, d) -> mean image (B, n, n, C) in units of the per-band output scale (the caller multiplies by it).
+    # cond (B, c): the PSF of the instrument this decoder reconstructs (Rubin decoders only), appended to z.
     # Dense to an s x s x filters[0] canvas, four transposed levels (s * 16 >= n), a linear 3x3 convolution to C
     # channels (no positivity constraint in this first campaign), then a centred crop to n x n.
     def __init__(self, n, channels, filters=(256, 128, 64, 32), hidden=256, **kw):
@@ -126,8 +136,8 @@ class ConvDecoder(keras.Model):
         lo = (canvas - self.n) // 2
         self.crop = layers.Cropping2D(((lo, canvas - self.n - lo), (lo, canvas - self.n - lo)))
 
-    def call(self, z):
-        x = self.reshape(self.a2(self.d2(self.a1(self.d1(z)))))
+    def call(self, z, cond=None):
+        x = self.reshape(self.a2(self.d2(self.a1(self.d1(with_cond(z, cond))))))
         for u in self.ups:
             x = u(x)
         return self.crop(self.out(x))

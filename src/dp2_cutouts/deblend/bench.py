@@ -140,8 +140,8 @@ def loaders(cfg, sizes, n_batches, workers):
         if label == "original" and b > min(sizes):
             continue                                 # the slow path, once
         c = _cfg(cfg, **opts)
-        cls, cols = (data.D1Batches, data.D1_TRAIN_COLUMNS) if which == "d1" else \
-            (data.D2Batches, data.D2_TRAIN_COLUMNS)
+        cls, cols = (data.D1Batches, data.train_columns(c, "d1")) if which == "d1" else \
+            (data.D2Batches, data.train_columns(c, "d2"))
         blk = cfg["deblend"]["train"].get("read_block", 1)
         kw = dict(seed=0, block=blk if blk == "auto" else int(blk or 1), meta_columns=cols)
         if label == "compact, in memory":

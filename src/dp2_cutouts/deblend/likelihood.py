@@ -71,3 +71,30 @@ def diag_to_tril(log_var):
     s = ops.exp(0.5 * log_var)
     eye = ops.convert_to_tensor(np.eye(int(log_var.shape[-1]), dtype=np.float32))
     return s[..., None] * eye
+
+
+# Energy score (Gneiting & Raftery 2007), a strictly proper scoring rule for a distribution known by samples:
+#     ES(P, y) = E ||Z - y|| - 1/2 E ||Z - Z'||,  Z, Z' ~ P independent.
+# Run A's loss (2026-11-28, as Pacchiardi et al. 2024 for implicit generative networks): Z = M dropout draws of the
+# student, y = one draw of the teacher posterior. Unbiased estimator with plain (not squared) Euclidean distances,
+# the pairs i < j only (no diagonal term):
+#     (1/M) sum_i ||z_i - y||  -  1/(M (M - 1)) sum_{i<j} ||z_i - z_j||
+# (the 1/2 is already in the pair count: sum_{i<j} is half of sum_{i != j}).
+def safe_norm(v):
+    # ||v|| on the last axis, with a zero (sub)gradient where v = 0 (two identical draws): sqrt'(0) is infinite.
+    n2 = ops.sum(v * v, axis=-1)
+    pos = n2 > 0
+    return ops.where(pos, ops.sqrt(ops.where(pos, n2, 1.0)), 0.0)
+
+
+def energy_score(z, y):
+    # z (B, M, d) samples, y (B, d) observation -> (score, mean distance to y, mean distance between two samples),
+    # each (B,). M >= 2 (static).
+    M = int(z.shape[1])
+    if M < 2:
+        raise ValueError("the energy score needs at least two samples per example")
+    err = ops.mean(safe_norm(z - y[:, None, :]), axis=1)
+    i, j = np.triu_indices(M, 1)
+    dz = ops.take(z, ops.convert_to_tensor(i), axis=1) - ops.take(z, ops.convert_to_tensor(j), axis=1)
+    pair_sum = ops.sum(safe_norm(dz), axis=1)
+    return err - pair_sum / float(M * (M - 1)), err, 2.0 * pair_sum / float(M * (M - 1))
