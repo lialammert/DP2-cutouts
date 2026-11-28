@@ -60,6 +60,17 @@ if [[ -n "${JAX_PLATFORMS:-}" ]] && nvidia-smi -L >/dev/null 2>&1; then
     echo "[env] JAX_PLATFORMS=$JAX_PLATFORMS inherited from the submitting shell: unset on this GPU node"
     unset JAX_PLATFORMS
 fi
+# Weights & Biases (optional, DP2_WANDB=1; deblend/tracking.py): written offline on the compute nodes (no internet),
+# uploaded by wandb_sync.slurm (prepost partition). wandb lives outside the venv (DP2_WANDB_LIB, on $SCRATCH: $WORK
+# must not grow); its run files and caches on $SCRATCH too.
+if [[ -n "${DP2_WANDB:-}" && "${DP2_WANDB}" != "0" ]]; then
+    export WANDB_MODE=offline
+    export WANDB_DIR="${WANDB_DIR:-${SCRATCH:-$DP2_ML_ROOT}/wandb}"
+    export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-$WANDB_DIR/.cache}" WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-$WANDB_DIR/.config}"
+    export WANDB_PROJECT="${WANDB_PROJECT:-dp2-deblend}" WANDB_SILENT=true
+    mkdir -p "$WANDB_DIR"
+    echo "[env] wandb offline in $WANDB_DIR (project $WANDB_PROJECT, lib ${DP2_WANDB_LIB:-<venv>})"
+fi
 # Caches out of $HOME (3 GiB quota on Jean Zay) and out of $WORK (shared by the lab, its file count is the tight
 # limit: it filled up on 2026-11-27): on $SCRATCH.
 _cache="${SCRATCH:-${DP2_ML_ROOT:-$WORK}}/.cache"

@@ -41,6 +41,7 @@ from .layers import ConvDecoder
 from .models import (LAMBDA_PROTOCOL, C2Branches, C2Model, C3Model, CFMStudent, ImageEncoder, ImageVAE,
                      JointEncoder, JointVAE, K2Model, RubinBlendRegressor, RunAModel, RunBModel)
 from .optim import DeblendAdam, EMAValidation, EMAWeights, GradNormLogger, LambdaD1Protocol, lr_schedule
+from .tracking import WandbLogger, images_enabled
 
 # Metric each stage's checkpoints are selected (and early-stopped) on, unless deblend.<stage>.monitor says otherwise.
 MONITOR = dict(A="val_es_d2", B="val_cfm_d2", c3="val_cfm_d2")
@@ -538,7 +539,12 @@ def _train(cfg, stage, seed, s, deps, rd, seed_v, t0, resume, max_steps, time_bu
           + (f", EMA {ema}" if ema else ""), flush=True)
     model.compile(optimizer=opt)
     resumable = resume and not max_steps
-    first = [GradNormLogger(rd)] + ([EMAValidation()] if ema else []) + extra
+    # W&B (DP2_WANDB=1, offline on the compute nodes): after GradNormLogger, so that its entries are in the epoch logs.
+    wb = WandbLogger(rd, rd.name, str(cfg["deblend"].get("run_suffix") or "") or "campaign",
+                     dict(stage=stage, seed=seed_v, **{k: v for k, v in record.items() if k in ("train", "model",
+                                                                                                "schedule", "d")}),
+                     preview=({k: v[:4] for k, v in va[0][0].items()} if images_enabled() else None))
+    first = [GradNormLogger(rd), wb] + ([EMAValidation()] if ema else []) + extra
     cbs = callbacks(rd, subs, t["early_stopping_patience"], resumable, t.get("backup_every_steps"),
                     monitor=monitor, start_epoch=start_epoch, ema=(lambda: EMAWeights(opt)) if ema else None,
                     first=first)

@@ -814,3 +814,82 @@ def test_yaml_snr_bins_are_numbers():
     for st in ("rubin_vae", "k1", "k2", "A", "B", "c1", "c2", "c3"):
         v = cfg["deblend"][st]["train"]["global_clipnorm"]
         assert isinstance(v, float) and v > 0, st
+
+
+def test_wandb_logger_is_off_without_dp2_wandb_and_logs_scalars_when_on(tmp_path, monkeypatch):
+    # Off: nothing imported, nothing logged. On (with a stand-in wandb module): one run per run folder, its id kept
+    # for the resumed jobs, scalars only, the step axis in updates.
+    import sys
+    import types
+    from dp2_cutouts.deblend import tracking
+    monkeypatch.delenv("DP2_WANDB", raising=False)
+    assert tracking.WandbLogger(tmp_path, "r", "g", {}).run is None
+    calls = []
+
+    class Run:
+        def log(self, d, step):
+            calls.append((step, d))
+
+        def finish(self):
+            calls.append(("finish", None))
+
+    fake = types.SimpleNamespace(util=types.SimpleNamespace(generate_id=lambda: "abc123"),
+                                 init=lambda **kw: calls.append(("init", kw)) or Run())
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    monkeypatch.setenv("DP2_WANDB", "1")
+    monkeypatch.delenv("WANDB_MODE", raising=False)
+    cb = tracking.WandbLogger(tmp_path, "dbl2_k1", "campaign", dict(stage="k1"), every=2)
+    assert (tmp_path / "wandb_id").read_text().strip() == "abc123" and calls[0][1]["resume"] == "allow"
+    assert tracking.os.environ["WANDB_MODE"] == "offline"
+    for b in range(4):
+        cb.on_train_batch_end(b, dict(total_loss=float(b), note="text"))
+    cb.on_epoch_end(0, dict(val_total_loss=1.5, grad_norm_q95=float("nan")))
+    cb.on_train_end()
+    logged = [c for c in calls if isinstance(c[0], int)]
+    assert [s for s, _ in logged] == [2, 4, 4]
+    assert logged[0][1] == {"train/total_loss": 1.0} and logged[2][1] == {"epoch/val_total_loss": 1.5, "epoch": 1}
+    assert calls[-1][0] == "finish"
+    again = tracking.WandbLogger(tmp_path, "dbl2_k1", "campaign", {})       # a resumed job: the same id
+    assert calls[-1][0] == "init" and calls[-1][1]["id"] == "abc123" and again.run is not None
+
+
+def test_wandb_image_panels_show_observed_model_and_residual():
+    from dp2_cutouts.deblend.tracking import panels
+    rng = np.random.default_rng(0)
+    x = dict(r_in=np.zeros((2, 9, 9, 6), np.float32), r_flux=rng.normal(size=(2, 9, 9, 6)).astype(np.float32),
+             e_in=np.zeros((2, 11, 11, 2), np.float32), e_flux=rng.normal(size=(2, 11, 11, 1)).astype(np.float32))
+    out = dict(mean_r=x["r_flux"] * 0.9, mean_e=x["e_flux"])
+    got = panels(x, out)
+    assert [t for t, _ in got] == ["Rubin i #0", "Rubin i #1", "VIS #0", "VIS #1"]
+    assert got[0][1].shape == (9, 27) and got[0][1].dtype == np.uint8
+    assert np.all(got[2][1][:, 22:] == 127)          # a perfect VIS model: grey residual
+    assert panels(dict(x_in=x["r_in"]), dict(z_d2=np.zeros((2, 4)))) == []      # students: no image
+
+
+def test_a_training_logs_scalars_and_images_to_wandb_when_asked(cfg, monkeypatch):
+    # A real (two-step) C1 training with a stand-in wandb module, DP2_WANDB and DP2_WANDB_IMAGES on: scalars every
+    # update, the epoch logs and the Rubin / VIS panels reach the run.
+    import sys
+    import types
+    from dp2_cutouts.deblend import train
+    logged = []
+
+    class Run:
+        def log(self, d, step):
+            logged.append((step, d))
+
+        def finish(self):
+            pass
+
+    fake = types.SimpleNamespace(util=types.SimpleNamespace(generate_id=lambda: "img1"), init=lambda **kw: Run(),
+                                 Image=lambda arr, caption=None: ("image", arr.shape, caption))
+    monkeypatch.setitem(sys.modules, "wandb", fake)
+    monkeypatch.setenv("DP2_WANDB", "1")
+    monkeypatch.setenv("DP2_WANDB_IMAGES", "1")
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    rd = train.train(cfg, "c1", seed=11, max_steps=2)
+    assert (rd / "DONE").exists() and (rd / "wandb_id").read_text().strip() == "img1"
+    epoch = [d for _, d in logged if "epoch" in d]
+    assert epoch and "epoch/val_total_loss" in epoch[-1] and "epoch/grad_norm_q95" in epoch[-1]
+    assert {"images/Rubin i", "images/VIS"} <= set(epoch[-1])
+    assert epoch[-1]["images/Rubin i"][0][0] == "image" and len(epoch[-1]["images/VIS"]) == 4
