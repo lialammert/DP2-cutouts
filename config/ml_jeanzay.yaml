@@ -349,7 +349,8 @@ deblend:
          c2: dbl2_c2, c3: dbl2_c3}
   campaign:                        # self-advancing Slurm campaign (deblend/campaign.py, submit_deblend.sh)
     qos: qos_gpu_a100-dev          # QoS whose queued jobs are counted (overridden by --qos= in DP2_GPU_EXTRA)
-    max_queued: 8                  # the dev QoS refuses more than ~10 queued jobs per user, all projects together
+    max_queued: 32                 # jobs of the user in the GPU QoS before the campaign waits (the dev QoS refused
+                                   # more than ~10; qos_gpu-t3 on V100 does not, and other jobs of the user count)
     max_jobs_train: 30             # 2 h jobs per training before giving up (walltime kills, node failures)
     max_jobs_eval: 2
     gates: {k2: [k1], A: [k1, k2], B: [k1, k2], c2: [c1]}   # wait for dp2-ml deblend-approve (mode all only)
